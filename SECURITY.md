@@ -1,13 +1,14 @@
-# Security Policy
+<!-- BEGIN MICROSOFT SECURITY.MD V1.0.0 BLOCK -->
 
-Fabricator is a personal, best-effort project. Only the latest release is supported for security fixes.
+## Security
 
-## Reporting a vulnerability
+Microsoft takes the security of our software products and services seriously, which
+includes all source code repositories in our GitHub organizations.
 
-Please report vulnerabilities privately through GitHub's private vulnerability reporting / Security Advisories:
+**Please do not report security vulnerabilities through public GitHub issues.**
 
-https://github.com/spatney/rayfin-fabricator/security/advisories/new
+For security reporting information, locations, contact information, and policies,
+please review the latest guidance for Microsoft repositories at
+[https://aka.ms/SECURITY.md](https://aka.ms/SECURITY.md).
 
-If that is not available, contact the maintainer on GitHub: [@spatney](https://github.com/spatney).
-
-There is no formal SLA, but reports will be reviewed on a best-effort basis. Please do not open a public issue for unpatched security vulnerabilities.
+<!-- END MICROSOFT SECURITY.MD BLOCK -->
