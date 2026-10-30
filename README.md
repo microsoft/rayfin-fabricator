@@ -99,9 +99,36 @@ Telemetry is optional and stays off unless a connection string is built in; loca
 
 Contributions are welcome. Read [`CONTRIBUTING.md`](./CONTRIBUTING.md) and follow the [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md).
 
+Most contributions require you to agree to a Contributor License Agreement (CLA)
+declaring that you have the right to, and actually do, grant us the rights to use
+your contribution. For details, visit [Contributor License Agreements](https://cla.opensource.microsoft.com).
+
+When you submit a pull request, a CLA bot will automatically determine whether you
+need to provide a CLA and decorate the PR appropriately. Simply follow the
+instructions provided by the bot. You will only need to do this once across all
+repos using our CLA.
+
+This project has adopted the [Microsoft Open Source Code of Conduct](https://opensource.microsoft.com/codeofconduct/).
+For more information see the [Code of Conduct FAQ](https://opensource.microsoft.com/codeofconduct/faq/)
+or contact [opencode@microsoft.com](mailto:opencode@microsoft.com) with any additional
+questions or comments.
+
 ## Security
 
 Report security issues per [`SECURITY.md`](./SECURITY.md). Please don't open public issues for sensitive reports.
+
+## Support
+
+See [`SUPPORT.md`](./SUPPORT.md) for support guidance.
+
+## Trademarks
+
+This project may contain trademarks or logos for projects, products, or services.
+Authorized use of Microsoft trademarks or logos is subject to and must follow
+[Microsoft's Trademark & Brand Guidelines](https://www.microsoft.com/legal/intellectualproperty/trademarks/usage/general).
+Use of Microsoft trademarks or logos in modified versions of this project must not
+cause confusion or imply Microsoft sponsorship. Any use of third-party trademarks
+or logos are subject to those third-party's policies.
 
 ## License
 

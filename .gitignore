@@ -28,3 +28,10 @@ scripts/docs-screenshots/shots/
 
 # Personal drafts, such as social media posts (kept out of this repo)
 drafts/
+
+# Additional local secrets and IDE state from the target repository
+*.env
+*.pfx
+*.publishsettings
+*.pubxml
+.vs/
