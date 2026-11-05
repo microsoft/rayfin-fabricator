@@ -4,17 +4,18 @@ import type { DerivedAdvisor } from '../advisor/lifecycle'
 import { useSuppressPreview } from '../overlay'
 import { moveMenuFocus } from '../menuFocus'
 import { Codicon } from './icons'
+import { initials, markHue } from './gallery/model'
 import { displayPath } from './projectDisplay'
-import { hueOf } from './team/map/parts'
 
 /** The active project's content views, switched from the app bar's tabs. */
-export type ProjectView = 'build' | 'code' | 'blueprint' | 'advisor'
+export type ProjectView = 'build' | 'code' | 'blueprint' | 'advisor' | 'goals'
 
 const TABS: { id: ProjectView; label: string }[] = [
   { id: 'build', label: 'Build' },
   { id: 'code', label: 'Code' },
   { id: 'blueprint', label: 'Blueprint' },
-  { id: 'advisor', label: 'Advisor' }
+  { id: 'advisor', label: 'Advisor' },
+  { id: 'goals', label: 'Goals' }
 ]
 
 /** Other projects the switcher lists; Home lists every one. */
@@ -22,21 +23,26 @@ const SWITCH_LIMIT = 6
 
 const ITEM = '[role="menuitem"]'
 
-/** A project's initial on its own hue, the same as on Home's project list. */
+/** A project's letters on its own hue, the same as on Home's project list. */
 export function ProjectMark({ name, className }: { name: string; className: string }): JSX.Element {
   return (
-    <span className={className} aria-hidden="true" style={{ '--hue': hueOf(name) } as CSSProperties}>
-      {name.trim()[0]?.toUpperCase() ?? '?'}
+    <span
+      className={className}
+      aria-hidden="true"
+      style={{ '--hue': markHue(name) } as CSSProperties}
+    >
+      {initials(name)}
     </span>
   )
 }
 
 /**
- * The project's identity doubles as the way to switch: it opens a menu of the
- * most recently used projects, and All projects shows Home over the
- * still-running project. A project whose folder is missing can't be opened, so
- * it's left to Home, where it can be managed. The path lives in the tooltip
- * (the OS title bar shows the name).
+ * The project's identity doubles as the way around, as a split button: its name
+ * shows every project on Home over the still-running project, in one click, and
+ * its caret opens a menu of the most recently used projects to switch to (and
+ * All projects again, for the keyboard). A project whose folder is missing can't
+ * be opened, so it's left to Home, where it can be managed. The path lives in
+ * the tooltip (the OS title bar shows the name).
  */
 export function ProjectSwitcher({
   project,
@@ -110,21 +116,34 @@ export function ProjectSwitcher({
         moveMenuFocus(e, ITEM)
       }}
     >
-      <button
-        ref={triggerRef}
-        type="button"
-        className={`project-switcher${open ? ' is-open' : ''}`}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-controls={open ? menuId : undefined}
-        aria-label={`${project.name} — Switch projects`}
-        title={`${project.path}\nSwitch projects`}
-        onClick={() => setOpen((o) => !o)}
-      >
-        <ProjectMark name={project.name} className="project-switcher-mark" />
-        <span className="project-switcher-name">{project.name}</span>
-        <Codicon name="chevron-down" className="project-switcher-caret" />
-      </button>
+      <div className={`project-split${open ? ' is-open' : ''}`}>
+        <button
+          type="button"
+          className="project-switcher"
+          aria-label={`${project.name} — All projects`}
+          title={`${project.path}\nAll projects`}
+          onClick={() => {
+            setOpen(false)
+            onShowAll()
+          }}
+        >
+          <ProjectMark name={project.name} className="project-switcher-mark" />
+          <span className="project-switcher-name">{project.name}</span>
+        </button>
+        <button
+          ref={triggerRef}
+          type="button"
+          className="project-switcher-more"
+          aria-haspopup="menu"
+          aria-expanded={open}
+          aria-controls={open ? menuId : undefined}
+          aria-label={`${project.name} — Switch projects`}
+          title="Switch projects"
+          onClick={() => setOpen((o) => !o)}
+        >
+          <Codicon name="chevron-down" className="project-switcher-caret" />
+        </button>
+      </div>
 
       {open && (
         <div className="project-menu">
@@ -207,17 +226,26 @@ export function BackToProject({
 export function ProjectTabs({
   view,
   onChange,
-  advisorBadge
+  advisorBadge,
+  goals
 }: {
   view: ProjectView
   onChange: (view: ProjectView) => void
   /** Open high/medium Advisor issues, counted on the Advisor tab. */
   advisorBadge: DerivedAdvisor['badge']
+  /** The Goals tab (an experiment), shown when set: its checks failing on the app as it is now. */
+  goals?: { failing: number }
 }): JSX.Element {
   return (
     <div className="project-tabs" role="tablist" aria-label="Project views">
-      {TABS.map((tab) => {
-        const badge = tab.id === 'advisor' ? advisorBadge : null
+      {TABS.filter((tab) => tab.id !== 'goals' || goals).map((tab) => {
+        const badge =
+          tab.id === 'advisor'
+            ? advisorBadge
+            : tab.id === 'goals' && goals?.failing
+              ? { count: goals.failing, severity: 'high' as const }
+              : null
+        const what = tab.id === 'goals' ? 'failing check' : 'open issue'
         return (
           <button
             key={tab.id}
@@ -226,18 +254,22 @@ export function ProjectTabs({
             aria-selected={view === tab.id}
             onClick={() => onChange(tab.id)}
             title={
-              tab.id !== 'advisor'
-                ? undefined
-                : badge
+              tab.id === 'advisor'
+                ? badge
                   ? `Advisor — ${badge.count} open high or medium issue${badge.count === 1 ? '' : 's'}`
                   : 'Advisor'
+                : tab.id === 'goals'
+                  ? badge
+                    ? `Goals — ${badge.count} failing check${badge.count === 1 ? '' : 's'}`
+                    : 'Goals — what the app is for, checked before you publish'
+                  : undefined
             }
           >
             {tab.label}
             {badge && (
               <span
                 className={`project-tab-badge project-tab-badge--${badge.severity}`}
-                aria-label={`${badge.count} open ${badge.count === 1 ? 'issue' : 'issues'}`}
+                aria-label={`${badge.count} ${what}${badge.count === 1 ? '' : 's'}`}
               >
                 {badge.count}
               </span>

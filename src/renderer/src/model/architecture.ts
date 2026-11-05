@@ -450,7 +450,7 @@ export const SQL_CONNECTOR_TYPES: ReadonlySet<string> = new Set([
   'fabric-sqlanalytics'
 ])
 
-/** How the Fabric data view names a SQL connector's tables. */
+/** How the Fabric connections view names a SQL connector's tables. */
 export const sqlSourceKey = (connectorName: string): string => `sql:${connectorName}`
 
 export interface AudienceKind {
@@ -575,9 +575,9 @@ export interface SourceNode {
   functions: string[]
   /** Where it's declared, for "Open" actions. */
   files: string[]
-  /** `workspaceId:itemId` (lowercase) when the Fabric data view can draw the semantic model. */
+  /** `workspaceId:itemId` (lowercase) when the Fabric connections view can draw the semantic model. */
   semanticKey?: string
-  /** {@link sqlSourceKey} when the Fabric data view can draw its tables. */
+  /** {@link sqlSourceKey} when the Fabric connections view can draw its tables. */
   tablesKey?: string
   issues: Issue[]
 }
@@ -630,9 +630,9 @@ export interface AppArchitecture {
     /** Every secret, declared in rayfin.yml or read by the code, by name. */
     secrets: SecretEntry[]
   }
-  /** Semantic models the Fabric data view can draw (fabric.yaml + connectors). */
+  /** Semantic models the Fabric connections view can draw (fabric.yaml + connectors). */
   semanticModels: SemanticModelRef[]
-  /** SQL connectors whose tables the Fabric data view draws, in rayfin.yml order. */
+  /** SQL connectors whose tables the Fabric connections view draws, in rayfin.yml order. */
   sqlConnectors: ConnectorConfig[]
 }
 
@@ -786,7 +786,7 @@ export function buildArchitecture(input: ArchitectureInput): AppArchitecture | {
     if (access === 'unset') {
       issues.push({
         tone: 'info',
-        text: '`assetAccess` isn’t set. Choose `protected` or `public` before deploying.'
+        text: '`assetAccess` isn’t set. Choose `protected` or `public` before publishing.'
       })
     }
     services.push({
@@ -995,7 +995,7 @@ export function buildArchitecture(input: ArchitectureInput): AppArchitecture | {
     if (undeclared.length) {
       issues.push({
         tone: 'danger',
-        text: `${listOf(undeclared)} ${undeclared.length === 1 ? 'is' : 'are'} read as \`ctx.Secrets\` but not declared in rayfin.yml, which is a TypeScript error. Declare ${undeclared.length === 1 ? 'it' : 'them'} with \`rayfin secret set\`.`
+        text: `${listOf(undeclared)} ${undeclared.length === 1 ? 'is' : 'are'} read as \`ctx.Secrets\` but not declared in rayfin.yml, which is a TypeScript error. Add ${undeclared.length === 1 ? 'it' : 'them'} in Code → Secrets, which declares ${undeclared.length === 1 ? 'it' : 'them'} in rayfin.yml.`
       })
     }
     const legacy = secrets.filter((s) => s.legacy).map((s) => `\`${s.name}\``)
@@ -1166,8 +1166,8 @@ export function hardcodedSummary(keys: { file: string; name: string }[]): string
   const one = keys.length === 1
   return (
     `${one ? 'A key looks' : `${keys.length} keys look`} written into the code: ${where}. Anyone who can read the ` +
-    `code can use ${one ? 'it' : 'them'}. Store ${one ? 'it' : 'them'} with \`rayfin secret set\` and read ` +
-    `${one ? 'it' : 'them'} from \`ctx.Secrets\`.`
+    `code can use ${one ? 'it' : 'them'}. Store ${one ? 'it' : 'them'} as ${one ? 'a secret' : 'secrets'} in ` +
+    `Code → Secrets and read ${one ? 'it' : 'them'} from \`ctx.Secrets\`.`
   )
 }
 
@@ -1184,7 +1184,7 @@ function capitalize(text: string): string {
 /* ------------------------------ the app identity ------------------------------ */
 
 export interface AppIdentityInfo {
-  /** A team app's deploy service principal, or the Fabric account that deploys it. */
+  /** A team app's deploy service principal, or the Fabric account that publishes it. */
   kind: 'service-principal' | 'account' | 'unknown'
   who?: string
   clientId?: string
@@ -1195,7 +1195,7 @@ export interface AppIdentityInfo {
 /**
  * Whose credentials "the app" uses: the owner of the Fabric app item. A team
  * app is deployed (and so owned) by its workspace's service principal; a
- * personal app by the Fabric account it's deployed with.
+ * personal app by the Fabric account it's published with.
  */
 export function describeAppIdentity(opts: {
   team?: Pick<TeamManifest, 'deployIdentity' | 'previewIdentity'>

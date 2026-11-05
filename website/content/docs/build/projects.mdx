@@ -1,9 +1,9 @@
 ---
 title: "Create and manage projects"
-description: "Start a new Rayfin app, open an existing project, clone from GitHub, switch between projects, and rename or remove projects from Fabricator."
+description: "Start a new Rayfin app, open or clone an existing one, export a project for someone else or import one, switch between projects, and rename or remove them."
 ---
 
-Projects are the Rayfin apps Fabricator can open. From **Your projects**, you can start a new app, open a local folder, clone a GitHub repository, or return to a recent project.
+Projects are the Rayfin apps Fabricator can open. From **Your projects**, you can start a new app, open a local folder, clone a GitHub repository, import a project someone exported, or return to a recent project. Fabricator opens on **Your projects** when it starts, with the project you worked on last at the top. Each recent project shows a picture of its app, its folder, how its publish stands, and when you last opened it.
 
 ![Home, with the New project, Open folder and Clone from GitHub actions above a list of three recent projects.](/screenshots/home.webp)
 
@@ -15,18 +15,23 @@ A new Fabricator project starts from the Universal App, the default template tha
 2. Type a **Project name**. Use letters, numbers, spaces, hyphens and underscores; Fabricator says
    so under the name when it has other characters, and **Create project** stays off until you
    change it.
-3. Check the folder hint. Fabricator turns the name into a folder name and checks whether that folder already exists in your projects folder.
-4. If team workspaces are enabled, choose **Just me, on this computer** unless you are creating a team app.
-5. Select **Create project**.
+3. Check the folder hint. Fabricator turns the name into a folder name and checks whether that folder already exists where the project goes.
+4. If team workspaces are enabled, under **Where**, choose **Just me, on this computer** unless you are creating a team app. Its hint says "It runs on this computer. Publish it to a Fabric workspace whenever you’re ready."
+5. Under **Location**, keep your projects folder, or put this project in another folder: type the folder's full path, select **Browse…**, or select one of the folders under **Recent**. If the folder doesn't exist yet, Fabricator says "This folder doesn’t exist yet." Select **Create folder** to create it.
+6. Select **Create project**.
 
-![The New project screen with Contoso Expenses typed as the project name, the folder name below it, and the Create project button.](/screenshots/new-project.webp)
+![The New project screen with Contoso Expenses typed as the project name, the folder name below it, the Details and Publish steps, and the Create project button.](/screenshots/new-project.webp)
 
-After the project is ready, Fabricator moves to **Deploy your app**. Select **Deploy app** to publish the first deployment, or **Continue without deploying →** to open the workbench with chat locked until you deploy. See [Deploy to Microsoft Fabric](/docs/ship/deploy).
+Fabricator creates the project with the newest Rayfin release that it can run on this computer, and keeps the project's Rayfin packages on that release line, such as `~1.36.0` in `package.json`, so the app keeps running here. It installs the packages, starts the project's version history, and opens the project in the workbench with chat ready. The app runs on this computer from the start, and its data starts empty and stays here. Publish it to a Fabric workspace whenever you're ready. See [Develop on this computer](/docs/build/local-development) and [Publish to Microsoft Fabric](/docs/ship/deploy).
 
-While the project installs its packages, Ray, Fabricator's stingray, keeps you company with facts about Rayfin and tips for Fabricator. He also turns up when a cloned or opened project takes a while to install. To find out what else he does, and how to send him away, see [Ray](/docs/start/tour#ray).
+The first project you create on a Rayfin release takes the longest, because npm works out which versions of the app's packages to install and downloads them. Fabricator records those versions. A minute after you create a project, it also installs the packages for your next new project in the background, so that project's packages are ready in a few seconds. After a week, Fabricator works the versions out again, so new projects still get package updates. Community examples reuse recorded versions, but nothing is installed ahead of time for them. See [Packages for new projects](/docs/reference/files#packages-for-new-projects).
+
+While the project installs its packages, Ray, Fabricator's stingray, keeps you company with facts about Rayfin and tips for Fabricator. When the app is ready, he says "Your app is ready! It runs right here on your computer. Let’s build." He also turns up when a cloned or opened project takes a while to install. To find out what else he does, and how to send him away, see [Ray](/docs/start/tour#ray).
 
 > [!NOTE]
-> New local projects are saved under the **Workspace folder** in **Settings**. You can also use **Change folder** on **Your projects**.
+> New local projects are saved under the **Workspace folder** in **Settings**, unless you choose another **Location**. You can also use **Change folder** on **Your projects**.
+
+**Recent** lists the last five folders, other than your projects folder, that you created projects in. A project created in a folder that's already in a git repository, such as the apps folder of a repository that holds several apps, keeps its version history in that repository instead of starting its own.
 
 ## Start from a community example
 
@@ -41,27 +46,37 @@ Community examples are Rayfin templates, such as the `awesome-rayfin` gallery. U
 
 Use **Start from scratch instead** to return to the Universal App template.
 
+Fabricator keeps the example's Rayfin packages on the release line it can run on this computer, as it does for a new project, and opens it with chat ready. If the example asks for a Rayfin release outside that line, Fabricator keeps the example's own versions, and the app may not run correctly on this computer. While the project is created, **Show details** then shows "The template asks for `<package>` `<version>`, outside the Rayfin releases Fabricator runs locally (`<range>`), so it keeps its versions."
+
 ## Migrate a Power BI report
 
-With the **Migrate Power BI reports** experiment turned on in **Settings → Experiments**, Home also has **Migrate a Power BI report**. It creates a new app from a Power BI report: the app reads the report's semantic model live, and Copilot rebuilds the report's pages one at a time. See [Migrate a Power BI report](/docs/build/migrate-power-bi).
+With the **Migrate Power BI reports** experiment turned on in **Settings → Experiments**, Home also has **Migrate a Power BI report**. It creates a new app from a Power BI report: the app reads the report's semantic model live, and Copilot rebuilds the report's pages one at a time. Fabricator reads reports with your Azure sign-in, and asks you to sign in to Azure if you haven't. See [Migrate a Power BI report](/docs/build/migrate-power-bi).
+
+## Browse every app you can open in Fabric
+
+On **Your projects**, select **App gallery** to see every Rayfin app you can open in Fabric, including apps that aren't on this computer. It opens them in your browser, in Fabric, or in Fabricator when a project here publishes them. It finds them with your Azure sign-in. See [App gallery](/docs/build/app-gallery).
 
 ## Open an existing local project
 
 Use **Open folder** for a Rayfin project that is already on your computer.
 
-1. On **Your projects**, select **Open folder**.
+1. On **Your projects**, select **Open existing**, then **Open folder**.
 2. Pick the project folder.
 3. Fabricator opens the folder only if it contains `rayfin/rayfin.yml`.
 
-When a project opens, Fabricator makes sure the project dependencies are ready before it enables preview, deploy, model, and chat features.
+When a project opens, Fabricator makes sure the project's dependencies are installed before it enables the preview, publishing, Blueprint and chat. That includes the packages of the app's functions when they have their own `package.json`.
 
-If the folder isn't in a git repository yet, Fabricator starts one when the project opens, so History, **Restore this version** and automatic redeploys work. It keeps dependencies, build output, Python environments, local settings and secrets out of the history, and leaves your `.gitignore` as it is. The first snapshot in History is **Start version history**.
+If the folder isn't in a git repository yet, Fabricator starts one when the project opens, so History, **Restore this version** and publishing after each chat turn work. It keeps dependencies, build output, Python environments, local settings and secrets out of the history, and leaves your `.gitignore` as it is. The first snapshot in History is **Start version history**.
+
+A project you open doesn't wait for a publish: chat is ready once its dependencies are, and Fabricator starts the app on this computer. To share it, select **Publish** in the app bar to publish it to a Fabric workspace.
+
+An app that's already published runs on this computer too: its data here starts empty, and the published app and its data don't change. If the app needs something that runs only on Fabric, such as a Kusto connector, or is on a Rayfin version older than Fabricator runs on this computer, the preview uses the published app's backend instead. See [Develop on this computer](/docs/build/local-development).
 
 ## Clone from GitHub
 
 **Clone from GitHub** uses the GitHub CLI, `gh`. It is separate from the bundled Copilot engine.
 
-1. On **Your projects**, select **Clone from GitHub**.
+1. On **Your projects**, select **Open existing**, then **Clone from GitHub**.
 2. If `gh` is missing, install it from the prompt or choose **Install manually**.
 3. If you are not signed in to GitHub, select **Sign in with GitHub**. A terminal runs `gh auth login --web`.
 4. Choose a repository from **Your repositories**, or paste `owner/name` or a `https://github.com/owner/name` link.
@@ -69,16 +84,54 @@ If the folder isn't in a git repository yet, Fabricator starts one when the proj
 
 Fabricator clones the repository into your workspace folder, verifies that it has `rayfin/rayfin.yml`, runs `npm install`, and opens it. If the repository is not a Rayfin project, Fabricator removes the fresh clone and reports the problem.
 
+## Import a project
+
+When someone exports a project for you, they send you a `.fabricator` file. Import it to carry on where they left off.
+
+1. Double-click the `.fabricator` file. Or, on **Your projects**, select **Open existing**, then **Import a project**, and pick the file.
+2. In **Import project**, check what the file brings in: who exported it, the app's files, its version history if it came with it, where it's published, and the secrets its functions use.
+3. To have the file checked for security risks first, under **Check for security risks**, select **Check**, then wait for the result. See [Check a project or app for security risks](/docs/build/security-check).
+4. Select **Import**.
+
+Fabricator unpacks the project into a new folder in your workspace folder, named after the project, and opens it. As with any project you open, it installs the project's packages and runs the app on this computer, so import projects only from people you trust.
+
+If the file says where the app is published, publishing updates that same app. To publish, you need to be a Contributor, Member or Admin of its Fabric workspace, so ask the person who exported it to add you. The app also runs on this computer, with its own empty data. Secret values never come with an export: to run the app's functions here, set your own in **Code → Secrets**. See [Secrets](/docs/build/secrets).
+
+The Fabricator installer has your computer open `.fabricator` files with Fabricator. If Fabricator is already running, the file opens in it. If you've just installed Fabricator, it imports the file once you finish setup.
+
+**Import a project** also imports a .zip of a Rayfin project, as long as the project is at the top of the .zip or in the one folder at its top.
+
+## Find your way around recent projects
+
+**Recent projects** lists your projects, the ones you opened most recently first, grouped under **Today**, **This week** and **Earlier**. Projects you pin come first, under **Pinned**. The list shows six projects besides the pinned ones; select **Show all** to see the rest.
+
+Each project shows:
+
+- **A picture of its app.** Fabricator draws it from the preview once the app's page has loaded, then again when it's more than half an hour old, and after each publish. Until there's one, the project shows its first letters on its own color, the same as in the app bar.
+- **Its folder**, or for a team app, its team workspace.
+- **How its publish stands**, as a small dot and a word: **Published 2 days ago**, **Changes not published** when the folder changed since the last publish, **Publish failed** (point at it to see why), **Publishing…** or **Not published**.
+- **Open now**, **Running locally** or **Missing** beside its name, when the project is open, its app runs on this computer, or its folder is gone.
+- **Its Rayfin version, with Update**, only when a newer Rayfin release is out for it, such as `Rayfin 1.35.1 · Update`. Select **Update** to open the project and have Copilot update its Rayfin packages, as **Update with Copilot** does. See [Keep Rayfin up to date](/docs/ship/rayfin-versions).
+- **When you last opened it**, such as "Opened 3 hours ago", on the right.
+
+Point at a project to see its actions in place of when you opened it: **Open app** and **Open in Fabric** once it's published, **Show in Explorer** (**Show in Finder** on macOS), **Pin to the top** or **Unpin**, and **Manage**. Right-click a project for the same actions, and also **Copy folder path** and **Update Rayfin** when there's an update.
+
+To find a project when you have more than six, type in **Filter projects** above the list, or press `/` to get there. It matches project names, folders and team workspace names.
+
+With the keyboard, press `↑` and `↓` to move between projects and `Enter` to open one. Press `→` and `←` to move between a project and its actions. Press the menu key or `Shift+F10` for the right-click menu.
+
 ## Switch between projects
 
 While a project is open, you can switch to another one from the app bar.
 
-1. In the app bar, select the project name.
+1. In the app bar, select the arrow beside the project name.
 2. Under **Recent projects**, select the project you want to open.
 
 The menu lists up to six of your most recently opened projects. A project whose folder is missing isn't listed there; it appears on **Your projects** marked **Missing**.
 
-To see every project, select **All projects**. The project you had open keeps running behind **Your projects**, and the `Back to <project name>` button returns you to it.
+To see every project, select the project name itself, or **All projects** in the menu. The project you had open keeps running behind **Your projects**, and the `Back to <project name>` button returns you to it.
+
+Fabricator runs at most two apps on this computer at once: the project you have open and the one you had open before it. When you open a third, it stops the app you used longest ago, and starts it again when you go back to it.
 
 ## Manage recent projects
 
@@ -87,23 +140,46 @@ Each recent project has a **Manage** button.
 ### Rename a project
 
 1. Select **Manage** on the project card.
-2. Under **Project details**, edit **Project name**.
-3. Select **Save name**.
+2. Edit **Project name**.
+3. Select **Save**.
 
 Renaming updates Fabricator's project list and the `name:` field in `rayfin/rayfin.yml`.
 
+### Export a project
+
+When someone else is taking a project over, export it: Fabricator saves it as a `.fabricator` file they import into their own Fabricator, with what they need to carry on. If they only want to use the app, you can export it as an app instead, with the **Export as an app** experiment; see [Share an app as a file](/docs/ship/app-files).
+
+1. Select **Manage** on the project card.
+2. Next to **Export project**, select **Export**.
+3. With the **Export as an app** experiment on, select **Project**.
+4. Choose what goes in besides **App code**, which is always included:
+   - **Version history**: every saved version, so **History** and **Restore this version** work for them too.
+   - **Published app**: where the app is published, so their publishes update the same app. Clear it to have them publish it as a new app.
+5. Select **Export…**, then choose where to save the file.
+6. Send them the file, for example by email, chat or a shared folder.
+
+The file holds what the project's version history keeps, so installed packages and build output stay out: Fabricator installs them again when the project is imported. It never includes your chat, secret values, files that may hold them such as `.env` files, the app's data on this computer, or your sign-ins, and the dialog names any file it left out because it may hold a secret. The version history still names who saved each version, but leaves your git settings and sign-ins behind, so their changes aren't saved under your name.
+
+When the file is saved, **What happens next** says how they import it. If they don't have Fabricator yet, select **Copy the install link** and send them the link too. When the app is published, it also reminds you to give them access to its Fabric workspace: to publish, they need to be a Contributor, Member or Admin. Select **Open the workspace** to open it in Fabric, then add them in its **Manage access**.
+
+While Copilot is working on the project or it's publishing, the dialog waits, so the file never holds a half-finished change. To stop an export while it's being written, select **Stop**. A team app doesn't offer **Export project**: invite people to its team workspace instead.
+
 ### Remove a project from the list
 
-Use **Remove from recent projects** when you want Fabricator to forget the entry without changing files, deployments, or data. You can open the folder again later.
+To make Fabricator forget a project without changing its files, published apps, or data, select **Manage**, then select **Remove** next to **Recent projects**. If the app is running on this computer, Fabricator stops it. You can open the folder again later.
 
 ### Move a local project to trash
 
 1. Select **Manage**.
-2. Under **Remove project**, select **Review removal options...**.
-3. Choose whether to also delete the deployed Fabric app, if the project has one.
-4. Select **Move folder to trash** or **Move folder to trash and delete Fabric app**.
+2. Next to **Remove project**, select **Review options**.
+3. **Local project folder** is always selected. If the project has a published app, **Published Fabric app** is selected too; clear it to keep the app.
+4. Select **Move folder to trash** or **Trash folder & delete app**.
 
-Moving the folder uses your system trash, so you can restore it there. If you also delete the Fabric app, Fabricator removes the app and its data from the Fabric workspace. The Fabric workspace itself is not deleted.
+Moving the folder uses your system trash, so you can restore it there. An app that ran on this computer keeps its local data in the folder, so that goes to the trash too. If you also delete the published app, Fabricator removes it and its data from its Fabric workspace, and that can't be undone. The Fabric workspace itself is kept.
+
+The removal runs in the background, so you can keep working and remove other projects at the same time. If the project is open, it closes first. Until the removal finishes, the project's row on **Your projects** shows **Removing** and what's happening, such as how many files are moving to the trash. When it's done, the project leaves the list, and a notification says its folder is in your system trash.
+
+If a removal can't finish, the project stays, and its row shows **Not removed** with the reason. For example, the folder can't move to the trash while another program, such as an editor or a terminal, has one of its files open. Close that program, then select **Try again**. To stop trying, select **Keep**.
 
 ## Change where new projects are saved
 
@@ -114,10 +190,4 @@ The current projects folder appears at the bottom of **Your projects** and in **
 3. Select **Change…**.
 4. Pick a folder.
 
-Existing projects stay where they are. New projects and cloned repositories use the new folder.
-
-## If a first deploy would replace an app
-
-Before the first deploy, Fabricator checks the selected Fabric workspace for an app with the same name. If it finds one, you see a warning like "Sales apps already has an app named “Notes”. Deploying here would replace it, so pick another workspace."
-
-Choose another workspace, or select **Replace it anyway** if you intend to deploy over that app. For details, see [Deploy to Microsoft Fabric](/docs/ship/deploy).
+Existing projects stay where they are. New projects and cloned repositories use the new folder. To put one new project somewhere else, use **Location** when you create it.

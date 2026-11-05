@@ -1,16 +1,20 @@
-import { useEffect, useRef, useState, type JSX, type KeyboardEvent } from 'react'
+import { useEffect, useId, useRef, useState, type JSX, type KeyboardEvent } from 'react'
 import { createPortal } from 'react-dom'
+import type { ChatPluginId, McpServer } from '@shared/ipc'
 import { DATA_KINDS, type DataKind } from '@renderer/fabricData'
 import { moveMenuFocus } from '@renderer/menuFocus'
 import { menuLayout, type MenuLayout } from '@renderer/menuLayout'
 import { useSuppressPreview } from '@renderer/overlay'
 import { Codicon, ImageIcon } from '../icons'
+import { serverSummary } from '../mcp/mcpConfig'
+import { mcpPluginId, type ChatPlugin } from './plugins'
 import fabricSvg from '../../assets/brands/fabric.svg'
 import '../models/modelPicker.css'
 
 const MAIN_WIDTH = 236
 const FLY_WIDTH = 236
 const GAP = 6
+const PLUGINS_WIDTH = 340
 
 /** What each kind of Fabric data lets the app do, in a word or two. */
 const DATA_HINT: Record<DataKind, string> = {
@@ -21,27 +25,27 @@ const DATA_HINT: Record<DataKind, string> = {
 }
 
 /**
- * The composer's "+" menu, after the model picker: an image, a file, or Fabric
- * data, whose kinds open in a list beside it. Each kind opens the data picker on
- * that kind; "Browse all" opens it on every kind.
+ * The composer's "+" menu, after the model picker: an image, files and folders
+ * anywhere on this computer (one system dialog picks both), or Fabric data,
+ * whose kinds open in a list beside it. Each kind opens the data picker on that
+ * kind; "Browse all" opens it on every kind. Typing @ in the message box finds
+ * the project's own files.
  */
 export function AddMenu({
-  locked,
   attaching,
   imageNote,
   onImage,
   onConnectData,
-  onReferenceFile
+  onBrowse
 }: {
-  /** The composer is locked (the app's first deploy is running). */
-  locked: boolean
   attaching: boolean
   /** Why images can't be added (the chosen model can't read them). */
   imageNote?: string
   onImage: () => void
   /** Open the data picker on one kind of data, or on every kind. */
   onConnectData: (kind?: DataKind) => void
-  onReferenceFile: () => void
+  /** Pick files and folders on this computer with the system's file dialog. */
+  onBrowse: () => void
 }): JSX.Element {
   const [open, setOpen] = useState(false)
   const [fly, setFly] = useState(false)
@@ -145,7 +149,6 @@ export function AddMenu({
         type="button"
         className={`composer-icon-btn${open ? ' is-open' : ''}`}
         onClick={() => (open ? closeMenu(false) : openMenu())}
-        disabled={locked}
         aria-haspopup="menu"
         aria-expanded={open}
         aria-label="Add images, files or data"
@@ -182,12 +185,14 @@ export function AddMenu({
                 </span>
                 {!imageNote && <span className="am-hint">Or paste</span>}
               </button>
-              <button type="button" role="menuitem" className="mp-item" onClick={() => pick(onReferenceFile)}>
-                <Codicon name="mention" className="am-icon" />
-                <span className="mp-item-label am-label">File</span>
-                <span className="am-hint">
-                  <kbd>@</kbd>
-                </span>
+              <button
+                type="button"
+                role="menuitem"
+                className="mp-item"
+                onClick={() => pick(onBrowse)}
+              >
+                <Codicon name="files" className="am-icon" />
+                <span className="mp-item-label am-label">Files and folders…</span>
               </button>
               <div className="mp-sep" role="separator" />
               <button
@@ -238,6 +243,282 @@ export function AddMenu({
                 </button>
               </div>
             )}
+          </div>,
+          document.body
+        )}
+    </div>
+  )
+}
+
+/**
+ * The composer's plugins, beside the "+" menu: services chat can look things up
+ * with while it builds, such as Fabric IQ, and, with the MCP servers
+ * experiment, the MCP servers you added. Each is off until turned on, and
+ * changes from the chat's next message; the trigger names the ones that are on.
+ */
+export function PluginsMenu({
+  plugins,
+  servers,
+  on,
+  disabled = false,
+  onToggle,
+  onManageServers,
+  onLearnMore
+}: {
+  /** The plugins chat offers. */
+  plugins: readonly ChatPlugin[]
+  /** The MCP servers you added, while the MCP servers experiment is on. */
+  servers?: readonly McpServer[]
+  /** The ids of the plugins on in this chat. */
+  on: readonly string[]
+  /** While the assistant is working: plugins change between messages. */
+  disabled?: boolean
+  onToggle: (plugin: ChatPluginId, on: boolean) => void
+  /** Open the MCP servers dialog, adding a server when `add` is set. */
+  onManageServers?: (add: boolean) => void
+  onLearnMore?: () => void
+}): JSX.Element {
+  const [open, setOpen] = useState(false)
+  const [layout, setLayout] = useState<MenuLayout>({ side: 'right', style: {} })
+  const rootRef = useRef<HTMLDivElement>(null)
+  const popRef = useRef<HTMLDivElement>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const panelRef = useRef<HTMLDivElement>(null)
+  // Wider than the narrowest chat pane, so it can reach over the preview.
+  useSuppressPreview(open)
+
+  const onNames = [
+    ...plugins.filter((p) => on.includes(p.id)).map((p) => p.name),
+    ...(servers ?? []).filter((s) => on.includes(mcpPluginId(s.id))).map((s) => s.name)
+  ]
+  const names = onNames.join(', ')
+  const enabled = onNames.length
+  const titleId = useId()
+
+  useEffect(() => {
+    if (!open) return
+    const close = (event: MouseEvent): void => {
+      const target = event.target as Node
+      if (!rootRef.current?.contains(target) && !popRef.current?.contains(target)) setOpen(false)
+    }
+    const resize = (): void => setOpen(false)
+    window.addEventListener('mousedown', close)
+    window.addEventListener('resize', resize)
+    return () => {
+      window.removeEventListener('mousedown', close)
+      window.removeEventListener('resize', resize)
+    }
+  }, [open])
+
+  useEffect(() => {
+    if (!open) return
+    const id = requestAnimationFrame(() =>
+      panelRef.current?.querySelector<HTMLElement>('[role^="menuitem"]:not(:disabled)')?.focus()
+    )
+    return () => cancelAnimationFrame(id)
+  }, [open])
+
+  useEffect(() => {
+    if (disabled) setOpen(false)
+  }, [disabled])
+
+  function openMenu(): void {
+    const r = triggerRef.current?.getBoundingClientRect()
+    if (r) setLayout(menuLayout(r, 'up', PLUGINS_WIDTH + 12))
+    setOpen(true)
+  }
+
+  function closeMenu(focusTrigger = true): void {
+    setOpen(false)
+    if (focusTrigger) requestAnimationFrame(() => triggerRef.current?.focus())
+  }
+
+  return (
+    <div
+      ref={rootRef}
+      className="composer-menu plugins-menu"
+      onKeyDown={(event) => {
+        if (event.key !== 'Escape' || !open) return
+        event.preventDefault()
+        event.stopPropagation()
+        closeMenu()
+      }}
+    >
+      <button
+        ref={triggerRef}
+        type="button"
+        className={`${names ? 'composer-pill pl-pill' : 'composer-icon-btn'}${open ? ' is-open' : ''}`}
+        onClick={() => (open ? closeMenu(false) : openMenu())}
+        disabled={disabled}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={names ? `Plugins: ${names}` : 'Plugins'}
+        title={
+          disabled
+            ? 'Plugins can’t be changed while the assistant is working'
+            : names
+              ? `Plugins: ${names}`
+              : 'Plugins'
+        }
+      >
+        <Codicon name="plug" />
+        {names && <span className="composer-pill-label pl-pill-label">{names}</span>}
+        {names && (
+          <span className="pl-pill-count" aria-hidden="true">
+            {enabled}
+          </span>
+        )}
+      </button>
+      {open &&
+        createPortal(
+          <div
+            ref={popRef}
+            className={`mp-pop mp-pop--up mp-pop--${layout.side}`}
+            style={layout.style}
+          >
+            <div
+              ref={panelRef}
+              className="mp-panel pl-panel"
+              role="menu"
+              aria-labelledby={titleId}
+              onKeyDown={(event) => moveMenuFocus(event, '[role^="menuitem"]')}
+            >
+              <div className="pl-head">
+                <div className="pl-head-text">
+                  <span className="pl-title" id={titleId}>
+                    Plugins &amp; tools
+                  </span>
+                  <span className="pl-sub">Choose what this chat can use.</span>
+                </div>
+                <span className="pl-count">{enabled} enabled</span>
+              </div>
+
+              <div className="pl-section" aria-hidden="true">
+                <span className="pl-section-title">Plugins</span>
+                <span className="pl-section-note">
+                  <Codicon name="workspace-trusted" />
+                  Read-only
+                </span>
+              </div>
+              {plugins.map((p) => {
+                const isOn = on.includes(p.id)
+                return (
+                  <button
+                    key={p.id}
+                    type="button"
+                    role="menuitemcheckbox"
+                    aria-checked={isOn}
+                    className="mp-item pl-item"
+                    onClick={() => onToggle(p.id, !isOn)}
+                  >
+                    <span className="pl-logo" aria-hidden="true">
+                      <img src={p.logo} alt="" draggable={false} />
+                    </span>
+                    <span className="mp-item-text">
+                      <span className="mp-item-label">
+                        {p.name}
+                        {p.experiment && <span className="pl-badge">Experiment</span>}
+                      </span>
+                      <span className="mp-item-desc">{p.description}</span>
+                    </span>
+                    <span
+                      className={`switch switch--sm${isOn ? ' switch--on' : ''}`}
+                      aria-hidden="true"
+                    >
+                      <span className="switch-knob" />
+                    </span>
+                  </button>
+                )
+              })}
+
+              {servers && (
+                <>
+                  <div className="mp-sep" role="separator" />
+                  <div className="pl-section" aria-hidden="true">
+                    <span className="pl-section-title">
+                      MCP servers
+                      <span className="pl-badge">Experiment</span>
+                    </span>
+                  </div>
+                  {servers.map((s) => {
+                    const id = mcpPluginId(s.id)
+                    const isOn = on.includes(id)
+                    const summary = serverSummary(s)
+                    return (
+                      <button
+                        key={id}
+                        type="button"
+                        role="menuitemcheckbox"
+                        aria-checked={isOn}
+                        className="mp-item pl-item pl-item--mcp"
+                        title={summary}
+                        onClick={() => onToggle(id, !isOn)}
+                      >
+                        <span className="pl-logo pl-logo--tile" aria-hidden="true">
+                          <Codicon name={s.transport === 'stdio' ? 'terminal' : 'globe'} />
+                        </span>
+                        <span className="mp-item-text">
+                          <span className="mp-item-label">
+                            {s.name}
+                            {s.readOnly && <span className="pl-badge">Read-only</span>}
+                          </span>
+                          <span className="mp-item-desc">{summary}</span>
+                        </span>
+                        <span
+                          className={`switch switch--sm${isOn ? ' switch--on' : ''}`}
+                          aria-hidden="true"
+                        >
+                          <span className="switch-knob" />
+                        </span>
+                      </button>
+                    )
+                  })}
+                  {servers.length > 0 && (
+                    <p className="pl-note">
+                      <Codicon name="info" />
+                      An MCP server can do whatever its tools do.
+                    </p>
+                  )}
+                  {onManageServers && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className="mp-item pl-manage"
+                      onClick={() => {
+                        closeMenu(false)
+                        onManageServers(servers.length === 0)
+                      }}
+                    >
+                      <Codicon name={servers.length ? 'settings-gear' : 'add'} />
+                      <span className="mp-item-label">
+                        {servers.length ? 'Manage MCP servers…' : 'Add an MCP server…'}
+                      </span>
+                      <Codicon name="chevron-right" className="pl-manage-caret" />
+                    </button>
+                  )}
+                </>
+              )}
+
+              <div className="mp-sep" role="separator" />
+              <p className="pl-note">
+                <Codicon name="info" />
+                Chat uses these only when a request needs them.
+              </p>
+              {onLearnMore && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="mp-item pl-learn"
+                  onClick={() => {
+                    closeMenu(false)
+                    onLearnMore()
+                  }}
+                >
+                  <Codicon name="book" />
+                  <span className="mp-item-label">Learn about plugins</span>
+                </button>
+              )}
+            </div>
           </div>,
           document.body
         )}

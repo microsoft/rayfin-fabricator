@@ -10,7 +10,7 @@ function baseProps(): ComponentProps<typeof ManageProjectModal> {
     project: makeProject('p1', { name: 'Sales' }),
     onRename: vi.fn(() => Promise.resolve(null)),
     onRemoveFromList: vi.fn(),
-    onMoveToTrash: vi.fn(),
+    onReviewRemoval: vi.fn(),
     onClose: vi.fn()
   }
 }
@@ -31,7 +31,7 @@ describe('ManageProjectModal', () => {
     renderModal(props)
 
     fireEvent.change(screen.getByLabelText('Project name'), { target: { value: '  Revenue  ' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Save name' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
 
     await waitFor(() => expect(props.onRename).toHaveBeenCalledWith(props.project, 'Revenue'))
     expect(props.onClose).toHaveBeenCalledTimes(1)
@@ -43,7 +43,7 @@ describe('ManageProjectModal', () => {
     renderModal(props)
 
     fireEvent.change(screen.getByLabelText('Project name'), { target: { value: 'Revenue' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Save name' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
 
     expect((await screen.findByRole('alert')).textContent).toContain('That name is unavailable.')
     expect(props.onClose).not.toHaveBeenCalled()
@@ -53,33 +53,70 @@ describe('ManageProjectModal', () => {
     const props = baseProps()
     renderModal(props)
 
-    expect(screen.getByText(/without changing the local folder or any Fabric app/i)).toBeTruthy()
+    expect(
+      screen.getByText('Hide from your recent list. Files and the Fabric app stay intact.')
+    ).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: 'Remove from recent projects' }))
 
     expect(props.onClose).toHaveBeenCalledTimes(1)
     expect(props.onRemoveFromList).toHaveBeenCalledWith(props.project)
-    expect(props.onMoveToTrash).not.toHaveBeenCalled()
+    expect(props.onReviewRemoval).not.toHaveBeenCalled()
   })
 
-  it('explains the separate local and deployed-app removal options before opening that flow', () => {
+  it('says removal trashes the folder and offers the published app before opening that flow', () => {
     const props = baseProps()
     renderModal(props)
 
-    expect(screen.getByText(/two independent removal options/i)).toBeTruthy()
-    expect(screen.getByText(/Fabric workspace is never deleted/i)).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: 'Review removal options...' }))
+    expect(screen.getByText('Trash the folder, and optionally its published app.')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Review options' }))
 
     expect(props.onClose).toHaveBeenCalledTimes(1)
-    expect(props.onMoveToTrash).toHaveBeenCalledWith(props.project)
+    expect(props.onReviewRemoval).toHaveBeenCalledWith(props.project)
     expect(props.onRemoveFromList).not.toHaveBeenCalled()
   })
 
-  it('does not imply that an undeployed project has Fabric cleanup to perform', () => {
+  it('does not imply that an unpublished project has Fabric cleanup to perform', () => {
     const props = baseProps()
     props.project = makeProject('p1', { lastDeploy: undefined })
     renderModal(props)
 
-    expect(screen.getByText(/no Fabric app will be changed/i)).toBeTruthy()
-    expect(screen.queryByText(/two independent removal options/i)).toBeNull()
+    expect(screen.getByText('Trash the folder. No Fabric app is changed.')).toBeTruthy()
+    expect(screen.getByText('Hide from your recent list. Files stay intact.')).toBeTruthy()
+    expect(screen.queryByText(/published app/i)).toBeNull()
+  })
+
+  it('only offers to forget a project whose folder is gone', () => {
+    const props = baseProps()
+    props.project = makeProject('p1', { missing: true })
+    props.onExport = vi.fn()
+    renderModal(props)
+
+    expect(screen.getByText(/can’t find this project on this computer/)).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Remove from recent projects' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Review options' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Export' })).toBeNull()
+  })
+
+  it('opens Export project for a local project', () => {
+    const props = baseProps()
+    props.onExport = vi.fn()
+    renderModal(props)
+
+    expect(screen.getByText('Save a copy someone else can import into Fabricator.')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Export' }))
+
+    expect(props.onClose).toHaveBeenCalledTimes(1)
+    expect(props.onExport).toHaveBeenCalledWith(props.project)
+  })
+
+  it('leaves a team app to its team workspace instead of an export', () => {
+    const props = baseProps()
+    props.onExport = vi.fn()
+    props.project = makeProject('p1', {
+      team: { workspaceId: 'w1', folder: 'sales', worktree: 'C:/team/sales' }
+    })
+    renderModal(props)
+
+    expect(screen.queryByRole('button', { name: 'Export' })).toBeNull()
   })
 })

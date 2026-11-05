@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Rayfin Fabricator",
-  "version": "1.24.0",
+  "version": "1.47.1",
   "identifier": "com.rayfin.fabricator",
   "build": {
     "frontendDist": "../dist",
@@ -13,6 +13,7 @@
     "windows": [
       {
         "label": "main",
+        "create": false,
         "title": "Fabricator",
         "width": 1360,
         "height": 880,
@@ -37,8 +38,35 @@
     "category": "DeveloperTool",
     "copyright": "Copyright © 2026 Sachin Patney",
     "resources": {
-      "../resources/telemetry*.json": "resources/"
+      "../resources/telemetry*.json": "resources/",
+      "icons/project-file.ico": "resources/project-file.ico",
+      "icons/app-file.ico": "resources/app-file.ico"
     },
+    "fileAssociations": [
+      {
+        "ext": ["fabricator"],
+        "name": "RayfinFabricator.Project",
+        "description": "Fabricator project",
+        "role": "Editor",
+        "rank": "Owner",
+        "exportedType": {
+          "identifier": "com.rayfin.fabricator.project",
+          "conformsTo": ["public.data"]
+        }
+      },
+      {
+        "ext": ["rayfin"],
+        "name": "RayfinFabricator.App",
+        "description": "Rayfin app",
+        "role": "Viewer",
+        "rank": "Owner",
+        "exportedType": {
+          "identifier": "com.rayfin.fabricator.app",
+          "conformsTo": ["public.data"]
+        }
+      }
+    ],
+    "externalBin": ["binaries/rayfin-local"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -48,11 +76,16 @@
     ],
     "windows": {
       "nsis": {
-        "installMode": "currentUser"
+        "installMode": "currentUser",
+        "installerHooks": "./windows/installer-hooks.nsh"
       }
     },
     "macOS": {
-      "minimumSystemVersion": "11.0"
+      "minimumSystemVersion": "11.0",
+      "files": {
+        "Resources/project-file.icns": "icons/project-file.icns",
+        "Resources/app-file.icns": "icons/app-file.icns"
+      }
     }
   },
   "plugins": {

@@ -191,10 +191,10 @@ runHelper(main)
 /// One item passed to the delete helper (serialized to the items JSON file).
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct DeleteItem {
-  workspace_id: String,
-  item_id: String,
-  name: String,
+pub(crate) struct DeleteItem {
+  pub(crate) workspace_id: String,
+  pub(crate) item_id: String,
+  pub(crate) name: String,
 }
 
 /// Helper executed by the system `node` to list the Rayfin apps (`AppBackend`
@@ -214,18 +214,34 @@ async function main() {
 runHelper(main)
 "#;
 
+/// Whether this project already publishes to `workspace_id`: the CLI then keeps
+/// redeploying its own recorded app there.
+fn deploys_to(own: &[FabricDeployment], workspace_id: &str) -> bool {
+  own.iter().any(|d| d.workspace_id.as_deref().is_some_and(|w| w.eq_ignore_ascii_case(workspace_id)))
+}
+
 /// The existing app a deploy into `workspace_id` would replace: a Rayfin app
 /// there with the project's item name (matched like the CLI does, ignoring
 /// case), unless this project already deploys to that workspace, in which case
 /// the CLI reuses the project's own recorded item.
 fn replaced_app(item_name: &str, workspace_id: &str, own: &[FabricDeployment], existing: &[String]) -> Option<String> {
-  let deploys_there = own
-    .iter()
-    .any(|d| d.workspace_id.as_deref().is_some_and(|w| w.eq_ignore_ascii_case(workspace_id)));
-  if deploys_there {
+  if deploys_to(own, workspace_id) {
     return None;
   }
   existing.iter().find(|n| n.eq_ignore_ascii_case(item_name)).cloned()
+}
+
+/// The Rayfin apps in `workspace_id` the project could publish into instead of
+/// a new app, by name, A to Z: none when it already publishes there, or when
+/// its Rayfin CLI can't publish to an app by name (`can_name`).
+fn choosable_apps(workspace_id: &str, own: &[FabricDeployment], existing: &[String], can_name: bool) -> Vec<String> {
+  if !can_name || deploys_to(own, workspace_id) {
+    return Vec::new();
+  }
+  let mut apps: Vec<String> = existing.iter().map(|n| n.trim()).filter(|n| !n.is_empty()).map(String::from).collect();
+  apps.sort_by_key(|n| n.to_lowercase());
+  apps.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+  apps
 }
 
 /// The Fabric item name a project deploys as on its first deploy to a
@@ -249,7 +265,7 @@ async fn app_items_in(project_dir: &Path, workspace_id: &str) -> Result<Vec<Stri
   let script_path = write_helper("fabric-app-items.mjs", APP_ITEMS_HELPER_SOURCE)
     .map_err(|e| format!("Could not prepare the Fabric app lookup: {e}"))?;
   let (script, auth) = (script_path.to_string_lossy().to_string(), auth_path.to_string_lossy().to_string());
-  let res = exec::run("node", &[&script, &auth, FABRIC_API_BASE, workspace_id], RunOptions::timeout(60_000)).await;
+  let res = fabric_auth::run_helper(&[&script, &auth, FABRIC_API_BASE, workspace_id], RunOptions::timeout(60_000)).await;
   let parsed: AppItems = fabric_auth::parse_helper_output(&res)?;
   if parsed.ok {
     Ok(parsed.names)
@@ -260,8 +276,9 @@ async fn app_items_in(project_dir: &Path, workspace_id: &str) -> Result<Vec<Stri
 
 /// Before the active project's first deploy into a workspace, find a same-named
 /// Rayfin app there. `rayfin up -y` (how Fabricator deploys) would silently reuse
-/// it and overwrite its configuration. Best-effort: a failed lookup reports an
-/// error but never blocks the deploy by itself.
+/// it and overwrite its configuration. Also lists the workspace's Rayfin apps
+/// the project could publish into instead. Best-effort: a failed lookup reports
+/// an error but never blocks the deploy by itself.
 #[tauri::command]
 pub async fn fabric_check_deploy_target(workspace_id: String) -> DeployTargetCheck {
   let Some(project) = store::active_project() else {
@@ -279,21 +296,86 @@ pub async fn fabric_check_deploy_target(workspace_id: String) -> DeployTargetChe
     app_items_in(&dir, &workspace_id)
   );
   match existing {
-    Ok(existing) => DeployTargetCheck {
-      conflict: replaced_app(&item_name, &workspace_id, &own.unwrap_or_default(), &existing),
-      item_name: Some(item_name),
-      error: None,
-    },
-    Err(error) => DeployTargetCheck { item_name: Some(item_name), conflict: None, error: Some(error) },
+    Ok(existing) => {
+      let own = own.unwrap_or_default();
+      DeployTargetCheck {
+        conflict: replaced_app(&item_name, &workspace_id, &own, &existing),
+        apps: choosable_apps(&workspace_id, &own, &existing, crate::commands::deploy::names_its_app(&dir)),
+        item_name: Some(item_name),
+        error: None,
+      }
+    }
+    Err(error) => DeployTargetCheck { item_name: Some(item_name), error: Some(error), ..Default::default() },
+  }
+}
+
+/// Helper executed by the system `node` to read one workspace (Get Workspace,
+/// which any workspace viewer may call). argv: <authModulePath> <apiBase> <workspaceId>.
+const WORKSPACE_HELPER_SOURCE: &str = r#"import { makeRayfinTokens, makeApi, apiError, runHelper } from './fabric_auth_helper.mjs'
+
+async function main() {
+  const [authPath, base, workspaceId] = process.argv.slice(2)
+  const token = await makeRayfinTokens(authPath)
+  const api = makeApi(await token(), base)
+  const [status, ws] = await api.get(base + '/workspaces/' + encodeURIComponent(workspaceId))
+  if (status !== 200 || !ws) throw new Error(apiError('Fabric workspace lookup', status, ws))
+  return {
+    ok: true,
+    name: ws.displayName || undefined,
+    region: ws.capacityRegion || undefined,
+    capacityId: ws.capacityId || undefined
+  }
+}
+
+runHelper(main)
+"#;
+
+/// A workspace's name, and its capacity's id and region, as Fabric reports them.
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WorkspaceDetails {
+  #[serde(default)]
+  ok: bool,
+  pub name: Option<String>,
+  pub region: Option<String>,
+  pub capacity_id: Option<String>,
+  error: Option<String>,
+}
+
+/// Ask Fabric about one workspace with the project's Rayfin sign-in. Installs
+/// nothing: the caller has the project's dependencies in place.
+pub(crate) async fn workspace_details(
+  project_dir: &Path,
+  workspace_id: &str,
+  timeout_ms: u64,
+) -> Result<WorkspaceDetails, String> {
+  let auth_path = exec::project_rayfin_auth_module(Some(project_dir))
+    .ok_or_else(|| "Could not locate the Rayfin CLI to look up the workspace.".to_string())?;
+  let script_path = write_helper("fabric-workspace.mjs", WORKSPACE_HELPER_SOURCE)
+    .map_err(|e| format!("Could not prepare the workspace lookup: {e}"))?;
+  let (script, auth) = (script_path.to_string_lossy().to_string(), auth_path.to_string_lossy().to_string());
+  let res = fabric_auth::run_helper(&[&script, &auth, FABRIC_API_BASE, workspace_id], RunOptions::timeout(timeout_ms)).await;
+  let details: WorkspaceDetails = fabric_auth::parse_helper_output(&res)?;
+  if details.ok {
+    Ok(details)
+  } else {
+    Err(details.error.clone().unwrap_or_else(|| "Could not look up the workspace.".into()))
   }
 }
 
 /// Write a helper script to the app data dir and return its path.
+/// Write a helper script into the data folder. Calls running at once (projects
+/// removing their apps in parallel) share the file, so it's only rewritten when
+/// it differs: rewriting truncates it under a helper another call is starting.
 fn write_helper(name: &str, source: &str) -> std::io::Result<PathBuf> {
+  static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
   fabric_auth::write_helper()?;
   let dir = paths::ensure_data_dir()?;
   let path = dir.join(name);
-  std::fs::write(&path, source)?;
+  let _writing = WRITING.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+  if std::fs::read_to_string(&path).ok().as_deref() != Some(source) {
+    std::fs::write(&path, source)?;
+  }
   Ok(path)
 }
 
@@ -318,39 +400,79 @@ async fn project_auth_module(project_dir: Option<&Path>) -> Result<PathBuf, Stri
   })
 }
 
+/// Why the CLI's Fabric sign-in couldn't be confirmed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProbeFailure {
+  /// There's no sign-in, or Microsoft or Fabric turned it down: sign in again.
+  SignIn(String),
+  /// No answer either way (offline, a timeout, Fabric unavailable, or a check
+  /// that couldn't run), so the sign-in may well be fine.
+  Unverified(String),
+}
+
+impl ProbeFailure {
+  pub fn message(&self) -> &str {
+    match self {
+      ProbeFailure::SignIn(message) | ProbeFailure::Unverified(message) => message,
+    }
+  }
+}
+
+/// How long to wait before checking again when a check got no answer.
+const PROBE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Verify the CLI's current Fabric credential, not its remembered account.
 /// Performs one authenticated GET, with no pagination, browser, or dependency
 /// install. A normal 403 confirms authentication but leaves permission errors
 /// to the requesting workflow; 401/claims challenges require another sign-in.
+/// A check that gets no answer is tried once more before it's reported.
 ///
 /// The helper owns no persistent token cache: every invocation opens the CLI's
 /// MSAL cache afresh. CLI login/logout is the only token-cache mutation needed.
-pub async fn probe_rayfin_auth(project_dir: Option<&Path>) -> Result<(), String> {
+pub async fn probe_rayfin_auth(project_dir: Option<&Path>) -> Result<(), ProbeFailure> {
+  match probe_once(project_dir).await {
+    Err(ProbeFailure::Unverified(_)) => {
+      tokio::time::sleep(PROBE_RETRY_DELAY).await;
+      probe_once(project_dir).await
+    }
+    result => result,
+  }
+}
+
+async fn probe_once(project_dir: Option<&Path>) -> Result<(), ProbeFailure> {
   #[derive(Deserialize)]
+  #[serde(rename_all = "camelCase")]
   struct ProbeResult {
     ok: bool,
+    #[serde(default)]
+    needs_login: bool,
     error: Option<String>,
   }
 
   let auth_path = exec::project_rayfin_auth_module(project_dir).ok_or_else(|| {
-    "Could not locate the Rayfin CLI authentication module. Open a Rayfin project to reach Fabric.".to_string()
+    ProbeFailure::Unverified(
+      "Could not locate the Rayfin CLI authentication module. Open a Rayfin project to reach Fabric.".to_string(),
+    )
   })?;
-  let script_path = write_helper("fabric-auth-probe.mjs", AUTH_PROBE_HELPER_SOURCE)
-    .map_err(|error| format!("Could not prepare the Fabric authentication check: {error}"))?;
+  let script_path = write_helper("fabric-auth-probe.mjs", AUTH_PROBE_HELPER_SOURCE).map_err(|error| {
+    ProbeFailure::Unverified(format!("Could not prepare the Fabric authentication check: {error}"))
+  })?;
   let auth_str = auth_path.to_string_lossy();
   let script_str = script_path.to_string_lossy();
-  let result = exec::run(
-    "node",
-    &[&script_str, &auth_str, FABRIC_API_BASE],
-    RunOptions::timeout(30_000),
-  )
-  .await;
-  let probe: ProbeResult = fabric_auth::parse_helper_output(&result)?;
+  let result =
+    fabric_auth::run_helper(&[&script_str, &auth_str, FABRIC_API_BASE], RunOptions::timeout(30_000)).await;
+  let probe: ProbeResult = fabric_auth::parse_helper_output(&result).map_err(|error| {
+    if fabric_auth::failure_flags(&error).0 {
+      ProbeFailure::SignIn(error)
+    } else {
+      ProbeFailure::Unverified(error)
+    }
+  })?;
   if probe.ok {
-    Ok(())
-  } else {
-    Err(probe.error.unwrap_or_else(|| "Could not verify the current Fabric session.".into()))
+    return Ok(());
   }
+  let error = probe.error.unwrap_or_else(|| "Could not verify the current Fabric session.".into());
+  Err(if probe.needs_login { ProbeFailure::SignIn(error) } else { ProbeFailure::Unverified(error) })
 }
 
 /// List the signed-in user's Fabric workspaces, each annotated with its
@@ -384,12 +506,7 @@ pub async fn fabric_workspaces() -> FabricWorkspacesResult {
 
   let auth_str = auth_path.to_string_lossy().to_string();
   let script_str = script_path.to_string_lossy().to_string();
-  let res = exec::run(
-    "node",
-    &[&script_str, &auth_str, FABRIC_API_BASE],
-    RunOptions::timeout(60_000),
-  )
-  .await;
+  let res = fabric_auth::run_helper(&[&script_str, &auth_str, FABRIC_API_BASE], RunOptions::timeout(60_000)).await;
 
   if res.not_found {
     return FabricWorkspacesResult {
@@ -464,12 +581,7 @@ pub async fn fabric_capacities() -> FabricCapacitiesResult {
   };
   let auth_str = auth_path.to_string_lossy().to_string();
   let script_str = script_path.to_string_lossy().to_string();
-  let res = exec::run(
-    "node",
-    &[&script_str, &auth_str, FABRIC_API_BASE],
-    RunOptions::timeout(60_000),
-  )
-  .await;
+  let res = fabric_auth::run_helper(&[&script_str, &auth_str, FABRIC_API_BASE], RunOptions::timeout(60_000)).await;
   if res.not_found {
     return FabricCapacitiesResult {
       ok: false,
@@ -522,8 +634,7 @@ pub async fn fabric_create_workspace(name: String, capacity_id: String) -> Fabri
   };
   let auth_str = auth_path.to_string_lossy().to_string();
   let script_str = script_path.to_string_lossy().to_string();
-  let res = exec::run(
-    "node",
+  let res = fabric_auth::run_helper(
     &[&script_str, &auth_str, FABRIC_API_BASE, &name, &capacity_id],
     RunOptions::timeout(60_000),
   )
@@ -609,7 +720,7 @@ pub async fn fabric_delete_apps(project_id: String) -> FabricDeleteResult {
       deleted: 0,
       failures: vec![],
       needs_login: None,
-      error: Some("Some recorded deployments have no Fabric workspace/item ID. Nothing was deleted.".into()),
+      error: Some("Some of this project's published apps have no Fabric workspace or item ID recorded. Nothing was deleted.".into()),
     };
   }
 
@@ -625,7 +736,13 @@ pub async fn fabric_delete_apps(project_id: String) -> FabricDeleteResult {
   }
 
   let project_dir = store::find_project(&project_id).map(|p| PathBuf::from(p.path));
-  let auth_path = match project_auth_module(project_dir.as_deref()).await {
+  delete_items(project_dir.as_deref(), &items).await
+}
+
+/// Delete `items` in Fabric with the project's Rayfin sign-in. One that's
+/// already gone counts as deleted. Never throws.
+pub(crate) async fn delete_items(project_dir: Option<&Path>, items: &[DeleteItem]) -> FabricDeleteResult {
+  let auth_path = match project_auth_module(project_dir).await {
     Ok(p) => p,
     Err(error) => {
       return FabricDeleteResult {
@@ -641,7 +758,7 @@ pub async fn fabric_delete_apps(project_id: String) -> FabricDeleteResult {
   let prep = (|| -> std::io::Result<(PathBuf, PathBuf)> {
     let script_path = write_helper("fabric-delete.mjs", DELETE_HELPER_SOURCE)?;
     let items_path = paths::ensure_data_dir()?.join(format!("fabric-delete-items-{}.json", uuid::Uuid::new_v4()));
-    let json = serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_string());
+    let json = serde_json::to_string(items).unwrap_or_else(|_| "[]".to_string());
     std::fs::write(&items_path, json)?;
     Ok((script_path, items_path))
   })();
@@ -661,8 +778,7 @@ pub async fn fabric_delete_apps(project_id: String) -> FabricDeleteResult {
   let auth_str = auth_path.to_string_lossy().to_string();
   let script_str = script_path.to_string_lossy().to_string();
   let items_str = items_path.to_string_lossy().to_string();
-  let res = exec::run(
-    "node",
+  let res = fabric_auth::run_helper(
     &[&script_str, &auth_str, FABRIC_API_BASE, &items_str],
     RunOptions::timeout(120_000),
   )
@@ -797,6 +913,38 @@ pub(crate) fn read_project_semantic_models(project_dir: &Path) -> Vec<SemanticMo
   models
 }
 
+/// The project's `fabric.yaml` declares semantic models: the classic Fabric
+/// embed (fabric-app-data), which the app queries from the browser as each
+/// person. Those queries work only inside the Fabric portal shell, unlike a
+/// `fabric-semanticmodel` connector's, which run through the app's backend.
+fn has_fabric_yaml_models(project_dir: &Path) -> bool {
+  std::fs::read_to_string(project_dir.join("fabric.yaml"))
+    .map(|text| !parse_semantic_models_yaml(&text).is_empty())
+    .unwrap_or(false)
+}
+
+/// The project's `rayfin.yml` hosts the app embedded only
+/// (`services.staticHosting.embedded.only`): it opens only inside the Fabric
+/// portal, with no page of its own.
+fn hosted_embedded_only(project_dir: &Path) -> bool {
+  let rayfin = project_dir.join("rayfin");
+  let Ok(text) = std::fs::read_to_string(rayfin.join("rayfin.yml"))
+    .or_else(|_| std::fs::read_to_string(rayfin.join("rayfin.yaml")))
+  else {
+    return false;
+  };
+  let Ok(root) = serde_yaml::from_str::<serde_yaml::Value>(&text) else { return false };
+  let only = &root["services"]["staticHosting"]["embedded"]["only"];
+  only.as_bool() == Some(true) || only.as_str() == Some("true")
+}
+
+/// The published app works only inside the Fabric portal shell, so the preview
+/// offers its Fabric view: its `fabric.yaml` declares semantic models, or its
+/// `rayfin.yml` hosts it embedded only.
+pub(crate) fn needs_fabric_portal(project_dir: &Path) -> bool {
+  has_fabric_yaml_models(project_dir) || hosted_embedded_only(project_dir)
+}
+
 /// One `rayfin.yml` connector — only the fields we read.
 #[derive(Deserialize)]
 struct RayfinConnector {
@@ -885,7 +1033,7 @@ pub async fn fabric_share_app(
   let ws = workspace_id.trim().to_string();
   if ws.is_empty() {
     return FabricShareResult::failure(
-      "This deployment has no Fabric workspace id yet — deploy it before sharing.".to_string(),
+      "This published app has no Fabric workspace ID yet. Publish it before you share it.".to_string(),
     );
   }
 
@@ -921,12 +1069,7 @@ pub async fn fabric_share_app(
   let auth_str = auth_path.to_string_lossy().to_string();
   let script_str = script_path.to_string_lossy().to_string();
   let request_str = request.to_string();
-  let res = exec::run(
-    "node",
-    &[&script_str, &auth_str, &request_str],
-    RunOptions::timeout(SHARE_TIMEOUT_MS),
-  )
-  .await;
+  let res = fabric_auth::run_helper(&[&script_str, &auth_str, &request_str], RunOptions::timeout(SHARE_TIMEOUT_MS)).await;
 
   if res.not_found {
     return FabricShareResult::failure("Node.js was not found on PATH.".to_string());
@@ -979,6 +1122,7 @@ pub async fn fabric_directory_search(query: String) -> FabricDirectoryResult {
   let request_str = request.to_string();
   // The helper's search mode ignores the auth-module argv, so pass a placeholder
   // rather than resolving (and possibly installing) the project's Rayfin CLI.
+  // It never opens the CLI's token cache, so it needn't wait its turn.
   let res = exec::run(
     "node",
     &[&script_str, "-", &request_str],
@@ -1056,6 +1200,13 @@ mod tests {
     assert_eq!(replaced_app("notes", "ws-b", &[own("ws-a")], &existing), Some("Notes".into()));
     assert_eq!(replaced_app("budget", "ws-b", &[], &existing), None);
     assert!(APP_ITEMS_HELPER_SOURCE.contains("type=AppBackend") && APP_ITEMS_HELPER_SOURCE.contains("runHelper(main)"));
+
+    // The apps a publish can go into instead: A to Z, each once, and none where
+    // the project already publishes, or when its CLI can't name an app.
+    let existing = vec!["trip-logger".to_string(), "Notes".to_string(), " ".to_string(), "notes".to_string()];
+    assert_eq!(choosable_apps("ws-b", &[own("ws-a")], &existing, true), ["Notes", "trip-logger"]);
+    assert!(choosable_apps("WS-B", &[own("ws-b")], &existing, true).is_empty());
+    assert!(choosable_apps("ws-b", &[], &existing, false).is_empty());
   }
 
   #[test]
@@ -1294,6 +1445,42 @@ connectors:
     let _ = std::fs::remove_dir_all(&dir);
     let aliases: Vec<&str> = models.iter().map(|m| m.alias.as_str()).collect();
     assert_eq!(aliases, vec!["finance", "sales"]);
+  }
+
+  #[test]
+  fn the_fabric_portal_is_needed_for_fabric_yaml_models_or_embedded_only_hosting() {
+    let dir = std::env::temp_dir().join(format!("fab-portal-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(dir.join("rayfin")).unwrap();
+    let rayfin_yml = |hosting: &str| {
+      std::fs::write(
+        dir.join("rayfin").join("rayfin.yml"),
+        format!(
+          "connectors:\n  - name: sales\n    type: fabric-semanticmodel\n    config:\n      workspaceId: ws-1\n      itemId: ds-1\n{hosting}"
+        ),
+      )
+      .unwrap()
+    };
+    rayfin_yml("");
+    let connectors_only = needs_fabric_portal(&dir);
+    std::fs::write(dir.join("fabric.yaml"), "activeProfile: default\nprofiles:\n  default: {}\n").unwrap();
+    let no_models = needs_fabric_portal(&dir);
+    std::fs::write(
+      dir.join("fabric.yaml"),
+      "activeProfile: d\nprofiles:\n  d:\n    semanticModels:\n      finance:\n        workspaceId: ws-2\n        itemId: ds-2\n",
+    )
+    .unwrap();
+    let classic = needs_fabric_portal(&dir);
+    std::fs::remove_file(dir.join("fabric.yaml")).unwrap();
+    rayfin_yml("services:\n  staticHosting:\n    enabled: true\n    embedded:\n      only: true\n");
+    let embedded_only = needs_fabric_portal(&dir);
+    rayfin_yml("services:\n  staticHosting:\n    enabled: true\n    embedded:\n      only: false\n");
+    let standalone = needs_fabric_portal(&dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(!connectors_only, "a semantic model connector queries through the backend");
+    assert!(!no_models, "a fabric.yaml without models");
+    assert!(classic, "fabric.yaml semantic models");
+    assert!(embedded_only, "hosted embedded only");
+    assert!(!standalone);
   }
 
   #[test]

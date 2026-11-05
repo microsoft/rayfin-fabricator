@@ -10,11 +10,11 @@ Design mode lets you point at the running app and describe visual changes. Fabri
 ## Start Design mode
 
 1. Open the **Build** view.
-2. Wait for your app to appear in the preview. On the local preview, at a `localhost` address, Design works only between turns, with **Deploy after each chat turn** off (see [Deploy manually](/docs/ship/deploy#deploy-manually)).
+2. Wait for your app to appear in the preview. On a preview at a `localhost` address, Design works only between turns: that's your app on this computer, and the local preview of a published app that this computer can't run, while **Publish after each chat turn** is off. See [Use the toolbar](/docs/build/preview#use-the-toolbar).
 3. In the preview toolbar, select **Design**.
 4. Click an element in the app.
 
-Design works in the direct app view and in the **Fabric** portal shell view. When the app is embedded in the Fabric shell, Fabricator relays Design commands into the app frame.
+Design works in the direct app view and in the **Fabric** view, which shows a published app that works only inside the Fabric portal in the Fabric portal shell. There, Fabricator relays Design commands into the app frame.
 
 ## Change one element
 
@@ -110,7 +110,7 @@ While Design mode is on, use the preview-width buttons:
 
 - **Desktop** fills the pane.
 - **Tablet** previews at 820 CSS pixels.
-- **Phone** previews at 390 CSS pixels.
+- **Phone** previews at 390 by 844 CSS pixels, inside a phone outline. In a shorter pane, the phone's screen gets shorter so the whole phone fits.
 
 Use these widths to check responsive layouts before sending the changes.
 

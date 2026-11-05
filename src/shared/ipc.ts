@@ -84,7 +84,7 @@ export interface DeleteProgressEvent {
  * Environment doctor
  * ------------------------------------------------------------------ */
 
-export type ToolId = 'node' | 'npm' | 'git' | 'rayfin' | 'copilot' | 'az' | 'gh'
+export type ToolId = 'node' | 'npm' | 'git' | 'rayfin' | 'copilot' | 'az' | 'gh' | 'rayfin-local'
 
 export interface ToolStatus {
   id: ToolId
@@ -135,6 +135,11 @@ export interface RayfinAuthStatus {
   user?: string
   tenant?: string
   error?: string
+  /**
+   * Signed in as far as the Rayfin CLI knows, but Fabric couldn't confirm it
+   * just now (offline, a timeout, or a check that couldn't run); `error` says why.
+   */
+  unverified?: boolean
   /** Renderer-only: not verified yet this session (see {@link CopilotAuthStatus.checking}). */
   checking?: boolean
 }
@@ -1259,6 +1264,21 @@ export type DeployOutcome =
   | 'auth-cache-error'
   | 'not-found'
   | 'needs-workspace'
+  /** Fabric wouldn't create the app in the workspace: Fabric apps aren't available there. */
+  | 'workspace-unsupported'
+
+/**
+ * A workspace Fabric wouldn't create an app in ("The feature is not available"),
+ * as far as Fabric described it. Its capacity's region is the usual reason:
+ * Fabric apps aren't in every region.
+ */
+export interface UnsupportedWorkspace {
+  id: string
+  name?: string
+  /** Its capacity's region, e.g. "UK South". */
+  region?: string
+  capacityId?: string
+}
 
 export interface DeployResult {
   ok: boolean
@@ -1268,6 +1288,8 @@ export interface DeployResult {
   apiUrl?: string
   portalUrl?: string
   error?: string
+  /** Set with `workspace-unsupported`: the workspace Fabric wouldn't create the app in. */
+  unsupported?: UnsupportedWorkspace
 }
 
 /** Read-only deployment status from `rayfin up status --json`. */
@@ -1312,13 +1334,25 @@ export interface PortOccupant {
   commandLine?: string
 }
 
+/** Another project in this window that holds a port the live preview needs. */
+export interface PortHolder {
+  projectId: string
+  /** The project's name. */
+  name: string
+  /**
+   * `backend`: its local backend, which runs the app on this computer.
+   * `preview`: its live preview, which runs while Copilot works on it.
+   */
+  kind: 'backend' | 'preview'
+}
+
 /** Why the live preview can't start on a sign-in-ready port, and the ways out. */
 export interface PortConflict {
   /** The preferred registered port that is taken. */
   port: number
   occupant?: PortOccupant
-  /** Another project in this window whose live preview holds `port`. */
-  ownProject?: string
+  /** Another project in this window holds `port`. */
+  holder?: PortHolder
   /** Fabricator may offer to stop `occupant`. */
   canStop: boolean
   /** The next free port to register instead. */
@@ -1486,7 +1520,8 @@ export interface ByokModelMeta {
   note?: string
 }
 
-/** What Auto can optimize for ("Optimized for"), as Copilot offers it to the account. */
+/** What Auto can optimize for, as Copilot offers it to the account: Copilot
+ *  Fusion's effort levels, or "Optimized for" preferences. */
 export interface AutoTiers {
   /** The tier Auto uses when none is chosen. */
   defaultTier: string
@@ -1503,6 +1538,8 @@ export interface AutoTierOption {
   enabled: boolean
   /** Why it can't be chosen, in Copilot's words. */
   note?: string
+  /** One of Copilot Fusion's effort levels: Standard, High or Max. */
+  fusion?: boolean
 }
 
 /** Preview pane view selection: the direct app URL, or the app embedded in the
@@ -1544,13 +1581,6 @@ export interface StudioProject {
    * workspace they live in.
    */
   deploymentNames?: Record<string, string>
-  /**
-   * Set when a project is freshly created in-app and has never been deployed.
-   * Drives the onboarding "deploy first" gate — the chat composer is disabled
-   * until a deployment exists. Cleared on the first successful deploy. Never set
-   * for projects opened from disk, so opening an existing app is never gated.
-   */
-  awaitingFirstDeploy?: boolean
   /** Copilot model id for this project's chat (`--model`); undefined = auto. */
   model?: string
   /** Copilot reasoning effort for this project's chat (`--effort`). */
@@ -1560,13 +1590,26 @@ export interface StudioProject {
   /** With a model that offers several, its context window; undefined = the standard one. */
   contextTier?: ContextTier
   /**
+   * The plugins on in this project's chat ({@link ChatPluginId}s, including
+   * `mcp:<id>` for an MCP server you added). Each is off until turned on in the
+   * chat. May list plugins this version doesn't know.
+   */
+  plugins?: string[]
+  /**
    * Preview pane view selection. `'fabric'` shows the app embedded in the Fabric
    * portal shell ({@link DeployInfo.portalUrl}); absent / `'direct'` shows the
    * direct app URL. Persisted (rather than kept in the renderer alone) so the
    * Fabricator agent's screenshot/navigate tools honour the same view the user
-   * is looking at.
+   * is looking at. Honoured only for an app that {@link needsFabricPortal}.
    */
   previewMode?: PreviewMode
+  /**
+   * The published app works only inside the Fabric portal shell: its
+   * `fabric.yaml` declares semantic models (the classic Fabric embed), or its
+   * `rayfin.yml` hosts it embedded only. Read from its folder when projects are
+   * listed. Only such an app offers the preview's Fabric view, on its published app.
+   */
+  needsFabricPortal?: boolean
   /**
    * Set when the project lives in a GitHub-backed team workspace (experimental).
    * Team projects are deployed by the workspace's pipeline, never locally.
@@ -1574,6 +1617,18 @@ export interface StudioProject {
   team?: TeamBinding
   /** True when the folder no longer exists / is no longer a Rayfin project. */
   missing?: boolean
+  /** The Rayfin version the project has installed (its CLI's), read when projects are listed. */
+  rayfinVersion?: string
+  /** When the project was last opened in Fabricator (ISO 8601). */
+  lastOpenedAt?: string
+  /** Pinned to the top of Home's recent projects. */
+  pinned?: boolean
+  /**
+   * When the project's thumbnail (drawn from its preview) was last saved
+   * (RFC 3339), read when projects are listed; absent while it has none. The
+   * image itself comes from `projects.thumbnails`.
+   */
+  thumbnailAt?: string
 }
 
 export interface ProjectsState {
@@ -1584,6 +1639,8 @@ export interface ProjectsState {
   projects: StudioProject[]
   /** Team workspaces on this computer (empty while the experiment is off). */
   teamWorkspaces?: TeamWorkspace[]
+  /** Folders other than the projects folder that new projects went in, most recent first. */
+  recentLocations?: string[]
 }
 
 export type ThemePreference = 'dark' | 'light' | 'system'
@@ -1602,10 +1659,12 @@ export interface AppSettings {
    */
   fullDiagnostics?: boolean
   /**
-   * How chat turns deploy personal apps, set by the deployment panel's "Deploy
-   * after each chat turn" switch: 'auto' (the default, also when unset) deploys
-   * as each turn finishes; 'manual' keeps chat changes on this computer until the
-   * user deploys them. Team apps aren't affected.
+   * How chat turns publish personal apps, set by the published apps panel's
+   * "Publish after each chat turn" switch: 'auto' publishes as each turn
+   * finishes; 'manual' keeps chat changes on this computer until the user
+   * publishes them. The user's choice always wins; unset, turns don't publish
+   * (the renderer's `publishesAfterTurn`, the core's `store::is_manual_deploy`).
+   * Team apps aren't affected.
    */
   deployMode?: 'auto' | 'manual'
   /**
@@ -1613,6 +1672,32 @@ export interface AppSettings {
    * pickers show. Never holds a key (those live in the OS credential store).
    */
   byok?: ByokSettings
+  /**
+   * The MCP servers you added (MCP servers experiment). Never holds the values
+   * of their environment variables or headers.
+   */
+  mcpServers?: McpServer[]
+  /**
+   * What a new project's chat starts with (Settings → Chat defaults). Each
+   * project's chat keeps its own choice after that.
+   */
+  chatDefaults?: ChatDefaults
+}
+
+/** The model and plugins a new project's chat starts with. */
+export interface ChatDefaults {
+  /** The model's id; absent is Auto. */
+  model?: string
+  effort?: ReasoningEffort
+  /** With Auto, what it optimizes for. */
+  autoTier?: string
+  contextTier?: ContextTier
+  /**
+   * The plugins on ({@link ChatPluginId}s, including `mcp:<id>`). A new project
+   * gets only the ones chat offers it: Work IQ and MCP servers while their
+   * experiments are on.
+   */
+  plugins?: string[]
 }
 
 /** Saved state of Your own API keys, by provider id. */
@@ -1695,6 +1780,108 @@ export interface ExperimentFlags {
    * page by page.
    */
   reportMigration?: boolean
+  /**
+   * Work IQ: chat offers the Work IQ plugin, which looks up your Microsoft 365
+   * email, meetings, files, Teams messages and people, read-only, through
+   * Microsoft's Work IQ MCP server. Each chat still has it off until it's
+   * turned on there.
+   */
+  workIq?: boolean
+  /**
+   * MCP servers: add MCP servers (a command Fabricator runs on this computer,
+   * or a remote server's URL) to chat's plugins, so chat can use their tools.
+   * Each chat still has a server off until it's turned on there.
+   */
+  mcpServers?: boolean
+  /**
+   * Export as an app: Export project also offers App, a `.rayfin` file that
+   * Fabricator installs and runs in a window of its own. It gates exporting
+   * only: `.rayfin` files open whether it's on or off.
+   */
+  appExport?: boolean
+  /**
+   * Goals: each app's Goals tab, where you write what the app is for and the
+   * checks it must keep passing (`GOALS.md`), and Copilot runs them against a
+   * fresh copy of the app before you publish.
+   */
+  goals?: boolean
+}
+
+/**
+ * A chat plugin: an MCP server chat can use. Fabric IQ reads the Power BI
+ * reports and semantic models you can open; Work IQ (an experiment) reads your
+ * Microsoft 365 data; `mcp:<id>` is an MCP server you added (an experiment).
+ */
+export type ChatPluginId = 'fabric-iq' | 'work-iq' | `mcp:${string}`
+
+/**
+ * How Fabricator reaches an MCP server: a command it runs on this computer
+ * (`stdio`), or a remote server's URL, over streamable HTTP (`http`) or the
+ * older Server-Sent Events (`sse`).
+ */
+export type McpTransport = 'stdio' | 'http' | 'sse'
+
+/**
+ * An MCP server you added (MCP servers experiment). Only the names of its
+ * environment variables or headers are here: their values stay in the OS
+ * credential store, and never come back to the renderer.
+ */
+export interface McpServer {
+  /** Stable id: starts its tools' names (`chart-generate_bar_chart`); its plugin id is `mcp:<id>`. */
+  id: string
+  name: string
+  transport: McpTransport
+  /** The program a command server runs (`npx`), and its arguments. */
+  command?: string
+  args?: string[]
+  /** A remote server's URL. */
+  url?: string
+  /** Names of the environment variables a command server gets. */
+  env?: string[]
+  /** Names of the headers a remote server gets. */
+  headers?: string[]
+  /** Chat may call only the tools the server marks as read-only. */
+  readOnly: boolean
+  /** When it was added (ISO 8601). */
+  addedAt: string
+}
+
+/** An environment variable or header of a server being saved. */
+export interface McpValueInput {
+  name: string
+  /** Its new value; leave it out to keep the saved one. */
+  value?: string
+}
+
+/**
+ * A server to add, or the new version of one (with its `id`). Names left out
+ * of `env` or `headers` are removed with their values.
+ */
+export interface McpServerInput {
+  id?: string
+  name: string
+  transport: McpTransport
+  command?: string
+  args?: string[]
+  url?: string
+  env?: McpValueInput[]
+  headers?: McpValueInput[]
+  readOnly?: boolean
+}
+
+/** One tool an MCP server offers. */
+export interface McpToolInfo {
+  name: string
+  description?: string
+}
+
+/** What checking an MCP server found. */
+export interface McpCheckResult {
+  status: 'connected' | 'needs-sign-in' | 'failed'
+  /** Why it didn't connect, in words you can act on. */
+  error?: string
+  /** The tools it offers, once connected. */
+  tools?: McpToolInfo[]
 }
 
 export interface CreateProjectInput {
@@ -1712,6 +1899,11 @@ export interface CreateProjectInput {
    * built-in templates.
    */
   templateName?: string
+  /**
+   * The folder the project goes in, when it isn't the projects folder. It must
+   * exist: New project offers to create it.
+   */
+  location?: string
 }
 
 export interface ProjectActionResult {
@@ -1720,10 +1912,291 @@ export interface ProjectActionResult {
   project?: StudioProject
 }
 
+/** What exporting a project would put in its `.fabricator` file (`projects.exportPreview`). */
+export interface ExportPreview {
+  /** The app's files: how many, and their total size in bytes. */
+  files: number
+  bytes: number
+  /** Its version history, when the project has its own git repository. */
+  history?: { versions: number; bytes: number }
+  /** Where it's published, when it is. */
+  deployment?: ExportDeployment
+  /** Secrets the app declares. Their values never go in an export. */
+  secrets: string[]
+  /** Files git would keep that stay out because they may hold secrets. */
+  keptOut: string[]
+  /** What exporting it as an app (`.rayfin`) would say about it. */
+  app: ExportApp
+}
+
+/** The app an app export (`.rayfin`) installs, for the export dialog. */
+export interface ExportApp {
+  name: string
+  /** Its `rayfin.yml` version. */
+  version?: string
+  /**
+   * The icon its page names, as a `data:` URL, for the dialog to draw at each
+   * size. Absent when it has none: the dialog draws one.
+   */
+  icon?: string
+}
+
+/** The app's icon at one size, as the export dialog drew it. */
+export interface AppIconImage {
+  /** Its width and height in pixels. */
+  size: number
+  /** A PNG, as base64. */
+  png: string
+}
+
+/** The published app an export can point the recipient's publishes at. */
+export interface ExportDeployment {
+  /** The workspace, by the name Rayfin records it under. */
+  workspace: string
+  workspaceId?: string
+  /** The published app's address. */
+  url?: string
+  /** The app in the Fabric portal. */
+  portalUrl?: string
+}
+
+/** What goes in an export besides the app's code. */
+export interface ExportOptions {
+  history: boolean
+  deployment: boolean
+}
+
+export interface ExportResult {
+  ok: boolean
+  /** Nothing was saved: the save dialog was closed, or the export was stopped. */
+  cancelled?: boolean
+  /** Where the file was saved. */
+  path?: string
+  /** Its size in bytes. */
+  bytes?: number
+  /** Files in it. */
+  files?: number
+  error?: string
+}
+
+/** Progress while a project is exported (`id` is the project) or imported (`id` is `import`). */
+export interface ZipProgressEvent {
+  id: string
+  phase: 'packing' | 'unpacking'
+  processed: number
+  total: number
+}
+
+/** What importing a file would bring in, read without unpacking it (`projects.inspectImport`). */
+export interface ImportPreview {
+  name: string
+  /** Who exported it, as the export records it. */
+  from?: string
+  /** When it was exported (ISO 8601). */
+  exportedAt?: string
+  /** The app's files: how many, and their total size in bytes. */
+  files: number
+  bytes: number
+  /** It comes with its version history. */
+  history: boolean
+  /** The workspace its publishes go to, when it says where it's published. */
+  workspace?: string
+  /** Secrets the app declares, which need values on this computer. */
+  secrets: string[]
+  /** The new folder it would be unpacked into. */
+  folder: string
+}
+
+export interface ImportResult {
+  ok: boolean
+  error?: string
+  project?: StudioProject
+}
+
+/** An app installed from a `.rayfin` file (`apps.list`). */
+export interface InstalledApp {
+  /** Who the app is: a file with the same key updates it. */
+  key: string
+  name: string
+  version?: string
+  /** Who exported it. */
+  from?: string
+  /** When the file it came from was exported (ISO 8601). */
+  exportedAt?: string
+  installedAt: string
+  updatedAt: string
+  /** Its icon, as a `data:` URL. */
+  icon?: string
+  /** Its window is open. */
+  open: boolean
+}
+
+/** An app file (`.rayfin`), read before it's installed. */
+export interface AppFilePreview {
+  path: string
+  key: string
+  name: string
+  version?: string
+  from?: string
+  exportedAt?: string
+  /** The app's files: how many, and their total size in bytes. */
+  files: number
+  bytes: number
+  /** Secrets the app declares, which have no values on this computer. */
+  secrets: string[]
+  icon?: string
+}
+
+/** What an app's window is for, for the page Fabricator shows in it (`apps.window`). */
+export interface AppWindowInfo {
+  /** The app's key; empty when the window only says why a file can't be opened. */
+  key: string
+  /**
+   * `install`: a file to install, after asking. `update`: a file of an
+   * installed app that isn't what's installed. `run`: the installed app.
+   * `error`: nothing to run (`error` says why).
+   */
+  mode: 'install' | 'update' | 'run' | 'error'
+  file?: AppFilePreview
+  installed?: InstalledApp
+  error?: string
+  /** Its local backend. */
+  status: LocalStatus
+}
+
+/** Installing an app, as it goes (`apps.onProgress`). */
+export interface AppProgressEvent {
+  key: string
+  /** `unpacking` (`processed` of `total` files) or `packages` (npm's `line`s). */
+  phase: 'unpacking' | 'packages'
+  processed: number
+  total: number
+  line?: string
+}
+
+/** How installing, starting or removing an app went. */
+export interface AppActionResult {
+  ok: boolean
+  /** `not-installed`, `busy`, `install-failed`, `node-missing`, `no-port` or `remove-failed`. */
+  code?: string
+  error?: string
+}
+
+/* ------------------------------------------------------------------ *
+ * Security check of a project or app file, before it's imported or installed
+ * ------------------------------------------------------------------ */
+
+/**
+ * What a security check covers. `install`: what npm runs on install.
+ * `packages`: where its packages come from. `network`: what it sends where.
+ * `hidden`: obfuscated code and text aimed at AI tools. `system`: what reaches
+ * outside the app. `agents`: instructions for coding agents (projects only).
+ */
+export type SecurityAreaId = 'install' | 'packages' | 'network' | 'hidden' | 'system' | 'agents'
+export type SecuritySeverity = 'high' | 'medium' | 'low' | 'note'
+/** `clear`: nothing risky. `caution`: worth a look first. `danger`: could do harm. */
+export type SecurityVerdict = 'clear' | 'caution' | 'danger'
+
+/** One risk a security check found. */
+export interface SecurityFinding {
+  /** `check:<rule>` for Fabricator's own checks, `ai:<hash>` for Copilot's. */
+  id: string
+  area: SecurityAreaId
+  severity: SecuritySeverity
+  /** `fabricator`: found by reading the files. `copilot`: Copilot's review, its evidence checked against the file. */
+  source: 'fabricator' | 'copilot'
+  title: string
+  /** Plain text; `code` is in backticks. */
+  detail: string
+  /** What to do about it. */
+  advice?: string
+  /** What Copilot made of one of Fabricator's findings, having read the code it points at. */
+  assessment?: string
+  /** Path in the package. */
+  file?: string
+  line?: number
+  endLine?: number
+  /** The lines around it, secret-looking values masked, from `excerptStart`. */
+  excerpt?: string
+  excerptStart?: number
+  /** More places it occurs: `path` or `path:line`. */
+  places?: string[]
+}
+
+export interface SecurityAreaResult {
+  area: SecurityAreaId
+  status: 'clear' | 'flagged' | 'skipped'
+  note?: string
+}
+
+/** What a security check found (`security.check`). */
+export interface SecurityReport {
+  /** Copilot's review finished. Fabricator's own checks ran either way. */
+  ok: boolean
+  /** Set by the worst finding, and made stricter, never looser, by Copilot's own verdict. */
+  verdict: SecurityVerdict
+  summary: string
+  findings: SecurityFinding[]
+  areas: SecurityAreaResult[]
+  /** Files in the package, and those Copilot could read. */
+  files: number
+  readable: number
+  durationMs: number
+  /** Why Copilot's review didn't finish. */
+  error?: string
+  /** Copilot stopped before it covered every area. */
+  partial?: boolean
+  /** The user stopped the check. */
+  cancelled?: boolean
+}
+
+/** A security check as it goes (`security.onEvent`). */
+export type SecurityEvent =
+  /** Unpacked for the review: where (steps name files in it), how many files, and the areas covered. */
+  | { type: 'started'; root: string; files: number; areas: SecurityAreaId[] }
+  /** A tool call Copilot made (sent on start and again when it finishes). */
+  | { type: 'activity'; tool: ChatToolCall }
+  /** A finding, new or updated (the same `id`). */
+  | { type: 'finding'; finding: SecurityFinding }
+  | { type: 'areas'; results: SecurityAreaResult[] }
+  | { type: 'summary'; text: string }
+
+export interface SecurityEventEnvelope {
+  checkId: string
+  event: SecurityEvent
+}
+
+/**
+ * `window.api.security`: check a `.fabricator`, `.rayfin` or project `.zip`
+ * file for security risks before it's imported or installed. Fabricator's own
+ * checks read the files; Copilot, on Auto, reviews the code without running
+ * any of it, in a session that can only read the unpacked file.
+ */
+export interface SecurityCheckApi {
+  /**
+   * Check the file at `path`, streaming events under `checkId`. Resolves with
+   * the report however the check ends (stopped, or Copilot unavailable, too);
+   * rejects only when the file can't be checked at all.
+   */
+  check: (checkId: string, path: string) => Promise<SecurityReport>
+  /** Stop a check. Resolves with whether one was running. */
+  cancel: (checkId: string) => Promise<boolean>
+  onEvent: (cb: (envelope: SecurityEventEnvelope) => void) => () => void
+}
+
 /** Whether a new project's name is free where it will be saved. */
 export interface ProjectNameCheck {
   ok: boolean
   /** Why the name can't be used, in plain language. */
+  message?: string
+}
+
+/** Whether a folder a new project could go in can take it. */
+export interface ProjectLocationCheck {
+  ok: boolean
+  /** The folder doesn't exist yet, so it can be created. */
+  missing?: boolean
+  /** Why it can't take the project, in plain language. */
   message?: string
 }
 
@@ -1738,6 +2211,19 @@ export interface DeployTargetCheck {
   conflict?: string
   /** The check couldn't run; the deploy isn't blocked. */
   error?: string
+  /**
+   * The workspace's Rayfin apps the project can publish into instead of a new
+   * app: none when it already publishes there, or its Rayfin CLI is before 1.36.
+   */
+  apps?: string[]
+}
+
+/** What deleting one of a project's published apps did. */
+export interface DeployRemoveResult {
+  ok: boolean
+  /** Fabric needs you to sign in again before it deletes the app. */
+  needsLogin?: boolean
+  error?: string
 }
 
 /** A compact snapshot of a project's git working tree. */
@@ -1750,6 +2236,29 @@ export interface GitStatus {
   changedCount: number
   /** True when the repo has no commits yet (unborn HEAD). */
   noCommits?: boolean
+  /** A merge is waiting to be finished. */
+  merging?: boolean
+  /**
+   * Files that still have conflicts, relative to the project folder: ones the
+   * merge left unmerged, and, during a merge, ones with conflict markers left.
+   */
+  conflicts?: string[]
+}
+
+/** A branch the app can switch to. */
+export interface GitBranch {
+  /** A local branch's name, or a remote branch's, such as `origin/feature`. */
+  name: string
+  /** The remote branch a local branch follows, such as `origin/main`. */
+  upstream?: string
+  /** Only on the remote: switching to it makes a local branch that follows it. */
+  remote?: boolean
+}
+
+export interface GitBranches {
+  current?: string
+  /** The local branches, then remote ones without a local branch, each most recently changed first. */
+  branches: GitBranch[]
 }
 
 export interface GitCommitResult {
@@ -1757,6 +2266,13 @@ export interface GitCommitResult {
   error?: string
   /** The working-tree status after the commit attempt. */
   status: GitStatus
+}
+
+/** A commit message Copilot (on its Auto model) wrote for the uncommitted changes. */
+export interface GitMessageResult {
+  ok: boolean
+  message?: string
+  error?: string
 }
 
 /** Sentinel ref for "uncommitted working-tree changes" (vs a commit SHA). */
@@ -1817,6 +2333,14 @@ export interface RevertResult {
   error?: string
 }
 
+/** A chat turn's changes, saved as a version (`projects.git.saveTurn`). */
+export interface SavedTurn {
+  /** The new version's commit; absent when nothing was saved. */
+  commit?: string
+  /** Why the changes couldn't be saved: they stay as uncommitted changes. */
+  error?: string
+}
+
 /**
  * Sync state of the current branch against its remote-tracking branch.
  * `ahead` = local commits not yet pushed; `behind` = remote commits not yet pulled.
@@ -1838,12 +2362,14 @@ export interface GitRemoteStatus {
   fetchError?: string
 }
 
-/** Outcome of a pull or push, carrying refreshed working-tree + remote status. */
+/** Outcome of a pull, push, merge or branch switch, carrying refreshed working-tree + remote status. */
 export interface GitSyncResult {
   ok: boolean
   error?: string
-  /** True when a pull couldn't be combined automatically (rebase conflict). */
+  /** True when a pull couldn't be combined automatically (rebase conflict), or a merge stopped at conflicts. */
   conflict?: boolean
+  /** It changed the app's packages (a `package.json` or npm lockfile), so they need installing again. */
+  packagesChanged?: boolean
   status: GitStatus
   remote: GitRemoteStatus
 }
@@ -1891,6 +2417,34 @@ export interface FileNode {
   ignored?: boolean
 }
 
+/** One folder's entries, for an `@` reference in chat to something outside the project. */
+export interface DirListing {
+  /** The folder, as an absolute path. */
+  dir: string
+  /** Folders first, then files, each by name. */
+  entries: Array<{ name: string; dir: boolean }>
+  /** The folder has more entries than were listed. */
+  truncated?: boolean
+  error?: string
+}
+
+/** A file or folder dropped on the chat composer, or picked on this computer, to reference. */
+export interface ChatPathInfo {
+  /** As dropped or picked: an absolute path. */
+  path: string
+  dir: boolean
+}
+
+/** Files and folders dragged onto Fabricator's window from the OS ({@link RayfinStudioApi.onFileDrop}). */
+export interface FileDropEvent {
+  /** `enter` and `over` as the drag moves over the window, `drop` when it's let go there, `leave` when it leaves or is cancelled. */
+  type: 'enter' | 'over' | 'drop' | 'leave'
+  /** What's dragged, as absolute paths: with `enter` and `drop`, else empty. */
+  paths: string[]
+  /** Where the pointer is, in the page's coordinates (`clientX`/`clientY`); `null` with `leave`. */
+  point: { x: number; y: number } | null
+}
+
 /** The result of reading one project file for the viewer. */
 export interface FileContent {
   path: string
@@ -1904,6 +2458,8 @@ export interface FileContent {
   tooLarge?: boolean
   /** Populated when the read failed. */
   error?: string
+  /** True when the file doesn't exist (any longer), such as one deleted since it was opened. */
+  missing?: boolean
 }
 
 /* ------------------------------------------------------------------ *
@@ -1939,6 +2495,11 @@ export interface ChatToolCall {
   /** Epoch ms the renderer saw the call start / finish. */
   startedAt?: number
   endedAt?: number
+  /**
+   * The name the user gave the MCP server whose tool this is, for a server
+   * they added (MCP servers experiment); `title` then names the tool.
+   */
+  server?: string
 }
 
 /**
@@ -1958,6 +2519,27 @@ export type ChatSegment =
   | { kind: 'question'; id: string }
   | { kind: 'interjection'; text: string; thumbs?: string[] }
   | { kind: 'reasoning'; id?: string; text: string; startedAt?: number; elapsedMs?: number }
+
+/** What Copilot Fusion chose for an assistant turn, shown under it. */
+export interface ChatFusion {
+  /** Auto's tier the turn ran at, as Copilot names its Fusion model ("hydrafusion-max"). */
+  level: string
+  /**
+   * How Fusion ran each request in the turn, in order without repeats: "single",
+   * "cascade" or "critique", or "fallback" when it couldn't plan one.
+   */
+  patterns: string[]
+  /** The models that worked on the turn, in the order they started. */
+  models: ChatFusionModel[]
+  /** Copilot's description of how it ran the latest request. */
+  hint?: string
+}
+
+/** A model in a Copilot Fusion turn and the phases it ran ("draft", "critic"…). */
+export interface ChatFusionModel {
+  id: string
+  phases: string[]
+}
 
 /**
  * Streamed chat events sent from main -> renderer during a turn. The renderer
@@ -1980,6 +2562,7 @@ export type ChatEvent =
       exitCode?: number
     }
   | { type: 'notice'; text: string }
+  | { type: 'fusion'; fusion: ChatFusion }
   | { type: 'error'; text: string }
   | { type: 'result'; ok: boolean; filesModified: string[]; ranDeploy: boolean }
   | {
@@ -2037,6 +2620,61 @@ export interface SteerResult {
   steered: boolean
 }
 
+/** How the signed-in account pays for Copilot's models. */
+export type CopilotBilling = 'ai_credits' | 'premium_requests'
+
+/** One model's share of a chat's usage. */
+export interface ChatModelUsage {
+  /** The model's id, as the session called it. */
+  model: string
+  /** Its name when it was called. */
+  name: string
+  /** Ran on your own API key: its provider bills it, so only tokens are known. */
+  ownKey: boolean
+  /** For a model on your own key, the provider that bills it ("Anthropic"). */
+  provider?: string
+  /** Input tokens, including those read from the prompt cache. */
+  inputTokens: number
+  /** Input tokens read from the prompt cache. */
+  cachedTokens: number
+  outputTokens: number
+  aiCredits: number
+  premiumRequests: number
+}
+
+/** What a project's Build chat has used, from its Copilot session. */
+export interface ChatUsage {
+  /** The Copilot session the totals are for. */
+  sessionId: string
+  billing: CopilotBilling
+  /** AI credits Copilot's models used (one credit is US$0.01). */
+  aiCredits: number
+  /** Some of Copilot's calls reported no credits, so `aiCredits` is a floor. */
+  creditsPartial: boolean
+  /** Premium requests Copilot's models used. */
+  premiumRequests: number
+  /** Each model's share, Copilot's first. */
+  models: ChatModelUsage[]
+}
+
+/** The signed-in account's Copilot allowance (its premium interactions quota). */
+export interface CopilotQuota {
+  /** What the allowance counts. */
+  unit: CopilotBilling
+  unlimited: boolean
+  /** The allowance for the current period. */
+  entitlement: number
+  /** How much of it is used. */
+  used: number
+  remainingPercent: number
+  /** Usage past the allowance. */
+  overage: number
+  /** Usage may go on past the allowance, billed as additional usage. */
+  overageAllowed: boolean
+  /** When the allowance resets (ISO 8601). */
+  resetDate?: string
+}
+
 /* ------------------------------------------------------------------ *
  * Rayfin CLI / SDK versions
  * ------------------------------------------------------------------ */
@@ -2069,6 +2707,21 @@ export interface RayfinVersionInfo {
   upgradeAvailable: boolean
   /** Per-package detail, used to build the upgrade prompt + popover. */
   packages: RayfinPackageVersion[]
+  /**
+   * The newest stable release within the Rayfin versions the bundled local
+   * backend runs (`rayfin-local.json` `sdk.supported`), for the headline
+   * package; Rayfin's packages ship in lockstep. A personal app's upgrades stop
+   * here. Absent when npm couldn't list the releases or none is in the range.
+   */
+  latestSupportedLocally?: string
+}
+
+/** The newest Rayfin releases, for Home's update offers (`rayfin.latest`). */
+export interface RayfinLatest {
+  /** The newest stable release on npm: where a team app's upgrades go. */
+  latest?: string
+  /** The newest release the bundled local backend runs: where a personal app's go. */
+  latestSupportedLocally?: string
 }
 
 /* ------------------------------------------------------------------ *
@@ -2203,7 +2856,7 @@ export interface CustomSkillPreview {
 
 /**
  * One function secret: its name and description from `rayfin/rayfin.yml`, and
- * whether the deployed app has a value. Values are write-only and never returned.
+ * whether the published app has a value. Values are write-only and never returned.
  */
 export interface SecretInfo {
   name: string
@@ -2211,16 +2864,22 @@ export interface SecretInfo {
   description?: string
   /** Listed in `rayfin.yml`, so functions can reference it by name. */
   declared: boolean
-  /** The deployed app has a value for it. */
+  /** The published app has a value for it. */
   stored: boolean
   createdAt?: string
   updatedAt?: string
 }
 
-/** Why secrets can't be managed, or `ready`. */
+/**
+ * Why the published app's secrets can't be managed here (`not-deployed`: the
+ * app isn't published yet), or `ready`.
+ */
 export type SecretsStatus = 'ready' | 'not-deployed' | 'team' | 'update-rayfin' | 'error'
 
-/** A project's secrets (from the Rayfin CLI), or why they can't be managed here. */
+/**
+ * A project's secrets on its published app (from the Rayfin CLI), or why they
+ * can't be managed here. Their values on this computer are `local.secrets`'.
+ */
 export interface SecretsState {
   status: SecretsStatus
   /** With `ready`, every secret; otherwise only the ones `rayfin.yml` lists. */
@@ -2318,6 +2977,153 @@ export interface AdvisorEventEnvelope {
   event: AdvisorEvent
 }
 
+/* ------------------------------------------------------------------ *
+ * Goals (an experiment)
+ *
+ * What an app is for and the checks it must keep passing, in the project's
+ * `GOALS.md`. Copilot runs the checks on a fresh copy of the app, calling its
+ * routes as each kind of user. Mirrors the Goals DTOs in `types.rs`.
+ * ------------------------------------------------------------------ */
+
+/** How a check came out. `not-proven`: Copilot couldn't show it either way by calling the app. */
+export type GoalStatus = 'passed' | 'failed' | 'not-proven'
+
+/** One check in `GOALS.md`. `id` comes from its words, so a reworded check is a new check. */
+export interface GoalCheck {
+  id: string
+  text: string
+}
+
+/** A check's last outcome on this computer (never kept in the project). */
+export interface GoalResult {
+  checkId: string
+  /** The check as it read when it ran. */
+  check: string
+  status: GoalStatus
+  /** One or two plain sentences: what Copilot found. */
+  summary: string
+  /** The calls that show it, as Fabricator made them: who called, what they asked, how the app answered. */
+  calls: string[]
+  /** What Copilot saw in those answers, or what's missing, as short lines. */
+  evidence: string[]
+  /** RFC3339. */
+  ranAt: string
+  /** A signature of the app's code it ran against. */
+  fingerprint: string
+  /** The app's code changed since it ran. */
+  stale: boolean
+}
+
+/** The last Goals run: when, how long, on which model, and what it covered. */
+export interface GoalsRunInfo {
+  ranAt: string
+  durationMs: number
+  /** Absent on Auto. */
+  model?: string
+  /** Copilot's summary of the run. */
+  summary: string
+  /** The checks it ran. */
+  checkIds: string[]
+  /** It ran every check. */
+  all: boolean
+  /** It got through every check it was given. */
+  complete: boolean
+}
+
+/** An app's goals (`goals.load`): `GOALS.md` read, with each check's last result. */
+export interface GoalsSnapshot {
+  /** `GOALS.md` exists. */
+  exists: boolean
+  /** What the app is for, and who for. */
+  purpose: string
+  checks: GoalCheck[]
+  /** Results of the checks as they read now. */
+  results: GoalResult[]
+  lastRun: GoalsRunInfo | null
+  /** Every check passed, on the app's code as it is now. */
+  allPassed: boolean
+  /** Why the checks can't run for this app, when they can't. */
+  cannotRun: string | null
+  /** A run is going for this app (set by `load` only). */
+  running: boolean
+}
+
+/** What `goals.run` runs: these checks (all of them when absent), on this model. */
+export interface GoalsRunRequest extends AdvisorModelChoice {
+  checkIds?: string[]
+}
+
+/** How a run went (as its `done` event said), and the goals and results after it. */
+export interface GoalsRunEnd {
+  /** Every check it was given has a result. */
+  ok: boolean
+  cancelled: boolean
+  /** Why it stopped short. */
+  error?: string
+  snapshot: GoalsSnapshot
+}
+
+/** Goals Copilot drafted from the app's code, for the user to edit and save. */
+export interface GoalsProposal {
+  purpose: string
+  checks: string[]
+}
+
+/**
+ * Where a run is: `preparing` (copying the app), `starting` its copy,
+ * `seeding` it, `checking`, or `finishing` (removing the copy).
+ */
+export type GoalsPhase = 'preparing' | 'starting' | 'seeding' | 'checking' | 'finishing'
+
+/** Streamed Goals events (main -> renderer). */
+export type GoalsEvent =
+  | { type: 'phase'; phase: GoalsPhase; detail?: string }
+  /** A tool call a run made (sent on start and again when it ends). */
+  | { type: 'activity'; tool: ChatToolCall }
+  /** A check's outcome. */
+  | { type: 'result'; result: GoalResult }
+  /** A tool call a draft made. */
+  | { type: 'draftActivity'; tool: ChatToolCall }
+  /** A run ended: `ok` when every check it was given has a result, else `cancelled` or why it stopped short. */
+  | { type: 'done'; ok: boolean; cancelled: boolean; error?: string }
+
+export interface GoalsEventEnvelope {
+  projectId: string
+  event: GoalsEvent
+}
+
+/**
+ * `window.api.goals` (the Goals experiment): read and save an app's
+ * `GOALS.md`, have Copilot draft it, and run its checks on a fresh copy of the
+ * app. Team apps can't run checks yet (`cannotRun`).
+ */
+export interface GoalsApi {
+  load: (projectId: string) => Promise<GoalsSnapshot>
+  /** Save the purpose and checks to `GOALS.md`, keeping whatever else it says. */
+  save: (projectId: string, purpose: string, checks: string[]) => Promise<GoalsSnapshot>
+  /**
+   * Run checks, streaming `phase`, `activity` and `result` events, then
+   * `done`. Rejects only when the run can't begin (one is already going, say);
+   * otherwise resolves with how it went and the goals and results after it.
+   */
+  run: (projectId: string, request: GoalsRunRequest) => Promise<GoalsRunEnd>
+  /** Stop a run. Resolves with whether one was running. */
+  cancel: (projectId: string) => Promise<boolean>
+  /**
+   * Have Copilot read the app and propose its purpose and checks, building on
+   * what's written so far. Nothing is saved.
+   */
+  draft: (
+    projectId: string,
+    purpose: string,
+    checks: string[],
+    choice?: AdvisorModelChoice
+  ) => Promise<GoalsProposal>
+  /** Stop drafting. Resolves with whether a draft was running. */
+  draftCancel: (projectId: string) => Promise<boolean>
+  onEvent: (cb: (envelope: GoalsEventEnvelope) => void) => () => void
+}
+
 /** Per-project chat configuration (model, reasoning effort and tiers). */
 export interface ChatOptions {
   /** Copilot model id (`--model`); 'auto' or undefined lets Copilot pick. */
@@ -2400,6 +3206,8 @@ export interface ChatMessage {
   interrupted?: boolean
   /** Wall-clock duration of the assistant turn, in ms. Set when the turn finishes. */
   elapsedMs?: number
+  /** What Copilot Fusion chose for this assistant turn, on a Fusion tier. */
+  fusion?: ChatFusion
   /** Epoch ms the message was created (shown as its timestamp). */
   createdAt?: number
   /** Durable Plan-mode artifact owned by this assistant turn, when present. */
@@ -2416,6 +3224,8 @@ export interface ChatMessage {
   advisor?: ChatAdvisorSummary
   /** The Fabric data a (user) message asked Copilot to connect, shown as chips in the transcript. */
   data?: ChatDataRef[]
+  /** Files and folders on this computer a (user) message gave Copilot to read, shown as chips. */
+  files?: ChatFileRef[]
   /** The report-migration page a (user) message asked Copilot to build, shown as a chip. */
   migration?: ChatMigrationRef
   /**
@@ -2433,6 +3243,12 @@ export interface ChatDataRef {
   workspace: string
 }
 
+/** A file or folder on this computer a message gave Copilot to read. */
+export interface ChatFileRef {
+  path: string
+  dir: boolean
+}
+
 /** The report-migration turn a message started, as its chip shows it. */
 export interface ChatMigrationRef {
   reportName: string
@@ -2440,6 +3256,87 @@ export interface ChatMigrationRef {
   page?: { index: number; count: number; name: string }
   /** True for the first turn, which also sets up the app. */
   foundation?: boolean
+}
+
+/* ------------------------------------------------------------------ *
+ * App gallery
+ * ------------------------------------------------------------------ */
+
+/** The Azure CLI's signed-in account, which the gallery reads with. */
+export interface GalleryAccount {
+  user?: string
+  tenantId?: string
+}
+
+/** The project on this computer that publishes to a gallery app. */
+export interface GalleryLocal {
+  projectId: string
+  projectName: string
+}
+
+/** The team workspace a gallery app belongs to. */
+export interface GalleryTeam {
+  /** The local team workspace's id. */
+  workspaceId: string
+  name: string
+  /** A teammate's preview, rather than the team's published app. */
+  preview: boolean
+}
+
+/** One Rayfin app (a Fabric `AppBackend` item) the Azure CLI's account can open. */
+export interface GalleryApp {
+  /** The Fabric item id. */
+  id: string
+  name: string
+  description?: string
+  workspaceId: string
+  workspaceName: string
+  /** The app's page in the Fabric portal. */
+  portalUrl: string
+  /** The app's own address, when a project on this computer records it. */
+  hostingUrl?: string
+  local?: GalleryLocal
+  team?: GalleryTeam
+  /**
+   * The account can change the app: it's an Admin, Member or Contributor of
+   * the app's workspace. Absent when Fabric didn't say.
+   */
+  canEdit?: boolean
+}
+
+/** Every app the account can open, A to Z. */
+export interface GalleryResult {
+  ok: boolean
+  /** Reading needs an Azure sign-in (missing, expired or rejected). */
+  needsAz?: boolean
+  error?: string
+  apps: GalleryApp[]
+  account?: GalleryAccount
+  /** More apps than the gallery reads at once. */
+  truncated?: boolean
+}
+
+/** What Fabric says about an app's latest publish. */
+export interface GalleryStatus {
+  id: string
+  /** The app's own address, once it has published its pages. */
+  hostingUrl?: string
+  /** When it last published successfully (ISO 8601). */
+  publishedAt?: string
+  /** Its latest publish, when Fabric says. */
+  deployState?: 'in-progress' | 'completed' | 'failed'
+  /** Fabric couldn't say: no access to the app's status, or the read failed. */
+  unknown?: boolean
+}
+
+/** What describing a project's published app came to (`gallery.describe`). */
+export interface GalleryDescribeResult {
+  ok: boolean
+  /** The app's description now: the one it had, or the one just written. */
+  description?: string
+  /** It had a description already, which it keeps. */
+  kept?: boolean
+  error?: string
 }
 
 /* ------------------------------------------------------------------ *
@@ -2926,16 +3823,27 @@ export const IpcChannels = {
   procLog: 'proc:log',
   chatEvent: 'chat:event',
   advisorEvent: 'advisor:event',
+  goalsEvent: 'goals:event',
   helpEvent: 'help:event',
   designVariation: 'design:variation',
   previewNav: 'preview:nav',
   previewAgent: 'preview:agent',
   updateProgress: 'update:progress',
   deleteProgress: 'delete:progress',
+  zipProgress: 'zip:progress',
+  exportOpened: 'export:opened',
+  appsState: 'apps:state',
+  appsLog: 'apps:log',
+  appsProgress: 'apps:progress',
+  appsChanged: 'apps:changed',
+  appsWindow: 'apps:window',
+  securityEvent: 'security:event',
   teamProgress: 'team:progress',
   teamDiagnosis: 'team:diagnosis',
   devState: 'dev:state',
-  migrationState: 'migration:state'
+  migrationState: 'migration:state',
+  localState: 'local:state',
+  localLog: 'local:log'
 } as const
 
 export type IpcChannel = (typeof IpcChannels)[keyof typeof IpcChannels]
@@ -2991,6 +3899,13 @@ export interface RayfinStudioApi {
    * `background` (`#rrggbb`) is that screen's colour. Later calls do nothing.
    */
   revealWindow: (background?: string) => Promise<void>
+  /**
+   * Files and folders dragged onto Fabricator's window from the OS. The page
+   * gets no drag events of its own for them (the window takes the drop to
+   * learn their paths), so a drop target hit-tests `point` itself. Returns an
+   * unsubscribe fn.
+   */
+  onFileDrop: (cb: (event: FileDropEvent) => void) => () => void
 
   /** In-app auto-update (Tauri updater, backed by GitHub Releases). */
   updates: {
@@ -3193,18 +4108,54 @@ export interface RayfinStudioApi {
     onState: (cb: (event: MigrationStateEvent) => void) => () => void
   }
 
+  /**
+   * The app gallery (experimental): every Rayfin app the Azure CLI's account
+   * can open in Fabric, including apps that aren't on this computer.
+   */
+  gallery: {
+    /** Every app, A to Z. `refresh` signs in to Azure afresh and drops cached statuses. Never throws. */
+    list: (refresh?: boolean) => Promise<GalleryResult>
+    /** Each app's address and last publish, in the order asked (up to 50 at a time). Never throws. */
+    status: (apps: Array<{ workspaceId: string; id: string }>) => Promise<GalleryStatus[]>
+    /**
+     * Have Copilot write a one-line description of a project's published app,
+     * and save it in Fabric. An app that has one keeps it unless `replace`.
+     * Never throws.
+     */
+    describe: (projectId: string, replace?: boolean) => Promise<GalleryDescribeResult>
+    /**
+     * Quick look: an app's live page (an `https` address) in a native webview of
+     * its own over `bounds`, which paints above all HTML. Kept placed with
+     * `setBounds`; `close` takes it away.
+     */
+    quickLook: {
+      show: (url: string, bounds: PreviewBounds) => Promise<void>
+      setBounds: (bounds: PreviewBounds) => Promise<void>
+      close: () => Promise<void>
+    }
+  }
+
   projects: {
     /** Current projects state (workspace root, list, active id). */
     state: () => Promise<ProjectsState>
     /** Fetch a community template gallery (defaults to microsoft/awesome-rayfin). */
     communityTemplates: (repoUrl?: string) => Promise<CommunityGalleryResult>
     /**
-     * Whether a new project's name is free: in the projects folder, or in a
-     * team workspace (its apps and its published-apps Fabric workspace).
+     * Whether a new project's name is free: in the projects folder (or the
+     * folder chosen instead, `location`), or in a team workspace (its apps and
+     * its published-apps Fabric workspace).
      */
-    checkName: (name: string, teamWorkspaceId?: string) => Promise<ProjectNameCheck>
+    checkName: (
+      name: string,
+      teamWorkspaceId?: string,
+      location?: string
+    ) => Promise<ProjectNameCheck>
     /** Native folder picker; returns the chosen path or null if cancelled. */
     pickFolder: () => Promise<string | null>
+    /** Whether a folder can take a new project; blank is the projects folder. */
+    checkLocation: (path: string) => Promise<ProjectLocationCheck>
+    /** Create a missing folder for a new project to go in. */
+    createLocation: (path: string) => Promise<ProjectLocationCheck>
     /** Native folder picker for the workspace root; persists and returns state. */
     pickWorkspaceRoot: () => Promise<ProjectsState>
     setWorkspaceRoot: (path: string) => Promise<ProjectsState>
@@ -3215,6 +4166,17 @@ export interface RayfinStudioApi {
     /** Install missing dependencies so this project's pinned Rayfin CLI is ready. */
     ensureDependencies: (id: string) => Promise<ProjectActionResult>
     setActive: (id: string | null) => Promise<ProjectsState>
+    /** Pin a project to the top of Home's recent projects, or unpin it. */
+    setPinned: (id: string, pinned: boolean) => Promise<ProjectsState>
+    /** Open a project's folder in the file manager. Rejects when it's gone. */
+    reveal: (id: string) => Promise<void>
+    /**
+     * Keep a project's thumbnail, a WebP `data:` URL drawn from its preview.
+     * Resolves to when it was saved (the project's new `thumbnailAt`).
+     */
+    saveThumbnail: (id: string, image: string) => Promise<string>
+    /** The projects' thumbnails as `data:` URLs, by id; ones without a thumbnail are left out. */
+    thumbnails: (ids: string[]) => Promise<Record<string, string>>
     /** Rename a project (updates the display name and rayfin/rayfin.yml `name`). */
     rename: (id: string, name: string) => Promise<ProjectActionResult>
     /** Set (or clear, when empty) the Fabric workspace a project deploys to. */
@@ -3234,11 +4196,55 @@ export interface RayfinStudioApi {
      * pass `deleteFiles: true` to also move the project folder to the OS trash.
      */
     remove: (id: string, deleteFiles?: boolean) => Promise<ProjectsState>
+    /** What exporting the project would put in its file. Rejects for a team or missing project. */
+    exportPreview: (id: string) => Promise<ExportPreview>
+    /**
+     * Ask where to save the project's `.fabricator` file, then write it (progress
+     * on `onZipProgress`). Never rejects: a failure is in `error`.
+     */
+    exportProject: (id: string, options: ExportOptions) => Promise<ExportResult>
+    /**
+     * Ask where to save the project as an app (`.rayfin`), then write it with
+     * `icons`, the app's icon drawn at each size (progress on `onZipProgress`).
+     * Never rejects: a failure is in `error`.
+     */
+    exportApp: (id: string, icons: AppIconImage[]) => Promise<ExportResult>
+    /** Stop exporting the project; `exportProject` then resolves as cancelled. */
+    stopExport: (id: string) => Promise<void>
+    /** Show a saved export in the file manager. */
+    revealExport: (path: string) => Promise<void>
+    /** Pick a `.fabricator` file, or a .zip of a Rayfin project, to import; null when cancelled. */
+    pickImport: () => Promise<string | null>
+    /** What importing the file would bring in. Rejects when it isn't a Rayfin project. */
+    inspectImport: (path: string) => Promise<ImportPreview>
+    /**
+     * Unpack the file into a new folder in the projects folder and make it the
+     * active project (progress on `onZipProgress`). Never rejects.
+     */
+    importProject: (path: string) => Promise<ImportResult>
+    /** The `.fabricator` files the system asked Fabricator to open. Each is returned once. */
+    openedExports: () => Promise<string[]>
+    /** A `.fabricator` file was opened with Fabricator: read it with `openedExports`. */
+    onExportOpened: (cb: () => void) => () => void
+    onZipProgress: (cb: (event: ZipProgressEvent) => void) => () => void
     git: {
       /** Snapshot of the project's git working tree (branch + change count). */
       status: (id: string) => Promise<GitStatus>
       /** Stage everything and commit; resolves with the post-commit status. */
       commit: (id: string, message: string) => Promise<GitCommitResult>
+      /**
+       * Have Copilot, on its Auto model, write a one-line message for what
+       * committing everything would take. Lockfiles, `.env` files and the local
+       * backend's state are left out of what it sees.
+       */
+      message: (id: string) => Promise<GitMessageResult>
+      /**
+       * After a chat turn that changed a personal app: save its changes as a
+       * version named after what the user asked (`request`, trimmed to a
+       * commit subject), never the local backend's `.rayfin-local`. Does
+       * nothing for team apps.
+       */
+      saveTurn: (id: string, request: string) => Promise<SavedTurn>
       /** The project's commit timeline + uncommitted-change count (History view). */
       log: (id: string) => Promise<GitHistory>
       /**
@@ -3283,18 +4289,41 @@ export interface RayfinStudioApi {
       pull: (id: string) => Promise<GitSyncResult>
       /** Push local commits to the remote (only when an upstream exists). */
       push: (id: string) => Promise<GitSyncResult>
+      /** The branches to switch to: local ones, then remote ones without a local branch. */
+      branches: (id: string) => Promise<GitBranches>
+      /**
+       * Switch to a branch from `branches`, saving uncommitted changes on the
+       * current branch first. A remote branch gets a local branch that follows it.
+       */
+      switchBranch: (id: string, branch: string) => Promise<GitSyncResult>
+      /**
+       * After a pull whose changes overlapped yours: merge the latest changes,
+       * leaving their conflicts (`status.conflicts`) for Copilot or you.
+       */
+      mergeLatest: (id: string) => Promise<GitSyncResult>
+      /** Commit a merge whose conflicts are all resolved. */
+      finishMerge: (id: string) => Promise<GitSyncResult>
+      /** Cancel a merge, back to how things were before it. */
+      abortMerge: (id: string) => Promise<GitSyncResult>
     }
     files: {
       /** The project's pruned, sorted file tree (read-only browsing). */
       tree: (id: string) => Promise<FileNode[]>
       /** Read one project file's text (size-capped, traversal-guarded). */
       read: (id: string, path: string) => Promise<FileContent>
+      /**
+       * List one folder for an `@` reference in chat: relative to the project,
+       * from the home folder after `~`, or absolute. Names only.
+       */
+      listDir: (id: string, path: string) => Promise<DirListing>
     }
   }
 
   rayfin: {
     /** The project's local Rayfin CLI + SDK versions, with upgrade availability. */
     versions: (id: string) => Promise<RayfinVersionInfo>
+    /** The newest Rayfin releases (cached; empty when npm is unreachable). */
+    latest: () => Promise<RayfinLatest>
   }
 
   skills: {
@@ -3342,9 +4371,10 @@ export interface RayfinStudioApi {
   }
 
   /**
-   * Function secrets on the project's deployed app, through its Rayfin CLI
+   * Function secrets on the project's published app, through its Rayfin CLI
    * (`rayfin secret`). Values are write-only: they go to the CLI and are never
-   * returned, stored or logged by Fabricator.
+   * returned, stored or logged by Fabricator. Values on this computer are
+   * `local`'s (`secrets`, `setSecret`, `deleteSecret`).
    */
   secrets: {
     /** Every secret's name, description and when its value last changed. */
@@ -3354,8 +4384,14 @@ export interface RayfinStudioApi {
      * (with `description`) and the change is committed.
      */
     set: (projectId: string, name: string, value: string, description?: string) => Promise<SecretActionResult>
-    /** Delete a secret from the deployed app and `rayfin.yml`. */
+    /** Delete a secret from the published app and `rayfin.yml`. */
     remove: (projectId: string, name: string) => Promise<SecretActionResult>
+    /**
+     * Add a secret to `rayfin.yml` (with `description`) and commit it, with no
+     * value and no published app needed. Its value on this computer is
+     * `local.setSecret`'s; a name that's already declared stays as it is.
+     */
+    declare: (projectId: string, name: string, description?: string) => Promise<SecretActionResult>
   }
 
   /**
@@ -3506,6 +4542,11 @@ export interface RayfinStudioApi {
     saveHistory: (projectId: string, messages: ChatMessage[]) => Promise<void>
     /** Set the model, reasoning effort and tiers used for this project's chat. */
     setOptions: (projectId: string, options: ChatOptions) => Promise<void>
+    /**
+     * Turn a plugin on or off in this project's chat, from its next message.
+     * Resolves to the plugins now on there.
+     */
+    setPlugin: (projectId: string, plugin: ChatPluginId, on: boolean) => Promise<string[]>
     /** List the Copilot models available to the signed-in user (for the picker). */
     listModels: () => Promise<CopilotModel[]>
     /**
@@ -3513,6 +4554,14 @@ export interface RayfinStudioApi {
      * Intelligence…), or null when Copilot offers no choice.
      */
     autoTiers: () => Promise<AutoTiers | null>
+    /**
+     * What a project's chat has used: AI credits or premium requests on
+     * Copilot's models, and tokens by model, including models on your own keys.
+     * Null before the chat has a Copilot session.
+     */
+    usage: (projectId: string) => Promise<ChatUsage | null>
+    /** The signed-in account's Copilot allowance, read fresh, or null when it has none. */
+    quota: () => Promise<CopilotQuota | null>
     /**
      * Generate (or return cached) Copilot starter suggestions for a project's
      * empty Build chat, grounded in the app's code. `ok: false` means the
@@ -3522,11 +4571,26 @@ export interface RayfinStudioApi {
     suggest: (projectId: string) => Promise<SuggestionSet>
     /** Cancel an in-flight suggestion generation (e.g. the user started typing). */
     cancelSuggest: (projectId: string) => Promise<boolean>
+    /**
+     * Let the user pick files and folders on this computer, in one system
+     * dialog, to add to a message. Empty when the dialog is closed.
+     */
+    pickPaths: () => Promise<string[]>
+    /**
+     * Which of `paths`, dropped on the composer or picked on this computer, are
+     * folders. Paths that don't exist are left out.
+     */
+    inspectPaths: (paths: string[]) => Promise<ChatPathInfo[]>
   }
 
   screenshot: {
     /** Persist a captured PNG (data URL) to a temp file; returns its path. */
     save: (dataUrl: string) => Promise<string>
+    /**
+     * Read an image file on this computer (PNG, JPEG, GIF, WebP or BMP, at
+     * most 20 MB) as a data URL, to attach it like a pasted one.
+     */
+    read: (path: string) => Promise<string>
     /** Delete temp screenshot files (best-effort; only within Studio's temp dir). */
     cleanup: (paths: string[]) => Promise<void>
   }
@@ -3537,8 +4601,10 @@ export interface RayfinStudioApi {
      * 'deploy:run' channel) and resolve the live URL. Studio owns deploys.
      * `workspace` optionally targets a Fabric workspace by display name (first
      * deploy); subsequent deploys reuse the recorded active deployment.
+     * `itemName` publishes into the existing Rayfin app of that name there
+     * (see {@link DeployTargetCheck.apps}) instead of a new one.
      */
-    run: (projectId: string, workspace?: string) => Promise<DeployResult>
+    run: (projectId: string, workspace?: string, itemName?: string) => Promise<DeployResult>
     /** Read the persisted deployment status (`rayfin up status --json`). */
     status: (projectId: string) => Promise<DeployStatus>
     /**
@@ -3558,6 +4624,13 @@ export interface RayfinStudioApi {
      * recorded workspace name; pass `byId` to switch by workspace GUID instead.
      */
     switch: (projectId: string, workspace: string, byId?: boolean) => Promise<DeployResult>
+    /**
+     * Delete one of the project's published apps: the app in Fabric, with its
+     * data, and its record. When the project published to it, the most recently
+     * published of the others takes over. `workspace` is the deployment's
+     * workspace GUID (or its recorded workspace name).
+     */
+    remove: (projectId: string, workspace: string) => Promise<DeployRemoveResult>
     /**
      * Set (or clear, when empty) the friendly name for one of the project's
      * deployments. `workspaceKey` is the deployment's workspace GUID (or its
@@ -3668,6 +4741,22 @@ export interface RayfinStudioApi {
   }
 
   /**
+   * MCP servers (experimental; {@link ExperimentFlags.mcpServers}). The values
+   * of a server's environment variables and headers only ever go to the
+   * backend, to be kept in the OS credential store; nothing returns one.
+   */
+  mcp: {
+    /** The servers you added. */
+    list: () => Promise<McpServer[]>
+    /** Add a server, or change one (with its id). Resolves to all of them. */
+    save: (server: McpServerInput) => Promise<McpServer[]>
+    /** Remove a server and turn it off in every chat. Resolves to the rest. */
+    remove: (id: string) => Promise<McpServer[]>
+    /** Start or connect to a saved server on its own, and list its tools. */
+    check: (id: string) => Promise<McpCheckResult>
+  }
+
+  /**
    * Embedded preview pane, backed by a single native WebView2 child webview that
    * floats above the React layout. The renderer owns *where* it sits (it reports
    * the host element's bounds) and *when* it is visible (it must hide the webview
@@ -3712,11 +4801,20 @@ export interface RayfinStudioApi {
     forward: () => Promise<void>
     /**
      * Capture the current preview content as a PNG `data:` URL (via WebView2's
-     * `CapturePreview`). Used for the still frame shown while an overlay hides the
-     * native preview, and by Design to attach the previewed changes (full view +
-     * element crops) to a chat turn. Rejects when no preview is open or capture fails.
+     * `CapturePreview`). Lossless, for Design to attach the previewed changes
+     * (full view + element crops) to a chat turn. Rejects when no preview is open
+     * or capture fails.
      */
     capture: () => Promise<string>
+    /**
+     * An image URL of the preview's current frame, for the still painted in its
+     * place while an HTML overlay covers it. Built for speed, since the overlay
+     * waits on it: on Windows a JPEG served from the app's `preview-still` scheme
+     * (allowed in index.html's CSP), so it never travels through IPC as base64;
+     * elsewhere the same PNG `data:` URL as {@link capture}. Not for attachments.
+     * Rejects when the preview isn't shown or the capture doesn't finish in time.
+     */
+    still: () => Promise<string>
     /** Subscribe to preview navigation state. Returns an unsubscribe function. */
     onNavState: (cb: (state: PreviewNavState) => void) => () => void
     /**
@@ -3758,6 +4856,15 @@ export interface RayfinStudioApi {
        */
       setTheme: (theme: DesignHostTheme) => Promise<void>
     }
+    /**
+     * Clear the `localStorage` and `sessionStorage` of the page the preview
+     * shows, then reload it, so an app that signs itself in signs in again:
+     * Preview as calls it after changing who the app signs in as on its local
+     * backend. Only for a page served from this computer (`localhost` or a
+     * loopback address): resolves `false`, changing nothing, while the preview
+     * shows another site or nothing. Rejects when the page doesn't answer.
+     */
+    resetSiteData: () => Promise<boolean>
   }
 
   /** Subscribe to streamed process output. Returns an unsubscribe function. */
@@ -3901,4 +5008,554 @@ export interface RayfinStudioApi {
     onDiagnosis: (cb: (envelope: TeamDiagnosisEnvelope) => void) => () => void
     onProgress: (cb: (event: TeamProgressEvent) => void) => () => void
   }
+
+  /** Each project's local backend (rayfin-local); see {@link LocalBackendApi}. */
+  local: LocalBackendApi
+  apps: InstalledAppsApi
+  security: SecurityCheckApi
+  /** The Goals experiment; see {@link GoalsApi}. */
+  goals: GoalsApi
+}
+
+/* ------------------------------------------------------------------ *
+ * Local backend (rayfin-local)
+ *
+ * Every personal project runs its whole Rayfin backend and its Vite on this
+ * computer under the bundled rayfin-local. These mirror the Rust DTOs in
+ * `types.rs` and rayfin-local's host contract (version 1). Fields rayfin-local
+ * doesn't send are `null` or empty.
+ * ------------------------------------------------------------------ */
+
+/** Where a project's local backend is in its lifecycle (`local:state`). */
+export type LocalBackendState = 'stopped' | 'starting' | 'running' | 'restarting' | 'error'
+
+/** Who the app signs in as automatically: `developer`, `none` or `user:<username>`. */
+export type LocalSignInAs = 'developer' | 'none' | `user:${string}`
+
+/** How to start a project's local backend. */
+export interface LocalStartOptions {
+  /** Apply a schema change that loses data (`--force-schema`), for this start only. */
+  forceSchema?: boolean
+  /** Start from an empty database (`--reset`), for this start only. */
+  reset?: boolean
+  /** Who the app signs in as. Restarts keep it. */
+  signInAs?: LocalSignInAs
+}
+
+/** The Rayfin SDK an app uses, and whether rayfin-local implements it. */
+export interface LocalSdk {
+  /** `null` when the packages aren't installed. */
+  version: string | null
+  supported: boolean
+}
+
+export interface LocalConnector {
+  name: string
+  type: string
+  /** `false` for connector types that run only on Fabric (rayfin-local answers 501). */
+  supported: boolean
+}
+
+/** What the running app offers. */
+export interface LocalFeatures {
+  data: { enabled: boolean; entities: string[] }
+  functions: { enabled: boolean; names: string[] }
+  storage: { enabled: boolean; folders: string[] }
+  /** `fabric`: the local Fabric sign-in page; `password`: username and password sign-in. */
+  auth: { enabled: boolean; fabric: boolean; password: boolean }
+  connectors: LocalConnector[]
+}
+
+/** Everything started: where the app and its backend answer. */
+export interface LocalReady {
+  /** The app's own dev server (show this in the preview); `null` without a frontend. */
+  appUrl: string | null
+  apiUrl: string
+  /** The local Fabric host that embeds the app; `null` when the app has no Fabric sign-in. */
+  embedUrl: string | null
+  portalUrl: string | null
+  dataDir: string | null
+  signInAs: { kind: 'developer' | 'user' | 'none'; [key: string]: unknown } | null
+  sdk: LocalSdk | null
+  features: LocalFeatures
+  time: string | null
+}
+
+/** The app model was analyzed. `ok: false` while running keeps the previous model. */
+export interface LocalAnalysis {
+  ok: boolean
+  sdk: LocalSdk | null
+  entities: string[]
+  storageFolders: string[]
+  message: string | null
+  time: string | null
+}
+
+/** The database was brought up to date with the model, or wasn't. */
+export interface LocalSchema {
+  result: 'unchanged' | 'applied' | 'refused' | 'failed'
+  changes: string[]
+  /** `refused`: the data the change would lose. `applied` with `forceSchema`: what it dropped. */
+  losses: string[]
+  message: string | null
+  /** A change made while serving (a refused one keeps the previous schema). */
+  live: boolean
+  time: string | null
+}
+
+export interface LocalFunctions {
+  state: 'building' | 'ready' | 'failed' | 'off'
+  names: string[]
+  /** With `failed`: one compiler message each. */
+  errors: string[]
+  message: string | null
+  time: string | null
+}
+
+export interface LocalVite {
+  state: 'ready' | 'exited' | 'restarting' | 'failed'
+  url: string | null
+  version: string | null
+  message: string | null
+  time: string | null
+}
+
+/** `rayfin.yml`, `rayfin-local.toml` or a secret's value changed while serving. */
+export interface LocalConfigChanged {
+  /** Applied on the same ports; a new `ready` follows. */
+  applied: boolean
+  /** Fabricator restarts the backend by itself. */
+  restartRequired: boolean
+  what: string[]
+  message: string | null
+  time: string | null
+}
+
+/** {@link LocalProblem} codes: rayfin-local's (stable, documented in its contract) and Fabricator's. */
+export type LocalProblemCode =
+  | 'node-missing'
+  | 'node-too-old'
+  | 'project-not-found'
+  | 'config-invalid'
+  | 'packages-missing'
+  | 'sdk-unsupported'
+  | 'analysis-failed'
+  | 'schema-refused'
+  | 'schema-failed'
+  | 'port-in-use'
+  | 'already-serving'
+  | 'vite-failed'
+  | 'functions-build-failed'
+  | 'secret-missing'
+  | 'anonymous-role'
+  | 'connector-unsupported'
+  | 'azure-sign-in'
+  | 'internal'
+  /** The bundled rayfin-local is missing. */
+  | 'binary-missing'
+  /** It predates host contract 1 (rayfin-local 0.1.x). */
+  | 'binary-too-old'
+  /** It speaks a newer contract. */
+  | 'binary-incompatible'
+  /** Windows (antivirus, app control) refused to run it; `details.docs` says what to do. */
+  | 'binary-blocked'
+  | 'binary-failed'
+  | 'spawn-failed'
+  /** It exited unexpectedly and is being restarted (`state: 'restarting'`). */
+  | 'exited'
+  /** It exited unexpectedly too often; `details.lines` has its last output. */
+  | 'crashed'
+
+/** The structured data of a {@link LocalProblem}, by code. */
+export interface LocalErrorDetails {
+  /** `already-serving`: the other `serve`'s process (stop it with `local.stopExternal`) and URLs. */
+  pid?: number
+  appUrl?: string | null
+  apiUrl?: string | null
+  /** `schema-refused`: the data the change would lose. */
+  losses?: string[]
+  /** `packages-missing`: the folder to run `npm install` in. */
+  dir?: string
+  /** `port-in-use`. */
+  port?: number
+  /** `node-too-old`, `sdk-unsupported`, `binary-too-old`. */
+  version?: string | null
+  /** `sdk-unsupported`: the supported range. */
+  supported?: string
+  /** `secret-missing`, `connector-unsupported`. */
+  name?: string
+  /** `connector-unsupported`. */
+  type?: string
+  /** `anonymous-role`. */
+  entities?: string[]
+  /** `exited`, `crashed`. */
+  exitCode?: number | null
+  /** `exited`, `crashed`: the last lines of output. */
+  lines?: string[]
+  /** `binary-blocked`: what to do. */
+  docs?: string
+  [key: string]: unknown
+}
+
+/** A warning or an error. Act on `code`; `message` and `hint` are for people. */
+export interface LocalProblem {
+  code: LocalProblemCode | (string & Record<never, never>)
+  message: string
+  hint: string | null
+  /** The backend stops after a fatal error. */
+  fatal: boolean
+  details: LocalErrorDetails | null
+  time: string | null
+}
+
+/** How a run ended. */
+export interface LocalStopped {
+  reason: 'stdin-closed' | 'signal' | 'error' | 'backend-exited'
+  exitCode: number | null
+  time: string | null
+}
+
+/** A project's local backend: its state and the latest it reported (`local:state`). */
+export interface LocalStatus {
+  projectId: string
+  state: LocalBackendState
+  /** Grows with every change: keep the snapshot with the highest. */
+  revision: number
+  /** While starting: the last step (`starting`, `analysis`, `schema`, `functions`, `vite`). */
+  phase: string | null
+  pid: number | null
+  /** rayfin-local's version. */
+  version: string | null
+  projectRoot: string | null
+  /** The sign-in identity restarts keep. */
+  signInAs: LocalSignInAs | null
+  /** While running: the app's URLs and features. */
+  ready: LocalReady | null
+  analysis: LocalAnalysis | null
+  schema: LocalSchema | null
+  functions: LocalFunctions | null
+  vite: LocalVite | null
+  config: LocalConfigChanged | null
+  /** This run's warnings, oldest first. */
+  warnings: LocalProblem[]
+  /**
+   * Set by Fabricator: the app's Rayfin SDK, which rayfin-local doesn't
+   * implement (`sdk-unsupported`), is of a newer line than the one it does. It
+   * runs the app anyway, as rayfin-local does; some things may not work.
+   */
+  newerSdk: boolean
+  /** The last error. With `state: 'error'`, why the backend isn't running. */
+  error: LocalProblem | null
+  stopped: LocalStopped | null
+  /** Unexpected exits in the last two minutes. */
+  crashes: number
+  startedAt: string | null
+  updatedAt: string | null
+}
+
+/** One line of a project's local backend output (`local:log`). */
+export interface LocalLogEvent {
+  projectId: string
+  /** Grows with every line of the project: merge a fetched tail with live lines by it. */
+  seq: number
+  /** `vite`, `functions`, `build`, `rayfin-local`, `stderr`, `stdout` or `fabricator`. */
+  source: string
+  level: 'debug' | 'info' | 'warn' | 'error'
+  line: string
+  time: string
+}
+
+/** A local user of the app. */
+export interface LocalUser {
+  id: string
+  username: string
+  /** `null` when the username isn't an email address. */
+  email: string | null
+  createdAt: string | null
+  /** How the user can sign in: `password`, `entra`. */
+  signIn: string[]
+  /** The developer's own account. */
+  developer: boolean
+}
+
+/** Who the app signs in as automatically. */
+export interface LocalIdentity {
+  kind: 'developer' | 'user' | 'none'
+  /** The user it signs in as (`developer`: `null` until first used). */
+  user: LocalUser | null
+}
+
+/** A new sign-in identity. Changing it signs every local session out. */
+export type LocalIdentityRequest =
+  | { kind: 'developer' }
+  | { kind: 'none' }
+  /** `user`: a username or id; `create` makes a missing one. */
+  | { kind: 'user'; user: string; create?: boolean }
+
+export interface LocalEntity {
+  name: string
+  rows: number
+}
+
+export interface LocalColumn {
+  name: string
+  type: string
+  /** Part of the primary key. */
+  key: boolean
+}
+
+/** A page of an entity's rows, regardless of permissions, formatted as the data API formats them. */
+export interface LocalRows {
+  columns: LocalColumn[]
+  rows: Record<string, unknown>[]
+  total: number
+}
+
+/** A storage folder and the files stored in it locally. */
+export interface LocalStorageFolder {
+  name: string
+  /** Its `@blob` class's name; `null` when the app no longer declares the folder. */
+  displayName: string | null
+  files: number
+  /** The size of its files together, in bytes. */
+  bytes: number
+}
+
+/** A stored file, regardless of its folder's rules. */
+export interface LocalFile {
+  id: string
+  /** Its path in the folder, such as `team/2024/scan.pdf`. */
+  path: string
+  name: string
+  /** In bytes. */
+  size: number
+  contentType: string
+  /** The local user who first uploaded it; `null` for anonymous uploads. */
+  ownerId: string | null
+  createdAt: string | null
+  updatedAt: string | null
+  /** The app's own fields of the file. */
+  fields: Record<string, unknown> | null
+}
+
+/** A page of a storage folder's files, in path order. */
+export interface LocalFiles {
+  files: LocalFile[]
+  total: number
+}
+
+export interface LocalReloadResult {
+  schema: LocalSchema | null
+  config: LocalConfigChanged | null
+}
+
+/** Something wrong with the project's seed data (`rayfin/seed`), and where. */
+export interface LocalSeedProblem {
+  /** From the project root, such as `rayfin/seed/data/Todo.csv`. */
+  file: string
+  /** A JSON array's item (from 1), or a CSV file's line; `null` for the whole file. */
+  row: number | null
+  /** The field at fault. */
+  field: string | null
+  message: string
+}
+
+/** An entity's rows in the seed data. */
+export interface LocalSeedEntity {
+  name: string
+  /** The file, from the project root (`seed` only). */
+  file?: string
+  rows: number
+}
+
+/** A storage folder's files in the seed data. */
+export interface LocalSeedFolder {
+  folder: string
+  files: number
+  /** Their size together (`seed` only). */
+  bytes?: number
+}
+
+/** The project's seed data (`rayfin/seed`), checked without loading it. */
+export interface LocalSeed {
+  /** `rayfin/seed` holds seed data. */
+  exists: boolean
+  entities: LocalSeedEntity[]
+  storage: LocalSeedFolder[]
+  /** The user placeholders it uses, such as `$developer`. */
+  users: string[]
+  problems: LocalSeedProblem[]
+}
+
+/**
+ * What loading the seed data did, or would do in a dry run: what it stored,
+ * or (`ok: false`) the problems that kept it from changing anything.
+ */
+export interface LocalSeedLoad {
+  ok: boolean
+  dryRun: boolean
+  entities: LocalSeedEntity[]
+  storage: LocalSeedFolder[]
+  problems: LocalSeedProblem[]
+}
+
+/** What saving the local data as seed data wrote to `rayfin/seed`. */
+export interface LocalSeedSaved {
+  entities: number
+  rows: number
+  files: number
+  /** Stored files left out, each as `<folder>/<path>: <why>`. */
+  skipped: string[]
+}
+
+/** Where a secret's local value comes from (never the value). */
+export interface LocalSecret {
+  name: string
+  /** Listed under `secrets:` in `rayfin.yml`. */
+  declared: boolean
+  description: string | null
+  /** `local`: `.rayfin-local/secrets.json`; `settings`: `local.settings.json`. */
+  source: 'env' | 'local' | 'settings' | 'none'
+}
+
+/**
+ * Why a `window.api.local` command failed. `code` is stable: the control API's
+ * own codes, or `not-running`, `project-not-found`, `invalid`, `unreachable`,
+ * `timeout`, `unauthorized`, `not-rayfin-local`, `cli-failed`, `save-failed`
+ * and the `binary-*` codes of {@link LocalProblemCode}.
+ */
+export interface LocalCommandError {
+  code: string
+  message: string
+  hint?: string
+  /** The HTTP status the control API answered with. */
+  status?: number
+}
+
+/**
+ * `window.api.local`: each project's local backend. Commands reject with a
+ * `LocalBackendError` (`localBackend.ts`), an `Error` carrying the
+ * {@link LocalCommandError} fields. The data, user and identity commands, and
+ * `reload` and `resetData`, need the backend running.
+ */
+export interface LocalBackendApi {
+  /** Start the backend unless it runs. Resolves at once (`starting`); `onState` follows. */
+  start: (projectId: string, options?: LocalStartOptions) => Promise<LocalStatus>
+  /** Stop it (it gets 8 s after its stdin closes) and resolve once it has. */
+  stop: (projectId: string) => Promise<LocalStatus>
+  /** Stop it if it runs and start it with `options`. */
+  restart: (projectId: string, options?: LocalStartOptions) => Promise<LocalStatus>
+  status: (projectId: string) => Promise<LocalStatus>
+  /** The last `limit` lines of output (default 500, at most 2000), oldest first. */
+  logs: (projectId: string, limit?: number) => Promise<LocalLogEvent[]>
+  /** Read `rayfin.yml`, the entities and the secrets again; `forceSchema` applies a change that loses data. */
+  reload: (projectId: string, forceSchema: boolean) => Promise<LocalReloadResult>
+  /** Delete every row, the local users and the stored files, without a restart. */
+  resetData: (projectId: string) => Promise<void>
+  users: (projectId: string) => Promise<LocalUser[]>
+  /** Without a password the user can only be signed in by Fabricator. */
+  addUser: (projectId: string, username: string, password?: string) => Promise<LocalUser>
+  /** By username or id. */
+  deleteUser: (projectId: string, user: string) => Promise<void>
+  identity: (projectId: string) => Promise<LocalIdentity>
+  /** Restarts keep it. */
+  setIdentity: (projectId: string, identity: LocalIdentityRequest) => Promise<LocalIdentity>
+  entities: (projectId: string) => Promise<LocalEntity[]>
+  /** `limit` is at most 500. */
+  rows: (
+    projectId: string,
+    entity: string,
+    offset: number,
+    limit: number,
+    orderBy?: string,
+    desc?: boolean
+  ) => Promise<LocalRows>
+  /** Delete every row of an entity; resolves with how many. */
+  clearRows: (projectId: string, entity: string) => Promise<number>
+  /** The storage folders, each with its number of files and their size. */
+  storage: (projectId: string) => Promise<LocalStorageFolder[]>
+  /** A page of a folder's files in path order, regardless of its rules; `limit` is at most 500. */
+  files: (projectId: string, folder: string, offset: number, limit: number) => Promise<LocalFiles>
+  /** A stored file's bytes, for a preview: the first `maxBytes` of them when given. */
+  file: (projectId: string, folder: string, path: string, maxBytes?: number) => Promise<ArrayBuffer>
+  /** Save a copy where the user chooses; resolves with where, or `null` when they cancel. */
+  saveFile: (projectId: string, folder: string, path: string) => Promise<string | null>
+  deleteFile: (projectId: string, folder: string, path: string) => Promise<void>
+  /** Delete every file in a folder; resolves with how many. */
+  clearFiles: (projectId: string, folder: string) => Promise<number>
+  /** The project's seed data (`rayfin/seed`), checked without loading it. */
+  seed: (projectId: string) => Promise<LocalSeed>
+  /**
+   * Replace the local data (every entity's rows and every stored file; the
+   * local users stay) with the project's seed data. `dryRun` only finds what
+   * loading would refuse. The seed data's problems resolve as `ok: false`.
+   */
+  loadSeed: (projectId: string, dryRun?: boolean) => Promise<LocalSeedLoad>
+  /** Save the local data as the project's seed data, in place of the rows and files in `rayfin/seed`. */
+  saveSeed: (projectId: string) => Promise<LocalSeedSaved>
+  /** Works whether or not the backend runs. */
+  secrets: (projectId: string) => Promise<LocalSecret[]>
+  /** The value goes to rayfin-local through stdin; a running backend applies it by itself. */
+  setSecret: (projectId: string, name: string, value: string) => Promise<void>
+  deleteSecret: (projectId: string, name: string) => Promise<void>
+  /** Stop the rayfin-local another program runs on the project (`already-serving`'s `details.pid`). */
+  stopExternal: (projectId: string, pid: number) => Promise<void>
+  /** Every project's status changes; returns an unsubscribe function. */
+  onState: (cb: (status: LocalStatus) => void) => () => void
+  /** Every project's output lines; returns an unsubscribe function. */
+  onLog: (cb: (line: LocalLogEvent) => void) => () => void
+  /**
+   * Install the npm packages the backend reported missing (`packages-missing`),
+   * with npm's output in the project's output. It doesn't start the backend:
+   * start it again once this resolves.
+   */
+  installPackages: (projectId: string) => Promise<void>
+  /**
+   * Install the app's npm packages again after git changed its `package.json`
+   * or lockfile (a pull, a merge or a switch of branch), with npm's output in
+   * the project's output. A backend that runs stops for it and starts again.
+   */
+  reinstallPackages: (projectId: string) => Promise<void>
+  /**
+   * A published app's preview uses its published backend because this computer
+   * can't run the app: journal it (`local.fallback`, for Help) and count it.
+   * `reason` is what the preview says.
+   */
+  reportFallback: (
+    projectId: string,
+    code: 'sdk-unsupported' | 'connector-unsupported',
+    reason: string
+  ) => Promise<void>
+}
+
+/**
+ * `window.api.apps`: apps installed from `.rayfin` files, each run on its own,
+ * in a window of its own. The window's commands act on the window that calls
+ * them: the page Fabricator shows in an app's window (`AppWindow`) uses them.
+ */
+export interface InstalledAppsApi {
+  /** Every installed app, by name. */
+  list: () => Promise<InstalledApp[]>
+  /** Open an installed app in its window. */
+  open: (key: string) => Promise<void>
+  /** Remove an installed app, with its data and shortcut. Never rejects. */
+  remove: (key: string) => Promise<AppActionResult>
+  /** An app was installed, updated or removed, or its window opened or closed. */
+  onChanged: (cb: () => void) => () => void
+  /** What this app window is for. */
+  window: () => Promise<AppWindowInfo>
+  /** Install the file this window was opened with (progress on `onProgress`). Never rejects. */
+  install: () => Promise<AppActionResult>
+  /** Start this window's app (its state on `onState`); the window shows it once it's ready. */
+  run: () => Promise<AppActionResult>
+  /** This window's app's last output lines, oldest first. */
+  logs: () => Promise<LocalLogEvent[]>
+  /** Close this window, which stops its app. */
+  close: () => Promise<void>
+  /** Every installed app's backend status (`projectId` is the app's key). */
+  onState: (cb: (status: LocalStatus) => void) => () => void
+  onLog: (cb: (line: LocalLogEvent) => void) => () => void
+  onProgress: (cb: (event: AppProgressEvent) => void) => () => void
+  /** Fabricator asks the window `label` to look again at what it's for. */
+  onWindow: (cb: (label: string) => void) => () => void
 }

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { StudioProject } from '@shared/ipc'
 import { buildActions, type ActionContext, type ActionHandlers } from './actions'
+import { prepare, rank } from './rank'
 
 const project: StudioProject = {
   id: 'p1',
@@ -26,6 +27,9 @@ function context(overrides: Partial<ActionContext> = {}): ActionContext {
     chatBusy: false,
     autoDeploy: true,
     migrationEnabled: false,
+    mcpServersEnabled: false,
+    goalsEnabled: false,
+    inGallery: false,
     theme: 'dark',
     uiScale: 1,
     fabricSignedIn: true,
@@ -47,21 +51,29 @@ describe('Search actions', () => {
     expect(offered.some((id) => /deploy|share|home|manage/.test(id))).toBe(false)
   })
 
-  it('words a deploy as the deployment control does, and runs it', () => {
+  it('words a publish as the publish control does, and runs it', () => {
     const ctx = context({ pending: { changed: true, files: 3 } })
     const deploy = buildActions(ctx).find((a) => a.id === 'action:deploy')!
-    expect(deploy.title).toBe('Deploy 3 changes')
+    expect(deploy.title).toBe('Publish 3 changes')
     deploy.run()
     expect(ctx.do.deploy).toHaveBeenCalled()
-    expect(buildActions(context()).find((a) => a.id === 'action:deploy')?.title).toBe('Redeploy')
+    expect(buildActions(context()).find((a) => a.id === 'action:deploy')?.title).toBe('Publish')
   })
 
-  it('holds a deploy back while Copilot works on the app or one is running', () => {
+  it('still finds Publish for someone who types deploy', () => {
+    const prepared = prepare(buildActions(context()))
+    const top = (query: string): string | undefined => rank(prepared, query)[0]?.item.id
+    expect(top('deploy')).toBe('action:deploy')
+    expect(top('redeploy')).toBe('action:deploy')
+    expect(top('deploy after each chat turn')).toBe('action:auto-deploy')
+  })
+
+  it('holds publishing back while Copilot works on the app or a publish is running', () => {
     expect(ids(context({ chatBusy: true }))).not.toContain('action:deploy')
     expect(ids(context({ deploying: true }))).not.toContain('action:deploy')
   })
 
-  it('offers a team app its overview, not a deploy or Share', () => {
+  it('offers a team app its overview, not Publish or Share', () => {
     const team = {
       ...project,
       team: { workspaceId: 'w1', folder: 'apps/contoso' }
@@ -78,11 +90,60 @@ describe('Search actions', () => {
     expect(hinted).toEqual(['action:view-code', 'action:theme-light', 'action:text-size-125'])
   })
 
-  it('switches deploying after each chat turn the other way', () => {
+  it('switches publishing after each chat turn the other way', () => {
     const ctx = context({ autoDeploy: true })
     const toggle = buildActions(ctx).find((a) => a.id === 'action:auto-deploy')!
-    expect(toggle.title).toBe('Turn off Deploy after each chat turn')
+    expect(toggle.title).toBe('Turn off Publish after each chat turn')
     toggle.run()
     expect(ctx.do.setAutoDeploy).toHaveBeenCalledWith(false)
+  })
+
+  it('offers the app gallery, except from the gallery itself', () => {
+    const ctx = context()
+    const gallery = buildActions(ctx).find((a) => a.id === 'action:gallery')!
+    gallery.run()
+    expect(ctx.do.openGallery).toHaveBeenCalled()
+    expect(rank(prepare(buildActions(ctx)), 'fabric apps')[0]?.item.id).toBe('action:gallery')
+    expect(ids(context({ inGallery: true }))).not.toContain('action:gallery')
+  })
+
+  it('offers managing MCP servers only with their experiment', () => {
+    expect(ids(context())).not.toContain('action:mcp-servers')
+    const ctx = context({ mcpServersEnabled: true })
+    const manage = buildActions(ctx).find((a) => a.id === 'action:mcp-servers')!
+    manage.run()
+    expect(ctx.do.openMcpServers).toHaveBeenCalled()
+    expect(rank(prepare(buildActions(ctx)), 'mcp')[0]?.item.id).toBe('action:mcp-servers')
+  })
+
+  it('offers the Goals view only when the open app has it', () => {
+    expect(ids(context())).not.toContain('action:view-goals')
+    const ctx = context({ goalsEnabled: true })
+    const goals = buildActions(ctx).find((a) => a.id === 'action:view-goals')!
+    goals.run()
+    expect(ctx.do.showView).toHaveBeenCalledWith('goals')
+    expect(rank(prepare(buildActions(ctx)), 'evals')[0]?.item.id).toBe('action:view-goals')
+  })
+
+  it('exports the open app, and imports one from anywhere', () => {
+    const ctx = context()
+    const prepared = prepare(buildActions(ctx))
+    const top = (query: string): string | undefined => rank(prepared, query)[0]?.item.id
+    expect(top('export contoso')).toBe('action:export-project')
+    expect(top('hand off')).toBe('action:export-project')
+    expect(top('import')).toBe('action:import-project')
+    buildActions(ctx)
+      .find((a) => a.id === 'action:export-project')!
+      .run()
+    expect(ctx.do.exportProject).toHaveBeenCalled()
+
+    const none = context({ project: null, onProjectScreen: false, onHome: true })
+    expect(ids(none)).not.toContain('action:export-project')
+    expect(ids(none)).toContain('action:import-project')
+    const team = {
+      ...project,
+      team: { workspaceId: 'w1', folder: 'apps/contoso' }
+    } as StudioProject
+    expect(ids(context({ project: team }))).not.toContain('action:export-project')
   })
 })

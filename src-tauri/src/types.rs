@@ -109,6 +109,10 @@ pub struct RayfinAuthStatus {
   pub tenant: Option<String>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub error: Option<String>,
+  /// Signed in as far as the Rayfin CLI knows, but the check couldn't confirm it
+  /// with Fabric (offline, a timeout, or a check that couldn't run); `error` says why.
+  #[serde(skip_serializing_if = "std::ops::Not::not")]
+  pub unverified: bool,
 }
 
 #[derive(Serialize, Clone, Default)]
@@ -512,7 +516,7 @@ pub struct DeployInfo {
   pub commit: Option<String>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct DeployResult {
   pub ok: bool,
@@ -525,6 +529,25 @@ pub struct DeployResult {
   pub portal_url: Option<String>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub error: Option<String>,
+  /// Set with the `workspace-unsupported` outcome: the workspace Fabric
+  /// wouldn't create the app in.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub unsupported: Option<UnsupportedWorkspace>,
+}
+
+/// A workspace Fabric wouldn't create an app in ("The feature is not
+/// available"), with what Fabric reports about it.
+#[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct UnsupportedWorkspace {
+  pub id: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub name: Option<String>,
+  /// Its capacity's region, e.g. "UK South".
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub region: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub capacity_id: Option<String>,
 }
 
 /// Result of starting a project's Vite dev server for the live local preview.
@@ -575,6 +598,18 @@ pub struct PortOccupant {
   pub command_line: Option<String>,
 }
 
+/// Another project in this window that holds a port the live preview needs.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PortHolder {
+  pub project_id: String,
+  /// The project's name.
+  pub name: String,
+  /// `backend`: its local backend, which runs the app on this computer.
+  /// `preview`: its live preview, which runs while Copilot works on it.
+  pub kind: String,
+}
+
 /// Why the live preview can't start on a sign-in-ready port, and the ways out.
 #[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -583,9 +618,9 @@ pub struct PortConflict {
   pub port: u16,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub occupant: Option<PortOccupant>,
-  /// Another project in this window whose live preview holds `port`.
+  /// Another project in this window holds `port`.
   #[serde(skip_serializing_if = "Option::is_none")]
-  pub own_project: Option<String>,
+  pub holder: Option<PortHolder>,
   /// Fabricator may offer to stop `occupant`.
   pub can_stop: bool,
   /// The next free port to register instead.
@@ -669,12 +704,6 @@ pub struct StudioProject {
   pub workspace_name: Option<String>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub deployment_names: Option<std::collections::HashMap<String, String>>,
-  /// Set when a project is freshly created in-app and has never been deployed.
-  /// Drives the onboarding "deploy first" gate (the chat composer is disabled
-  /// until a deployment exists). Cleared on the first successful deploy. Never
-  /// set for projects opened from disk, so opening an existing app is not gated.
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub awaiting_first_deploy: Option<bool>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub model: Option<String>,
   #[serde(skip_serializing_if = "Option::is_none")]
@@ -687,6 +716,11 @@ pub struct StudioProject {
   /// `"long_context"`).
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub context_tier: Option<String>,
+  /// The plugins on in this project's Build chat (`"fabric-iq"`, `"work-iq"`,
+  /// and `"mcp:<id>"` for an MCP server the user added).
+  /// Each is off until the user turns it on in the chat.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub plugins: Vec<String>,
   /// Preview pane view selection: `"fabric"` shows the app embedded in the Fabric
   /// portal shell (`last_deploy.portal_url`); absent / `"direct"` shows the app
   /// URL directly. Persisted so the Fabricator agent's screenshot/navigate tools
@@ -699,12 +733,35 @@ pub struct StudioProject {
   /// view (persisted as `None`) is never re-overridden on subsequent deploys.
   #[serde(skip_serializing_if = "Option::is_none")]
   pub fabric_preview_defaulted: Option<bool>,
+  /// Whether the published app works only inside the Fabric portal shell (its
+  /// `fabric.yaml` declares semantic models, or `rayfin.yml` hosts it embedded
+  /// only), read from its folder when projects are listed, like `missing`. Only
+  /// such an app offers the preview's Fabric view.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub needs_fabric_portal: Option<bool>,
   /// Set when the project lives in a GitHub-backed team workspace (experimental).
   /// Team projects never deploy from this machine: the workspace's pipeline does.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub team: Option<TeamBinding>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub missing: Option<bool>,
+  /// The Rayfin version the project has installed (its CLI's, or else an SDK
+  /// package's), read from its folder when projects are listed, like `missing`,
+  /// for Home. Never read back from the store.
+  #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
+  pub rayfin_version: Option<String>,
+  /// When the project was last opened in Fabricator (ISO 8601): Home's "Opened
+  /// 3 hours ago" and its Today / This week / Earlier groups.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub last_opened_at: Option<String>,
+  /// Pinned to the top of Home's recent projects.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub pinned: bool,
+  /// When the project's thumbnail was last saved (RFC 3339), read when projects
+  /// are listed, like `missing`; absent while it has none. Never read back
+  /// from the store.
+  #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
+  pub thumbnail_at: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -716,6 +773,10 @@ pub struct ProjectsState {
   /// GitHub-backed team workspaces this machine has created or joined.
   #[serde(default)]
   pub team_workspaces: Vec<TeamWorkspace>,
+  /// Folders other than the projects folder that new projects went in, most
+  /// recent first.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub recent_locations: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -732,6 +793,28 @@ pub struct ExperimentFlags {
   /// page by page. Opt-in (off by default).
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub report_migration: Option<bool>,
+  /// Work IQ: Build chat offers the Work IQ plugin, which looks up the user's
+  /// Microsoft 365 email, meetings, files, Teams messages and people,
+  /// read-only, through Microsoft's Work IQ MCP server. Opt-in (off by
+  /// default); each chat still has the plugin off until it's turned on there.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub work_iq: Option<bool>,
+  /// MCP servers: Build chat offers the MCP servers the user adds (a command
+  /// Fabricator runs on this computer, or a remote server's URL) among its
+  /// plugins. Opt-in (off by default); each chat still has a server off until
+  /// it's turned on there.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub mcp_servers: Option<bool>,
+  /// Export as an app: Export project also offers a `.rayfin` app file,
+  /// which Fabricator installs and runs in a window of its own. Opt-in (off by
+  /// default). It gates exporting only: `.rayfin` files open either way.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub app_export: Option<bool>,
+  /// Goals: a project's Goals tab, where the user writes what the app is for
+  /// and the checks it must keep passing (`GOALS.md`), and Copilot runs them
+  /// against a fresh copy of the app before a publish. Opt-in (off by default).
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub goals: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -750,17 +833,151 @@ pub struct AppSettings {
   /// Settings → Diagnostics.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub full_diagnostics: Option<bool>,
-  /// How chat turns deploy personal apps, set by the deployment panel's
-  /// "Deploy after each chat turn" switch: "auto" (the default, also when unset)
-  /// deploys as each turn finishes; "manual" keeps the changes on this machine,
-  /// with the live local preview kept between turns, until the user deploys.
-  /// Team projects aren't affected.
+  /// How chat turns publish personal apps, set by the published apps panel's
+  /// "Publish after each chat turn" switch: "auto" publishes as each turn
+  /// finishes; "manual" keeps the changes on this computer until the user
+  /// publishes. The user's choice always wins; unset, it's "manual": personal
+  /// apps run on this computer, and publishing is the user's choice (see
+  /// `store::manual_deploy_enabled`). Team projects aren't affected.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub deploy_mode: Option<String>,
   /// Your own API keys: each provider's models and which of them the model
   /// pickers show. Never holds a key (those live in the OS credential store).
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub byok: Option<ByokSettings>,
+  /// The MCP servers the user added (the MCP servers experiment). Never holds
+  /// the values of their environment variables or headers (those live in the
+  /// OS credential store).
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub mcp_servers: Vec<McpServerEntry>,
+  /// What a new project's chat starts with (Settings → Chat defaults). Each
+  /// project's chat keeps its own choice after that.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub chat_defaults: Option<ChatDefaults>,
+}
+
+/// The model and plugins a new project's chat starts with, saved as a chat
+/// keeps them (see `commands::chat::chat_defaults`).
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatDefaults {
+  /// The model's id; none is Auto.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub model: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub effort: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub auto_tier: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub context_tier: Option<String>,
+  /// The plugins on: `fabric-iq`, `work-iq`, or `mcp:<id>` for a server the
+  /// user added. A new project gets only the ones chat offers it.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub plugins: Vec<String>,
+}
+
+/// How Fabricator reaches an MCP server: a command it runs on this computer,
+/// which talks over its standard input and output, or a remote server's URL,
+/// over streamable HTTP or the older Server-Sent Events.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum McpTransport {
+  #[default]
+  Stdio,
+  Http,
+  Sse,
+}
+
+/// An MCP server the user added (the MCP servers experiment), which a Build
+/// chat can turn on among its plugins. Only the names of its environment
+/// variables or headers are here: their values are kept in the OS credential
+/// store (see `services::mcp::secrets`).
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerEntry {
+  /// Stable id: the server's name in chat sessions, which starts its tools'
+  /// names (`chart-generate_bar_chart`), and its plugin id after `mcp:`.
+  pub id: String,
+  /// What the user calls it.
+  pub name: String,
+  pub transport: McpTransport,
+  /// The program a command server runs (`npx`), and its arguments.
+  #[serde(default, skip_serializing_if = "String::is_empty")]
+  pub command: String,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub args: Vec<String>,
+  /// A remote server's address.
+  #[serde(default, skip_serializing_if = "String::is_empty")]
+  pub url: String,
+  /// The environment variables a command server gets, by name.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub env: Vec<String>,
+  /// The headers a remote server gets, by name.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub headers: Vec<String>,
+  /// Chat may call only the tools the server marks as read-only.
+  #[serde(default)]
+  pub read_only: bool,
+  /// When it was added (RFC 3339).
+  #[serde(default)]
+  pub added_at: String,
+}
+
+/// A server to add from the MCP servers dialog, or the new version of one
+/// (with its `id`). Each environment variable or header comes with a new value,
+/// or none to keep the one saved under that name; names left out are removed.
+#[derive(Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerInput {
+  #[serde(default)]
+  pub id: Option<String>,
+  pub name: String,
+  pub transport: McpTransport,
+  #[serde(default)]
+  pub command: String,
+  #[serde(default)]
+  pub args: Vec<String>,
+  #[serde(default)]
+  pub url: String,
+  #[serde(default)]
+  pub env: Vec<McpValueInput>,
+  #[serde(default)]
+  pub headers: Vec<McpValueInput>,
+  #[serde(default)]
+  pub read_only: bool,
+}
+
+/// An environment variable or header of an MCP server being saved.
+#[derive(Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct McpValueInput {
+  pub name: String,
+  /// Its new value; none keeps the saved one.
+  #[serde(default)]
+  pub value: Option<String>,
+}
+
+/// What checking an MCP server found.
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct McpCheckResult {
+  /// `"connected"`, `"needs-sign-in"` or `"failed"`.
+  pub status: String,
+  /// Why it didn't connect, in words the user can act on.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub error: Option<String>,
+  /// The tools it offers, once connected.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub tools: Vec<McpToolInfo>,
+}
+
+/// One tool an MCP server offers.
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct McpToolInfo {
+  pub name: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub description: Option<String>,
 }
 
 /// Persisted state of Your own API keys, by provider id
@@ -835,6 +1052,10 @@ pub struct CreateProjectInput {
   pub template: String,
   #[serde(default)]
   pub template_name: Option<String>,
+  /// The folder the project goes in, when it isn't the projects folder. It
+  /// must exist (New project offers to create it).
+  #[serde(default)]
+  pub location: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -847,12 +1068,371 @@ pub struct ProjectActionResult {
   pub project: Option<StudioProject>,
 }
 
+/* ------------------------- exporting and importing ------------------------- */
+
+/// What exporting a project would put in its `.fabricator` file, for the export dialog.
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportPreview {
+  /// The app's files: how many, and their size in bytes.
+  pub files: u64,
+  pub bytes: u64,
+  /// Its version history, when the project has its own git repository.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub history: Option<ExportHistory>,
+  /// Where it's published, when it is.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub deployment: Option<ExportDeployment>,
+  /// Secrets the app declares. Their values never go in an export.
+  pub secrets: Vec<String>,
+  /// Files git would keep that stay out because they may hold secrets.
+  pub kept_out: Vec<String>,
+  /// What exporting it as an app (`.rayfin`) would say about it.
+  pub app: ExportApp,
+}
+
+/// The app an app export (`.rayfin`) installs, for the export dialog.
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportApp {
+  pub name: String,
+  /// Its `rayfin.yml` version.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub version: Option<String>,
+  /// The icon its page names, as a `data:` URL, for the dialog to draw at
+  /// each size. `None` when it has none: the dialog draws one.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub icon: Option<String>,
+}
+
+/// The app's icon at one size, drawn by the export dialog.
+#[derive(Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppIconImage {
+  /// Its width and height in pixels.
+  pub size: u32,
+  /// A PNG, as base64.
+  pub png: String,
+}
+
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportHistory {
+  pub versions: u32,
+  pub bytes: u64,
+}
+
+/// The published app an export can point the recipient's publishes at.
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportDeployment {
+  /// The workspace, by the name Rayfin records it under.
+  pub workspace: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub workspace_id: Option<String>,
+  /// The published app's address.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub url: Option<String>,
+  /// The app in the Fabric portal.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub portal_url: Option<String>,
+}
+
+/// What goes in an export besides the app's code.
+#[derive(Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportOptions {
+  pub history: bool,
+  pub deployment: bool,
+}
+
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportResult {
+  pub ok: bool,
+  /// Nothing was saved: the save dialog was closed, or the export was stopped.
+  #[serde(skip_serializing_if = "std::ops::Not::not")]
+  pub cancelled: bool,
+  /// Where the file was saved.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub path: Option<String>,
+  /// Its size in bytes.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub bytes: Option<u64>,
+  /// Files in it.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub files: Option<u64>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub error: Option<String>,
+}
+
+/// Progress while a project is exported (`id` is the project) or imported (`id` is `import`).
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ZipProgressEvent {
+  pub id: String,
+  /// `"packing"` or `"unpacking"`.
+  pub phase: String,
+  pub processed: u64,
+  pub total: u64,
+}
+
+/// What importing a file would bring in, read without unpacking it.
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportPreview {
+  pub name: String,
+  /// Who exported it, as the export records it.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub from: Option<String>,
+  /// When it was exported (ISO 8601).
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub exported_at: Option<String>,
+  /// The app's files: how many, and their size in bytes.
+  pub files: u64,
+  pub bytes: u64,
+  /// It comes with its version history.
+  pub history: bool,
+  /// The workspace its publishes go to, when it says where it's published.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub workspace: Option<String>,
+  /// Secrets the app declares, which need values on this computer.
+  pub secrets: Vec<String>,
+  /// The new folder it would be unpacked into.
+  pub folder: String,
+}
+
+#[derive(Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportResult {
+  pub ok: bool,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub error: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub project: Option<StudioProject>,
+}
+
+/* ------------------------------ installed apps ------------------------------ */
+
+/// An app installed from a `.rayfin` file (`apps.list`).
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct InstalledApp {
+  /// Who the app is: a file with the same key updates it.
+  pub key: String,
+  pub name: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub version: Option<String>,
+  /// Who exported it.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub from: Option<String>,
+  /// When the file it came from was exported (ISO 8601).
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub exported_at: Option<String>,
+  pub installed_at: String,
+  pub updated_at: String,
+  /// Its icon, as a `data:` URL.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub icon: Option<String>,
+  /// Its window is open.
+  pub open: bool,
+}
+
+/// An app file (`.rayfin`), read before it's installed.
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppFilePreview {
+  pub path: String,
+  pub key: String,
+  pub name: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub version: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub from: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub exported_at: Option<String>,
+  /// The app's files: how many, and their size in bytes.
+  pub files: u64,
+  pub bytes: u64,
+  /// Secrets the app declares, which have no values on this computer.
+  pub secrets: Vec<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub icon: Option<String>,
+}
+
+/// What an app's window is for, for the page Fabricator shows in it (`apps.window`).
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppWindowInfo {
+  /// The app's key; empty when the window only says why a file can't be opened.
+  pub key: String,
+  /// `install`: a file to install, after asking. `update`: a file of an
+  /// installed app that isn't what's installed, to install after asking.
+  /// `run`: the installed app. `error`: nothing to run (`error` says why).
+  pub mode: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub file: Option<AppFilePreview>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub installed: Option<InstalledApp>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub error: Option<String>,
+  /// Its local backend.
+  pub status: LocalStatus,
+}
+
+/// Installing or starting an app, as it goes (`apps:progress`).
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppProgressEvent {
+  pub key: String,
+  /// `unpacking` (with `processed` of `total` files) or `packages` (with npm's `line`s).
+  pub phase: String,
+  pub processed: u64,
+  pub total: u64,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub line: Option<String>,
+}
+
+/// How installing, starting or removing an app went.
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppActionResult {
+  pub ok: bool,
+  /// Stable, to act on: `not-installed`, `busy`, `install-failed`, `no-port`, `remove-failed`.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub code: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub error: Option<String>,
+}
+
+/* ----------------------- security check of a package ----------------------- */
+
+/// One risk a security check found in a project or app file before it's
+/// imported or installed (`commands::security`).
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SecurityFinding {
+  /// Unique within a check: `check:<rule>` for Fabricator's own checks,
+  /// `ai:<hash>` for what Copilot reported.
+  pub id: String,
+  /// `install`, `packages`, `network`, `hidden`, `system` or `agents`.
+  pub area: String,
+  /// `high` | `medium` | `low` | `note`.
+  pub severity: String,
+  /// `fabricator`: found by reading the files directly. `copilot`: reported,
+  /// with its evidence checked against the file, by Copilot's review.
+  pub source: String,
+  pub title: String,
+  pub detail: String,
+  /// What to do about it.
+  #[serde(skip_serializing_if = "String::is_empty")]
+  pub advice: String,
+  /// What Copilot made of one of Fabricator's findings, having read the code it points at.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub assessment: Option<String>,
+  /// Path in the package, `/`-separated.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub file: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub line: Option<u32>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub end_line: Option<u32>,
+  /// The lines around it (secret-looking values masked), from `excerpt_start`.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub excerpt: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub excerpt_start: Option<u32>,
+  /// More places it occurs: `path` or `path:line`.
+  #[serde(skip_serializing_if = "Vec::is_empty")]
+  pub places: Vec<String>,
+}
+
+/// How one area of a security check came out.
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SecurityAreaResult {
+  pub area: String,
+  /// `clear` | `flagged` | `skipped`.
+  pub status: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub note: Option<String>,
+}
+
+/// What a security check of a project or app file found (`security_check`).
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SecurityReport {
+  /// Copilot's review finished. Fabricator's own checks ran either way, and
+  /// their findings are in `findings`.
+  pub ok: bool,
+  /// `clear` | `caution` | `danger`: set by the worst finding, and raised, never
+  /// lowered, by Copilot's own verdict.
+  pub verdict: String,
+  pub summary: String,
+  pub findings: Vec<SecurityFinding>,
+  pub areas: Vec<SecurityAreaResult>,
+  /// Files in the package, and those Copilot could read.
+  pub files: u64,
+  pub readable: u64,
+  pub duration_ms: u64,
+  /// Why Copilot's review didn't finish.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub error: Option<String>,
+  /// The review stopped before it covered every area.
+  #[serde(skip_serializing_if = "std::ops::Not::not")]
+  pub partial: bool,
+  /// The user stopped it.
+  #[serde(skip_serializing_if = "std::ops::Not::not")]
+  pub cancelled: bool,
+}
+
+/// A security check as it goes, on `security:event`.
+#[derive(Serialize, Clone)]
+#[serde(tag = "type")]
+pub enum SecurityEvent {
+  /// The file is unpacked for the review: where (steps name files in it), how
+  /// many files it holds, and the areas the check covers.
+  #[serde(rename = "started")]
+  Started { root: String, files: u64, areas: Vec<String> },
+  /// A tool call Copilot made (sent on start and again when it ends).
+  #[serde(rename = "activity")]
+  Activity { tool: ChatToolCall },
+  /// A finding, new or updated (the same `id`).
+  #[serde(rename = "finding")]
+  Finding { finding: SecurityFinding },
+  #[serde(rename = "areas")]
+  Areas { results: Vec<SecurityAreaResult> },
+  #[serde(rename = "summary")]
+  Summary { text: String },
+}
+
+/// Routes a [`SecurityEvent`] to the check that produced it.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SecurityEventEnvelope {
+  pub check_id: String,
+  pub event: SecurityEvent,
+}
+
 /// Whether a new project's name is free where it will be saved.
 #[derive(Serialize, Clone, Debug, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectNameCheck {
   pub ok: bool,
   /// Why the name can't be used, in plain language (when `ok` is false).
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub message: Option<String>,
+}
+
+/// Whether a folder a new project could go in can take it.
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectLocationCheck {
+  pub ok: bool,
+  /// The folder doesn't exist yet, so it can be created.
+  #[serde(skip_serializing_if = "std::ops::Not::not")]
+  pub missing: bool,
+  /// Why it can't take the project, in plain language (when `ok` is false).
   #[serde(skip_serializing_if = "Option::is_none")]
   pub message: Option<String>,
 }
@@ -870,6 +1450,23 @@ pub struct DeployTargetCheck {
   #[serde(skip_serializing_if = "Option::is_none")]
   pub conflict: Option<String>,
   /// The check couldn't run (the deploy itself isn't blocked).
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub error: Option<String>,
+  /// The workspace's Rayfin apps the project can publish into instead of a new
+  /// app (`rayfin up --item-name`): none when it already publishes there, or its
+  /// Rayfin CLI is older than 1.36.
+  #[serde(skip_serializing_if = "Vec::is_empty")]
+  pub apps: Vec<String>,
+}
+
+/// What deleting one of a project's published apps did.
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeployRemoveResult {
+  pub ok: bool,
+  /// Fabric needs you to sign in again before it deletes the app.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub needs_login: Option<bool>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub error: Option<String>,
 }
@@ -1971,7 +2568,7 @@ pub struct TeamDiagnosisResult {
 
 /* ----------------------------- git ----------------------------- */
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct GitStatus {
   pub is_repo: bool,
@@ -1980,6 +2577,37 @@ pub struct GitStatus {
   pub changed_count: u32,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub no_commits: Option<bool>,
+  /// A merge is waiting to be finished (git has a `MERGE_HEAD`).
+  #[serde(skip_serializing_if = "std::ops::Not::not")]
+  pub merging: bool,
+  /// Files that still have conflicts, relative to the project folder: ones the
+  /// merge left unmerged, and, during a merge, ones with conflict markers left.
+  #[serde(skip_serializing_if = "Vec::is_empty")]
+  pub conflicts: Vec<String>,
+}
+
+/// A branch the app can switch to.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitBranch {
+  /// A local branch's name, or a remote branch's, such as `origin/feature`.
+  pub name: String,
+  /// The remote branch a local branch follows, such as `origin/main`.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub upstream: Option<String>,
+  /// Only on the remote: switching to it makes a local branch that follows it.
+  #[serde(skip_serializing_if = "std::ops::Not::not")]
+  pub remote: bool,
+}
+
+#[derive(Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct GitBranches {
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub current: Option<String>,
+  /// The local branches, then the remote ones without a local branch, each
+  /// most recently changed first.
+  pub branches: Vec<GitBranch>,
 }
 
 #[derive(Serialize, Clone)]
@@ -1989,6 +2617,17 @@ pub struct GitCommitResult {
   #[serde(skip_serializing_if = "Option::is_none")]
   pub error: Option<String>,
   pub status: GitStatus,
+}
+
+/// A commit message Copilot wrote for a project's uncommitted changes.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct GitMessageResult {
+  pub ok: bool,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub message: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub error: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -2029,6 +2668,18 @@ pub struct RevertResult {
   pub head: Option<String>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub no_changes: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub error: Option<String>,
+}
+
+/// A chat turn's changes, saved as a version of the app (`projects_git_save_turn`).
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedTurn {
+  /// The new version's commit; absent when nothing was saved.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub commit: Option<String>,
+  /// Why the changes couldn't be saved: they stay as uncommitted changes.
   #[serde(skip_serializing_if = "Option::is_none")]
   pub error: Option<String>,
 }
@@ -2093,9 +2744,14 @@ pub struct GitSyncResult {
   #[serde(skip_serializing_if = "Option::is_none")]
   pub error: Option<String>,
   /// `Some(true)` when a pull couldn't be combined automatically (rebase conflict,
-  /// aborted and restored). Distinct from a generic error so the UI can phrase it.
+  /// aborted and restored), or a merge stopped at conflicts. Distinct from a
+  /// generic error so the UI can phrase it and offer Copilot.
   #[serde(skip_serializing_if = "Option::is_none")]
   pub conflict: Option<bool>,
+  /// The pull, switch or merge changed the app's packages (a `package.json` or
+  /// npm lockfile in its folder), so they need installing again.
+  #[serde(skip_serializing_if = "std::ops::Not::not")]
+  pub packages_changed: bool,
   pub status: GitStatus,
   pub remote: GitRemoteStatus,
 }
@@ -2115,7 +2771,39 @@ pub struct FileNode {
   pub ignored: Option<bool>,
 }
 
-#[derive(Serialize, Clone)]
+/// One folder's entries, for an `@` reference in chat to something outside the project.
+#[derive(Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DirListing {
+  /// The folder, as an absolute path.
+  pub dir: String,
+  /// Folders first, then files, each by name.
+  pub entries: Vec<DirEntryInfo>,
+  /// The folder has more entries than were listed.
+  #[serde(skip_serializing_if = "std::ops::Not::not")]
+  pub truncated: bool,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub error: Option<String>,
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DirEntryInfo {
+  pub name: String,
+  /// A folder (or a link to one) rather than a file.
+  pub dir: bool,
+}
+
+/// A file or folder dropped on the chat composer, or picked on this computer, to reference.
+#[derive(Serialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatPathInfo {
+  /// As dropped or picked: an absolute path.
+  pub path: String,
+  pub dir: bool,
+}
+
+#[derive(Serialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct FileContent {
   pub path: String,
@@ -2128,6 +2816,9 @@ pub struct FileContent {
   pub too_large: Option<bool>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub error: Option<String>,
+  /// The file doesn't exist (any longer), such as one deleted since it was opened.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub missing: Option<bool>,
 }
 
 /* ----------------------------- chat ----------------------------- */
@@ -2175,6 +2866,10 @@ pub struct ChatToolCall {
   pub started_at: Option<f64>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub ended_at: Option<f64>,
+  /// The name the user gave the MCP server whose tool this is, for a server
+  /// they added (the MCP servers experiment); `title` then names the tool.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub server: Option<String>,
 }
 
 /// One chronological slice of an assistant turn (prose, a tool call, or a
@@ -2321,6 +3016,9 @@ pub enum ChatEvent {
   Reasoning { id: String, text: String },
   #[serde(rename = "notice")]
   Notice { text: String },
+  /// What Copilot Fusion has chosen for the turn so far; each replaces the last.
+  #[serde(rename = "fusion")]
+  Fusion { fusion: ChatFusion },
   #[serde(rename = "error")]
   Error { text: String },
   #[serde(rename = "result")]
@@ -2419,6 +3117,79 @@ pub struct ChatTurnResult {
   pub ran_deploy: bool,
 }
 
+/// How the signed-in account pays for Copilot's models.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CopilotBilling {
+  /// Token-based billing, in AI credits (one credit is US$0.01).
+  AiCredits,
+  /// Premium requests, each model's multiplier applied.
+  PremiumRequests,
+}
+
+/// What a project's Build chat has used, from its Copilot session's own
+/// accounting. Saved after each turn, so it shows before the session reopens.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatUsage {
+  /// The Copilot session the totals are for: another session's are stale.
+  pub session_id: String,
+  pub billing: CopilotBilling,
+  /// AI credits Copilot's models used.
+  pub ai_credits: f64,
+  /// Some of Copilot's calls reported no credits, so `ai_credits` is a floor.
+  #[serde(default)]
+  pub credits_partial: bool,
+  /// Premium requests Copilot's models used.
+  pub premium_requests: f64,
+  /// Each model's share, Copilot's first.
+  #[serde(default)]
+  pub models: Vec<ChatModelUsage>,
+}
+
+/// One model's share of a chat's usage.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatModelUsage {
+  /// The model's id, as the session called it.
+  pub model: String,
+  /// Its name when it was called.
+  pub name: String,
+  /// Ran on the user's own API key: its provider bills it, so only tokens are known.
+  pub own_key: bool,
+  /// For a model on the user's own key, the provider that bills it ("Anthropic").
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub provider: Option<String>,
+  /// Input tokens, including those read from the prompt cache.
+  pub input_tokens: i64,
+  /// Input tokens read from the prompt cache.
+  pub cached_tokens: i64,
+  pub output_tokens: i64,
+  pub ai_credits: f64,
+  pub premium_requests: f64,
+}
+
+/// The signed-in account's Copilot allowance (its premium interactions quota).
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CopilotQuota {
+  /// What the allowance counts.
+  pub unit: CopilotBilling,
+  pub unlimited: bool,
+  /// The allowance for the current period.
+  pub entitlement: f64,
+  /// How much of it is used.
+  pub used: f64,
+  pub remaining_percent: f64,
+  /// Usage past the allowance.
+  pub overage: f64,
+  /// Usage may go on past the allowance, billed as additional usage.
+  pub overage_allowed: bool,
+  /// When the allowance resets (ISO 8601).
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub reset_date: Option<String>,
+}
+
 /// Result of a `chat_steer` call: whether the message interrupted a running turn.
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -2484,8 +3255,8 @@ pub struct ContextTierOption {
   pub tokens: u64,
 }
 
-/// What Auto can optimize for ("Optimized for"), as Copilot offers it to the
-/// signed-in account.
+/// What Auto can optimize for, as Copilot offers it to the signed-in account:
+/// Copilot Fusion's effort levels, or "Optimized for" preferences.
 #[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AutoTiers {
@@ -2507,6 +3278,9 @@ pub struct AutoTierOption {
   /// Why it can't be chosen, in Copilot's words.
   #[serde(skip_serializing_if = "Option::is_none")]
   pub note: Option<String>,
+  /// One of Copilot Fusion's effort levels: Standard, High or Max.
+  #[serde(skip_serializing_if = "std::ops::Not::not")]
+  pub fusion: bool,
 }
 
 /// How a model on the user's own key appears in the model picker.
@@ -2615,6 +3389,11 @@ pub struct ChatMessage {
   /// is dropped when the renderer persists history.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub data: Option<serde_json::Value>,
+  /// The files and folders on this computer a user message gave Copilot to read
+  /// (`ChatFileRef[]`), rendered as chips in the transcript. Opaque to Rust; must
+  /// round-trip or it is dropped when the renderer persists history.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub files: Option<serde_json::Value>,
   /// The report-migration page a user message asked Copilot to build
   /// (`ChatMigrationRef`), rendered as a chip in the transcript. Opaque to Rust;
   /// must round-trip or it is dropped when the renderer persists history.
@@ -2625,6 +3404,42 @@ pub struct ChatMessage {
   /// Try again / Resume.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub prompt: Option<String>,
+  /// What Copilot Fusion chose for an assistant turn, shown under it.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub fusion: Option<ChatFusion>,
+}
+
+/// What Copilot Fusion chose for an assistant turn: the tier it ran at, how it
+/// ran each request and the models that worked on it.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatFusion {
+  /// Auto's tier the turn ran at, as Copilot names its Fusion model
+  /// (`"hydrafusion-max"`).
+  #[serde(default)]
+  pub level: String,
+  /// How Fusion ran each request in the turn, in order without repeats:
+  /// `"single"`, `"cascade"` or `"critique"`, or `"fallback"` when it couldn't
+  /// plan one and fell back to one model.
+  #[serde(default)]
+  pub patterns: Vec<String>,
+  /// The models that worked on the turn, in the order they started.
+  #[serde(default)]
+  pub models: Vec<ChatFusionModel>,
+  /// Copilot's description of how it ran the latest request ("Using Single:
+  /// one solver will work on your request.").
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub hint: Option<String>,
+}
+
+/// A model in a Copilot Fusion turn and the phases it ran (`"draft"`,
+/// `"critic"`, `"revision"`…).
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatFusionModel {
+  pub id: String,
+  #[serde(default)]
+  pub phases: Vec<String>,
 }
 
 /* ----------------------------- rayfin versions ----------------------------- */
@@ -2646,6 +3461,25 @@ pub struct RayfinVersionInfo {
   pub latest: Option<String>,
   pub upgrade_available: bool,
   pub packages: Vec<RayfinPackageVersion>,
+  /// The newest stable release npm lists within the Rayfin versions the bundled
+  /// local backend runs (`rayfin-local.json` `sdk.supported`), for the headline
+  /// package: where a personal app's upgrades stop, so it keeps running on this
+  /// computer. Absent when npm couldn't list them or none is in the range.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub latest_supported_locally: Option<String>,
+}
+
+/// The newest Rayfin releases, for Home: it offers an update on the projects
+/// behind them, without asking npm about each one.
+#[derive(Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RayfinLatest {
+  /// The newest stable release on npm (a team app's upgrades go here).
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub latest: Option<String>,
+  /// The newest release the bundled local backend runs (a personal app's go here).
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub latest_supported_locally: Option<String>,
 }
 
 /* ----------------------------- skills ----------------------------- */
@@ -3085,6 +3919,11 @@ pub struct AdvisorProjectSnapshot {
   pub truncated: Option<bool>,
   pub is_git_repo: bool,
   pub packages: Vec<AdvisorPackage>,
+  /// The Rayfin releases the bundled local backend runs, as an npm range
+  /// (`rayfin-local.json` `sdk.supported`). Absent for apps it doesn't run: team
+  /// apps.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub local_sdk_range: Option<String>,
 }
 
 /// `advisor_load` result: the saved deep review and the renderer-owned
@@ -3151,6 +3990,160 @@ pub enum AdvisorEvent {
 pub struct AdvisorEventEnvelope {
   pub project_id: String,
   pub event: AdvisorEvent,
+}
+
+/* -------------------------------- goals -------------------------------- */
+
+/// How a goal check came out: `passed`, `failed` or `not-proven` (Copilot
+/// couldn't show it either way by calling the app).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum GoalStatus {
+  Passed,
+  Failed,
+  #[default]
+  NotProven,
+}
+
+/// One check in `GOALS.md`: something the app must keep doing, in plain words.
+/// `id` comes from the text, so a reworded check is a new check.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalCheck {
+  pub id: String,
+  pub text: String,
+}
+
+/// A check's last outcome on this computer (never kept in the project).
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct GoalResult {
+  pub check_id: String,
+  /// The check as it read when it ran.
+  pub check: String,
+  pub status: GoalStatus,
+  /// One or two plain sentences: what Copilot found.
+  pub summary: String,
+  /// The calls that show it, as Fabricator made them: who called, what they
+  /// asked and how the app answered.
+  pub calls: Vec<String>,
+  /// What Copilot saw in those answers, or what's missing, as short lines.
+  pub evidence: Vec<String>,
+  /// RFC3339.
+  pub ran_at: String,
+  /// A signature of the app's code it ran against (its backend and screens).
+  pub fingerprint: String,
+  /// The app's code changed since (set on load).
+  pub stale: bool,
+}
+
+/// The last Goals run: when, how long, on which model, and what it covered.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct GoalsRunInfo {
+  pub ran_at: String,
+  pub duration_ms: u64,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub model: Option<String>,
+  /// Copilot's summary of the run.
+  pub summary: String,
+  /// The checks it ran.
+  pub check_ids: Vec<String>,
+  /// It ran every check.
+  pub all: bool,
+  /// It got through every check it was given.
+  pub complete: bool,
+}
+
+/// An app's goals: `GOALS.md` read, with each check's last result here.
+#[derive(Serialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalsSnapshot {
+  /// `GOALS.md` exists.
+  pub exists: bool,
+  /// What the app is for, and who for.
+  pub purpose: String,
+  pub checks: Vec<GoalCheck>,
+  /// Results of the checks as they read now.
+  pub results: Vec<GoalResult>,
+  pub last_run: Option<GoalsRunInfo>,
+  /// Every check passed, on the app's code as it is now.
+  pub all_passed: bool,
+  /// Why the checks can't run for this app, when they can't.
+  pub cannot_run: Option<String>,
+  /// A run is going for this app (set by `goals_load`).
+  pub running: bool,
+}
+
+/// Arguments of `goals_run`.
+#[derive(Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct GoalsRunRequest {
+  /// The checks to run; all of them when absent.
+  pub check_ids: Option<Vec<String>>,
+  pub model: Option<String>,
+  pub effort: Option<String>,
+  pub auto_tier: Option<String>,
+  pub context_tier: Option<String>,
+}
+
+/// How a `goals_run` went (as its `done` event said), and the goals and
+/// results after it.
+#[derive(Serialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalsRunEnd {
+  pub ok: bool,
+  pub cancelled: bool,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub error: Option<String>,
+  pub snapshot: GoalsSnapshot,
+}
+
+/// Goals Copilot drafted from the app's code, for the user to edit and save.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct GoalsProposal {
+  pub purpose: String,
+  pub checks: Vec<String>,
+}
+
+/// Streamed Goals events (main -> renderer), tagged by `type`.
+#[derive(Serialize, Clone)]
+#[serde(tag = "type")]
+pub enum GoalsEvent {
+  /// A run reached a step: `preparing` (copying the app), `starting`,
+  /// `seeding`, `checking` or `finishing` (removing the copy).
+  #[serde(rename = "phase")]
+  Phase {
+    phase: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
+  },
+  /// A tool call a run made (sent on start and again when it ends).
+  #[serde(rename = "activity")]
+  Activity { tool: ChatToolCall },
+  /// A check's outcome, as Copilot reported it.
+  #[serde(rename = "result")]
+  Result { result: GoalResult },
+  /// A tool call a draft made.
+  #[serde(rename = "draftActivity")]
+  DraftActivity { tool: ChatToolCall },
+  /// A run ended: `ok` when every check it was given has a result, else
+  /// `cancelled`, or `error` saying why it stopped short.
+  #[serde(rename = "done")]
+  Done {
+    ok: bool,
+    cancelled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+  },
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalsEventEnvelope {
+  pub project_id: String,
+  pub event: GoalsEvent,
 }
 
 /* --------------------------- help assistant --------------------------- */
@@ -3486,8 +4479,10 @@ mod tests {
       design: None,
       advisor: None,
       data: None,
+      files: None,
       migration: None,
       prompt: None,
+      fusion: None,
     };
     let json = serde_json::to_string(&msg).unwrap();
     let back: ChatMessage = serde_json::from_str(&json).unwrap();
@@ -3526,8 +4521,10 @@ mod tests {
       design: None,
       advisor: None,
       data: None,
+      files: None,
       migration: None,
       prompt: None,
+      fusion: None,
     };
     let json = serde_json::to_string(&msg).unwrap();
     let back: ChatMessage = serde_json::from_str(&json).unwrap();
@@ -3632,6 +4629,10 @@ mod tests {
       "text": "Done",
       "elapsedMs": 83000,
       "createdAt": 1790412554990.0,
+      "fusion": {
+        "level": "hydrafusion", "patterns": ["critique"], "hint": "Using Critique.",
+        "models": [{ "id": "claude-sonnet-5", "phases": ["draft"] }, { "id": "gpt-5.6-sol", "phases": ["critic"] }]
+      },
       "tools": [{
         "id": "t1", "name": "edit", "title": "src/App.tsx", "state": "success",
         "output": "ok", "command": "npm run build", "paths": ["C:/p/src/App.tsx"],
@@ -3645,7 +4646,7 @@ mod tests {
         {"kind": "text", "text": "Done"}
       ]
     });
-    let msg: ChatMessage = serde_json::from_value(raw).unwrap();
+    let msg: ChatMessage = serde_json::from_value(raw.clone()).unwrap();
     let back = serde_json::to_value(&msg).unwrap();
     assert_eq!(back["elapsedMs"], 83000.0);
     assert_eq!(back["createdAt"], 1790412554990.0);
@@ -3661,6 +4662,7 @@ mod tests {
     assert_eq!(back["segments"][0]["id"], "r1");
     assert_eq!(back["segments"][0]["elapsedMs"], 1200.0);
     assert_eq!(back["segments"][1]["thumbs"][0], "data:image/png;base64,AA");
+    assert_eq!(back["fusion"], raw["fusion"]);
   }
 
   #[test]
@@ -3699,5 +4701,517 @@ mod tests {
     assert_eq!(end["exitCode"], 0);
     assert!(end.get("removed").is_none());
     assert!(end.get("output").is_none());
+  }
+}
+
+/* ----------------------------- local backend ----------------------------- */
+// Each personal project's whole Rayfin backend runs on this computer under
+// rayfin-local (services/local_backend). These mirror its host contract
+// (contract 1: `serve --json` events, the control API and the CLI's JSON) and
+// `src/shared/ipc.ts`. rayfin-local may add fields: unknown ones are ignored,
+// missing ones default.
+
+/// Text that may arrive as a string or a number, such as ids and timestamps.
+fn de_opt_text<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+  Ok(match serde_json::Value::deserialize(deserializer)? {
+    serde_json::Value::Null => None,
+    serde_json::Value::String(text) => Some(text),
+    other => Some(other.to_string()),
+  })
+}
+
+fn de_text<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+  Ok(de_opt_text(deserializer)?.unwrap_or_default())
+}
+
+/// Where a project's local backend is in its lifecycle.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum LocalBackendState {
+  #[default]
+  Stopped,
+  Starting,
+  Running,
+  Restarting,
+  Error,
+}
+
+/// How to start a project's local backend.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LocalStartOptions {
+  /// Apply a schema change that loses data (`--force-schema`), for this start only.
+  pub force_schema: bool,
+  /// Start from an empty database (`--reset`), for this start only.
+  pub reset: bool,
+  /// Who the app signs in as: `developer`, `none` or `user:<username>`
+  /// (`--sign-in-as`). Restarts keep it.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub sign_in_as: Option<String>,
+  /// How `serve` runs the app. Only Fabricator sets it (installed apps), never
+  /// the renderer. Restarts keep it.
+  #[serde(skip)]
+  pub serve: ServeMode,
+}
+
+/// How rayfin-local serves an app installed from a `.rayfin` file: its build,
+/// from the backend's origin, on a port that stays the same. Goals runs serve
+/// only the backend of a copy of the app.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ServeMode {
+  /// `--static`: build the app and serve it from the backend, without Vite.
+  pub static_build: bool,
+  /// `--reuse-build`: with `static_build`, serve the build already there.
+  pub reuse_build: bool,
+  /// `--port`.
+  pub port: Option<u16>,
+  /// `--no-frontend`: run only the backend.
+  pub no_frontend: bool,
+}
+
+/// The Rayfin SDK an app uses, and whether rayfin-local implements it.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LocalSdk {
+  /// `None` when the packages aren't installed.
+  pub version: Option<String>,
+  pub supported: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LocalDataFeature {
+  pub enabled: bool,
+  pub entities: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LocalFunctionsFeature {
+  pub enabled: bool,
+  pub names: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LocalStorageFeature {
+  pub enabled: bool,
+  pub folders: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LocalAuthFeature {
+  pub enabled: bool,
+  /// The local Fabric sign-in page.
+  pub fabric: bool,
+  /// Username and password sign-in.
+  pub password: bool,
+}
+
+/// A connector the app declares.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LocalConnector {
+  pub name: String,
+  #[serde(rename = "type")]
+  pub kind: String,
+  /// `false` for connector types that run only on Fabric (rayfin-local answers 501).
+  pub supported: bool,
+}
+
+/// What the running app offers.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LocalFeatures {
+  pub data: LocalDataFeature,
+  pub functions: LocalFunctionsFeature,
+  pub storage: LocalStorageFeature,
+  pub auth: LocalAuthFeature,
+  pub connectors: Vec<LocalConnector>,
+}
+
+/// Everything started (the `ready` event): where the app and its backend answer.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LocalReady {
+  /// The app's own dev server; `None` without a frontend.
+  pub app_url: Option<String>,
+  pub api_url: String,
+  /// The local Fabric host that embeds the app; `None` when the app has no Fabric sign-in.
+  pub embed_url: Option<String>,
+  pub portal_url: Option<String>,
+  pub data_dir: Option<String>,
+  /// `{"kind": "developer" | "user" | "none", …}`.
+  pub sign_in_as: Option<serde_json::Value>,
+  pub sdk: Option<LocalSdk>,
+  pub features: LocalFeatures,
+  pub time: Option<String>,
+}
+
+/// The app model was analyzed (the `analysis` event).
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LocalAnalysis {
+  pub ok: bool,
+  pub sdk: Option<LocalSdk>,
+  pub entities: Vec<String>,
+  pub storage_folders: Vec<String>,
+  pub message: Option<String>,
+  pub time: Option<String>,
+}
+
+/// The database was brought up to date with the model, or wasn't (the `schema` event).
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LocalSchema {
+  /// `unchanged` | `applied` | `refused` | `failed`.
+  pub result: String,
+  pub changes: Vec<String>,
+  /// `refused`: the data the change would lose. `applied` with `forceSchema`: the data it dropped.
+  pub losses: Vec<String>,
+  pub message: Option<String>,
+  /// A change made while serving.
+  pub live: bool,
+  pub time: Option<String>,
+}
+
+/// The functions' build (the `functions` event).
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LocalFunctions {
+  /// `building` | `ready` | `failed` | `off`.
+  pub state: String,
+  pub names: Vec<String>,
+  pub errors: Vec<String>,
+  pub message: Option<String>,
+  pub time: Option<String>,
+}
+
+/// The app's Vite dev server (the `vite` event).
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LocalVite {
+  /// `ready` | `exited` | `restarting` | `failed`.
+  pub state: String,
+  pub url: Option<String>,
+  pub version: Option<String>,
+  pub message: Option<String>,
+  pub time: Option<String>,
+}
+
+/// `rayfin.yml`, `rayfin-local.toml` or a secret's value changed while serving.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LocalConfigChanged {
+  pub applied: bool,
+  pub restart_required: bool,
+  pub what: Vec<String>,
+  pub message: Option<String>,
+  pub time: Option<String>,
+}
+
+/// A warning or an error: from rayfin-local (its `warning` and `error` events)
+/// or from Fabricator (`binary-missing`, `binary-too-old`, `binary-incompatible`,
+/// `binary-blocked`, `binary-failed`, `spawn-failed`, `exited`, `crashed`).
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LocalProblem {
+  /// Stable: act on it. `message` and `hint` are for people.
+  pub code: String,
+  pub message: String,
+  pub hint: Option<String>,
+  /// The backend stops after a fatal error.
+  pub fatal: bool,
+  /// The code's structured data, such as `{pid, appUrl, apiUrl}` for `already-serving`.
+  pub details: Option<serde_json::Value>,
+  pub time: Option<String>,
+}
+
+/// How a run ended (the `stopped` event).
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LocalStopped {
+  /// `stdin-closed` | `signal` | `error` | `backend-exited`.
+  pub reason: String,
+  pub exit_code: Option<i32>,
+  pub time: Option<String>,
+}
+
+/// A project's local backend: its state and the latest it reported (`local:state`).
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LocalStatus {
+  pub project_id: String,
+  pub state: LocalBackendState,
+  /// Grows with every change, so a client keeps the newest snapshot.
+  pub revision: u64,
+  /// While starting: the last startup step (`starting`, `analysis`, `schema`, `functions`, `vite`).
+  pub phase: Option<String>,
+  /// The `rayfin-local serve` process.
+  pub pid: Option<u32>,
+  /// rayfin-local's version.
+  pub version: Option<String>,
+  /// The project folder rayfin-local serves.
+  pub project_root: Option<String>,
+  /// The sign-in identity restarts keep (`developer`, `none` or `user:<username>`).
+  pub sign_in_as: Option<String>,
+  pub ready: Option<LocalReady>,
+  pub analysis: Option<LocalAnalysis>,
+  pub schema: Option<LocalSchema>,
+  pub functions: Option<LocalFunctions>,
+  pub vite: Option<LocalVite>,
+  pub config: Option<LocalConfigChanged>,
+  /// This run's warnings, oldest first.
+  pub warnings: Vec<LocalProblem>,
+  /// Set by Fabricator: the app's Rayfin SDK, which rayfin-local doesn't
+  /// implement (`sdk-unsupported`), is of a newer line than the one it does.
+  /// It runs the app anyway, as rayfin-local does; some things may not work.
+  pub newer_sdk: bool,
+  /// The last error. With `state: error`, why the backend isn't running.
+  pub error: Option<LocalProblem>,
+  pub stopped: Option<LocalStopped>,
+  /// Unexpected exits in the last two minutes.
+  pub crashes: u32,
+  pub started_at: Option<String>,
+  pub updated_at: Option<String>,
+}
+
+/// One line of a project's local backend output (`local:log`).
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LocalLogEvent {
+  pub project_id: String,
+  /// Grows with every line of the project, to merge a fetched tail with live lines.
+  pub seq: u64,
+  /// `vite`, `functions`, `build`, `rayfin-local`, `stderr`, `stdout` or `fabricator`.
+  pub source: String,
+  /// `debug` | `info` | `warn` | `error`.
+  pub level: String,
+  pub line: String,
+  pub time: String,
+}
+
+/// A local user of the app.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LocalUser {
+  #[serde(deserialize_with = "de_text")]
+  pub id: String,
+  pub username: String,
+  /// `None` when the username isn't an email address.
+  pub email: Option<String>,
+  #[serde(deserialize_with = "de_opt_text")]
+  pub created_at: Option<String>,
+  /// How the user can sign in: `password`, `entra`.
+  pub sign_in: Vec<String>,
+  /// The developer's own account.
+  pub developer: bool,
+}
+
+/// Who the app signs in as automatically.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LocalIdentity {
+  /// `developer` | `user` | `none`.
+  pub kind: String,
+  /// The user it signs in as (`developer`: `None` until first used).
+  pub user: Option<LocalUser>,
+}
+
+/// A new sign-in identity: `{kind: "developer"}`, `{kind: "user", user, create}` or `{kind: "none"}`.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LocalIdentityRequest {
+  pub kind: String,
+  /// With `user`: a username or id.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub user: Option<String>,
+  /// With `user`: create the user when it's missing.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub create: Option<bool>,
+}
+
+/// An entity and how many rows it holds locally.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LocalEntity {
+  pub name: String,
+  pub rows: u64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LocalColumn {
+  pub name: String,
+  #[serde(rename = "type")]
+  pub kind: String,
+  /// Part of the primary key.
+  pub key: bool,
+}
+
+/// A page of an entity's rows, regardless of permissions.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LocalRows {
+  pub columns: Vec<LocalColumn>,
+  pub rows: Vec<serde_json::Value>,
+  pub total: u64,
+}
+
+/// A storage folder and the files stored in it locally: one the app declares,
+/// or one that only stored files still name.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LocalStorageFolder {
+  pub name: String,
+  /// Its `@blob` class's name; `None` when the app no longer declares the folder.
+  pub display_name: Option<String>,
+  pub files: u64,
+  /// The size of its files together.
+  pub bytes: u64,
+}
+
+/// A stored file, regardless of its folder's rules.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LocalFile {
+  pub id: String,
+  /// Its path in the folder, such as `team/2024/scan.pdf`.
+  pub path: String,
+  pub name: String,
+  pub size: u64,
+  pub content_type: String,
+  /// The local user who first uploaded it; `None` for anonymous uploads.
+  pub owner_id: Option<String>,
+  pub created_at: Option<String>,
+  pub updated_at: Option<String>,
+  /// The app's own fields of the file.
+  pub fields: serde_json::Value,
+}
+
+/// A page of a storage folder's files, in path order.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LocalFiles {
+  pub files: Vec<LocalFile>,
+  pub total: u64,
+}
+
+/// What reading `rayfin.yml`, the entities and the secrets again did.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LocalReloadResult {
+  pub schema: Option<LocalSchema>,
+  pub config: Option<LocalConfigChanged>,
+}
+
+/// Something wrong with the project's seed data (`rayfin/seed`), and where.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LocalSeedProblem {
+  /// From the project root, such as `rayfin/seed/data/Todo.csv`.
+  pub file: String,
+  /// A JSON array's item (from 1), or a CSV file's line; `None` for the whole file.
+  pub row: Option<u64>,
+  /// The field at fault.
+  pub field: Option<String>,
+  pub message: String,
+}
+
+/// An entity's rows in the seed data.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LocalSeedEntity {
+  pub name: String,
+  /// The file, from the project root (`GET /seed` only).
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub file: Option<String>,
+  pub rows: u64,
+}
+
+/// A storage folder's files in the seed data.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LocalSeedFolder {
+  pub folder: String,
+  pub files: u64,
+  /// Their size together (`GET /seed` only).
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub bytes: Option<u64>,
+}
+
+/// The project's seed data, checked without loading it.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LocalSeed {
+  /// `rayfin/seed` holds seed data.
+  pub exists: bool,
+  pub entities: Vec<LocalSeedEntity>,
+  pub storage: Vec<LocalSeedFolder>,
+  /// The user placeholders it uses, such as `$developer`.
+  pub users: Vec<String>,
+  pub problems: Vec<LocalSeedProblem>,
+}
+
+/// What loading the seed data did, or would do in a dry run: what it stored,
+/// or the problems that kept it from changing anything.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LocalSeedLoad {
+  /// It loaded (or would): no problems.
+  pub ok: bool,
+  pub dry_run: bool,
+  pub entities: Vec<LocalSeedEntity>,
+  pub storage: Vec<LocalSeedFolder>,
+  pub problems: Vec<LocalSeedProblem>,
+}
+
+/// What saving the local data as seed data wrote to `rayfin/seed`.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LocalSeedSaved {
+  pub entities: u64,
+  pub rows: u64,
+  pub files: u64,
+  /// The stored files left out, each as `<folder>/<path>: <why>`: their paths
+  /// can't be file paths everywhere, or loading would skip them.
+  pub skipped: Vec<String>,
+}
+
+/// Where a secret's local value comes from (never the value).
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LocalSecret {
+  pub name: String,
+  /// Listed under `secrets:` in `rayfin.yml`.
+  pub declared: bool,
+  pub description: Option<String>,
+  /// `env` | `local` (`.rayfin-local/secrets.json`) | `settings` (`local.settings.json`) | `none`.
+  pub source: String,
+}
+
+/// Why a local backend command failed. `code` is stable: the control API's
+/// own codes, or `not-running`, `project-not-found`, `invalid`, `unreachable`,
+/// `timeout`, `unauthorized`, `not-rayfin-local`, `cli-failed`, `save-failed`
+/// and the binary codes of [`LocalProblem`].
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LocalCommandError {
+  pub code: String,
+  pub message: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub hint: Option<String>,
+  /// The HTTP status the control API answered with.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub status: Option<u16>,
+}
+
+impl std::fmt::Display for LocalCommandError {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match &self.hint {
+      Some(hint) => write!(f, "{} {hint}", self.message),
+      None => f.write_str(&self.message),
+    }
   }
 }

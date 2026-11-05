@@ -6,12 +6,13 @@ import type {
   FabricWorkspace,
   FabricWorkspacesResult,
   PendingChanges,
-  StudioProject
+  StudioProject,
+  UnsupportedWorkspace
 } from '@shared/ipc'
 import { useSuppressPreview } from '../overlay'
 import { useToast } from '../toast'
 import { authErrorMessage } from '../authErrors'
-import { fabricWorkspaceUrl } from '../fabric'
+import { REGION_AVAILABILITY_URL, fabricWorkspaceUrl } from '../fabric'
 import { clockLabel, meterStepLabel, useDeployMeter } from '../deployMeter'
 import { Codicon } from './icons'
 import DeploymentCreateForm, { checkActiveDeployTarget } from './DeploymentCreateForm'
@@ -33,8 +34,9 @@ interface Props {
   pending?: PendingChanges | null
   /** A deploy running to a new deployment, by its name: shown instead of the active one's until it's done. */
   deployingTo?: string
-  /** Remember a friendly name for the chosen workspace, then deploy into it. */
-  onCreate: (name: string, workspaceId: string, workspaceName?: string) => void
+  /** Remember a friendly name for the chosen workspace, then deploy into it: into
+   *  its existing app `itemName` when one was chosen. */
+  onCreate: (name: string, workspaceId: string, workspaceName?: string, itemName?: string) => void
   /** Redeploy the active deployment (no workspace change). */
   onRedeploy: () => void
   /** Switch the active recorded deployment (`rayfin up switch`). */
@@ -59,9 +61,22 @@ interface Props {
   shareRequest?: { projectId: string; nonce: number } | null
   /** The `shareRequest` with this nonce has been acted on. */
   onShareRequestHandled?: (nonce: number) => void
-  /** The workspaces your apps use, most recent first; New deployment lists them first. */
+  /**
+   * Set by an outside caller (the failed-publish notice's Choose another
+   * workspace) to open the workspace picker for this project. Honoured on mount
+   * too, and reported back through `onChooseRequestHandled` so the caller drops it.
+   */
+  chooseRequest?: { projectId: string; nonce: number } | null
+  /** The `chooseRequest` with this nonce has been acted on. */
+  onChooseRequestHandled?: (nonce: number) => void
+  /** Workspaces Fabric turned down an app in this session: the workspace picker marks them. */
+  refused?: readonly UnsupportedWorkspace[]
+  /** The workspaces your apps use, most recent first: the workspace picker lists them first. */
   recentWorkspaces?: readonly string[]
-  /** Whether chat turns deploy the app as they finish (off: the user deploys manually). */
+  /**
+   * Whether chat turns publish the app as they finish; off, the default, the
+   * user publishes when they choose (see `publishesAfterTurn`).
+   */
   autoDeploy?: { on: boolean; onChange: (on: boolean) => void }
   /** Open Help about why the last deploy failed. */
   onDiagnose?: () => void
@@ -92,6 +107,11 @@ function workspaceMeta(w: FabricWorkspace | undefined): string {
   return [w.region, w.capacityKind === 'unknown' ? undefined : w.sku].filter(Boolean).join(' · ')
 }
 
+/** Workspace ids (or names) compare without case. */
+function sameWorkspace(a?: string, b?: string): boolean {
+  return Boolean(a?.trim() && b?.trim() && a.trim().toLowerCase() === b.trim().toLowerCase())
+}
+
 /** Host-only label for an app's address (the full URL is in the tooltip). */
 function hostOf(url: string): string {
   try {
@@ -111,15 +131,16 @@ function byDeployedAt(a: FabricDeployment, b: FabricDeployment): number {
 }
 
 /**
- * The deployment control in the app bar: what state the app's deployment is in
+ * The publish control in the app bar: what state the app's published copy is in
  * on the left, the one thing to do about it on the right, lit only when it
- * matters (changes waiting, a failed deploy, nothing deployed yet). Share sits
- * apart from it: it's about people, not deploys.
+ * matters (changes waiting, a failed publish, nothing published yet). Share sits
+ * apart from it: it's about people, not publishing.
  *
- * The panel the state opens is the deployment's details: how it is and since
- * when, its address, workspace and account, the project's other deployments,
- * whether chat turns deploy, and New deployment. It opens straight away from
- * what Fabricator knows, refreshes behind, and never starts a sign-in by itself.
+ * The panel the state opens is the published app's details: how it is and since
+ * when, its address, workspace and account, the project's other published apps,
+ * whether chat turns publish, and Publish to another workspace. It opens straight
+ * away from what Fabricator knows, refreshes behind, and never starts a sign-in
+ * by itself.
  */
 export default function DeploymentsControl({
   project,
@@ -139,6 +160,9 @@ export default function DeploymentsControl({
   onSignIn,
   shareRequest,
   onShareRequestHandled,
+  chooseRequest,
+  onChooseRequestHandled,
+  refused,
   recentWorkspaces,
   autoDeploy,
   onDiagnose,
@@ -157,6 +181,10 @@ export default function DeploymentsControl({
   const [loadingWs, setLoadingWs] = useState(false)
   const [reauthing, setReauthing] = useState(false)
   const [switching, setSwitching] = useState<string | null>(null)
+  /** The published app (by key) whose Delete is asking to be confirmed. */
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
+  /** The published app (by key) being deleted. */
+  const [deleting, setDeleting] = useState<string | null>(null)
   const [renamingKey, setRenamingKey] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
   const [busy, setBusy] = useState(false)
@@ -196,8 +224,8 @@ export default function DeploymentsControl({
       if (seq === depsSeqRef.current) setRecorded({ projectId, list })
     } catch (reason) {
       if (seq === depsSeqRef.current) {
-        toast.error(authErrorMessage(reason, 'Could not load deployments. Please retry.'), {
-          title: 'Deployment check failed'
+        toast.error(authErrorMessage(reason, 'Could not load your published apps. Please retry.'), {
+          title: 'Published app check failed'
         })
       }
     }
@@ -205,9 +233,9 @@ export default function DeploymentsControl({
 
   /**
    * List the Fabric workspaces. `signIn`: a missing or expired Fabric session
-   * signs in again once and retries, so creating a deployment doesn't need a
-   * manual sign-out and back in. Only New deployment asks for that; the details
-   * look quietly and do without.
+   * signs in again once and retries, so publishing to a workspace doesn't need a
+   * manual sign-out and back in. Only picking a workspace to publish to asks for
+   * that; the details look quietly and do without.
    */
   async function loadWorkspaces(signIn: boolean): Promise<void> {
     if (wsBusyRef.current) return
@@ -260,6 +288,7 @@ export default function DeploymentsControl({
     if (!open) {
       setCreating(false)
       setRenamingKey(null)
+      setConfirmDelete(null)
       // Reopening must not reuse workspaces from an expired or different account.
       setWsResult(null)
       setLoadingWs(false)
@@ -314,19 +343,29 @@ export default function DeploymentsControl({
     undefined
   const activeLabel = activeDep ? activeDep.name || activeDep.workspaceName : fallbackName
   const hasDeployment = Boolean(activeDep || project.lastDeploy?.url || project.workspace)
-  const failed = !running && (deploy?.result ? !deploy.result.ok : project.lastDeploy?.status === 'error')
+  const lastOutcome = deploy?.result ? deploy.result.outcome : project.lastDeploy?.outcome
+  /** Fabric turned the last publish down: Fabric apps aren't available in the workspace it went to. */
+  const turnedDown = !running && lastOutcome === 'workspace-unsupported'
+  const turnedDownIn = turnedDown ? deploy?.result?.unsupported : undefined
+  // Fabric created nothing there, so the app is back on the workspace it
+  // published to before, if any, which is as it was: not failed.
+  const elsewhere = Boolean(turnedDownIn?.id) && !sameWorkspace(turnedDownIn?.id, project.workspace)
+  const failed =
+    !running &&
+    (deploy?.result ? !deploy.result.ok : project.lastDeploy?.status === 'error') &&
+    !(turnedDown && elsewhere)
   const meter = useDeployMeter(project.id, deploy?.log, deploy?.startedAt, running)
   const percent = meter ? Math.round(meter.fraction * 100) : null
   const files = pending?.changed ? pending.files : undefined
   const waiting = Boolean(pending?.changed) && hasDeployment && !running && !failed
   const now = useNow(open)
 
-  /** A deploy running to a new deployment: it's named for that one until it's done. */
+  /** Publishing to a new workspace: the control is named for that one until it's done. */
   const toNew = running && deployingTo ? deployingTo : undefined
   const name = toNew ?? (activeLabel || 'your app')
   const status: Status =
     running || (reconciling && !hasDeployment) ? 'busy' : !hasDeployment ? 'none' : failed ? 'err' : 'ok'
-  const label = toNew ?? (activeLabel || (reconciling ? 'Checking…' : 'Not deployed'))
+  const label = toNew ?? (activeLabel || (reconciling ? 'Checking…' : 'Not published'))
   const deployedAt = activeDep?.deployedAt
   const workspaceId =
     activeDep?.workspaceId ?? (fabricWorkspaceUrl(project.workspace) ? project.workspace : undefined)
@@ -348,79 +387,98 @@ export default function DeploymentsControl({
     if (!wsResult?.ok) void loadWorkspaces(true)
   }
 
-  /** A chat turn holds the project's source, so a deploy started now could only fail. */
+  /** A chat turn holds the project's source, so a publish started now could only fail. */
   const held = chatBusy && !running
-  const heldTitle = 'Copilot is working on this app. Deploys wait until the turn finishes.'
+  const heldTitle = 'Copilot is working on this app. Publishing waits until the turn finishes.'
+  const deletingTitle = 'Deleting a published app. Publishing waits until it’s done.'
+  /** Why a published app can't be deleted just now: publishing and chat turns hold the project. */
+  const deleteWait = running
+    ? 'Publishing. Deleting waits until it’s done.'
+    : held
+      ? 'Copilot is working on this app. Deleting waits until the turn finishes.'
+      : undefined
 
   /** What the button beside the state does now. */
   const nextAction: { label: string; title: string; primary: boolean; disabled?: boolean; run: () => void } =
     running
       ? {
-          label: percent === null ? 'Deploying…' : `Deploying… ${percent}%`,
-          title: 'See how the deploy is going',
+          label: percent === null ? 'Publishing…' : `Publishing… ${percent}%`,
+          title: 'See how publishing is going',
           primary: false,
           run: () => setOpen(true)
         }
       : !hasDeployment
         ? {
-            label: 'Deploy',
-            title: 'Create your first deployment',
+            label: 'Publish',
+            title: 'Publish this app to a Fabric workspace',
             primary: true,
             disabled: reconciling,
             run: openCreate
           }
         : failed
-          ? { label: 'Try again', title: `Deploy ${name} again`, primary: true, run: onRedeploy }
+          ? turnedDown
+            ? {
+                label: 'Choose workspace',
+                title:
+                  'Fabric apps aren’t available in this workspace. Choose another workspace to publish to.',
+                primary: true,
+                run: openCreate
+              }
+            : { label: 'Try again', title: `Publish ${name} again`, primary: true, run: onRedeploy }
           : waiting
             ? {
-                label: files ? `Deploy ${plural(files, 'change')}` : 'Deploy changes',
+                label: files ? `Publish ${plural(files, 'change')}` : 'Publish changes',
                 title: files
-                  ? `${plural(files, 'file')} changed since ${name} was deployed`
+                  ? `${plural(files, 'file')} changed since ${name} was published`
                   : `Your latest changes aren't on ${name} yet`,
                 primary: true,
                 run: onRedeploy
               }
             : {
-                label: 'Redeploy',
-                title: pending ? `${name} is up to date. Deploy it again anyway.` : `Deploy ${name} again`,
+                label: 'Publish',
+                title: pending ? `${name} is up to date. Publish it again anyway.` : `Publish ${name} again`,
                 primary: false,
                 run: onRedeploy
               }
-  const action = held ? { ...nextAction, disabled: true, title: heldTitle } : nextAction
+  const action = held
+    ? { ...nextAction, disabled: true, title: heldTitle }
+    : deleting && !running
+      ? { ...nextAction, disabled: true, title: deletingTitle }
+      : nextAction
 
   const chipState = running
-    ? `Deploying to ${name}…`
+    ? `Publishing to ${name}…`
     : !hasDeployment
       ? reconciling
-        ? 'Checking for an existing deployment…'
-        : 'Not deployed yet. Click to choose a workspace.'
+        ? 'Checking for a published app…'
+        : 'Not published yet. Click to choose a workspace.'
       : failed
-        ? `The last deploy to ${name} didn't finish. Click for details.`
-        : `${name} is live${workspaceName && workspaceName !== name ? ` in ${workspaceName}` : ''}. Click for details, or to switch or add a deployment.`
-  // With deploying after each turn off, the chip says so without opening the
-  // panel: "· Manual". Auto is the default, so it goes unsaid.
-  const modeNote = autoDeploy && !autoDeploy.on && hasDeployment ? 'Manual' : null
+        ? `Couldn't publish to ${name}. Click for details.`
+        : `${name} is live${workspaceName && workspaceName !== name ? ` in ${workspaceName}` : ''}. Click for details, or to switch or add a published app.`
+  // When chat turns publish, the chip says so without opening the panel: "· Auto".
+  // Off, the default, goes unsaid.
+  const modeNote = autoDeploy && hasDeployment && autoDeploy.on ? 'Auto' : null
   const chipTitle = autoDeploy
-    ? `${chipState}\n${autoDeploy.on ? 'Auto deploy is on: chat changes deploy after each turn.' : 'Auto deploy is off: chat changes wait for you to deploy them.'}`
+    ? `${chipState}\n${autoDeploy.on ? 'Publish after each chat turn is on: chat changes publish as each turn finishes.' : 'Publish after each chat turn is off: chat changes wait for you to publish them.'}`
     : chipState
 
   const statusText = running
     ? meter
-      ? `Deploying · step ${meter.step} of ${meter.steps} · ${clockLabel(meter.elapsed)}`
-      : 'Deploying…'
+      ? `Publishing · step ${meter.step} of ${meter.steps} · ${clockLabel(meter.elapsed)}`
+      : 'Publishing…'
     : !hasDeployment
       ? reconciling
-        ? 'Checking for a deployment…'
-        : 'Not deployed yet'
+        ? 'Checking for a published app…'
+        : 'Not published yet'
       : failed
-        ? `Last deploy failed${project.lastDeploy?.at ? ` · ${timeAgo(project.lastDeploy.at, now)}` : ''}`
+        ? `Couldn't publish${project.lastDeploy?.at ? ` · ${timeAgo(project.lastDeploy.at, now)}` : ''}`
         : deployedAt
-          ? `Deployed ${timeAgo(deployedAt, now)}`
-          : 'Deployed'
+          ? `Published ${timeAgo(deployedAt, now)}`
+          : 'Published'
   const failure = (deploy?.result?.error ?? project.lastDeploy?.error ?? '')
     .trim()
     .split('\n')[0]
-    // The CLI's own "❌ Deployment failed:" adds nothing to "didn't finish".
+    // The CLI's own "❌ Deployment failed:" adds nothing to "Publishing didn't finish".
     .replace(/^[^\p{L}\p{N}]+/u, '')
     .replace(/^deploy(?:ment)? failed[:.]?\s*/i, '')
 
@@ -435,14 +493,14 @@ export default function DeploymentsControl({
         toast.error(authErrorMessage(
           result.error,
           result.outcome === 'not-signed-in'
-            ? 'Sign in to Fabric before switching deployments.'
-            : 'Could not switch deployments. Please retry.'
+            ? 'Sign in to Fabric before switching published apps.'
+            : 'Could not switch published apps. Please retry.'
         ), { title: 'Switch failed' })
         return
       }
       await loadDeployments()
     } catch (reason) {
-      toast.error(authErrorMessage(reason, 'Could not switch deployments. Please retry.'), {
+      toast.error(authErrorMessage(reason, 'Could not switch published apps. Please retry.'), {
         title: 'Switch failed'
       })
     } finally {
@@ -453,6 +511,96 @@ export default function DeploymentsControl({
   function startRename(d: FabricDeployment): void {
     setRenamingKey(d.workspaceId ?? d.workspaceName)
     setRenameValue(d.name ?? '')
+  }
+
+  /**
+   * Delete a published app: in Fabric, with its data, then from the project. A
+   * missing or expired Fabric session signs in again once and retries.
+   */
+  async function doDelete(d: FabricDeployment): Promise<void> {
+    const key = d.workspaceId ?? d.workspaceName
+    if (!key || deleteWait || deleting) return
+    const shown = d.name || d.workspaceName
+    const failed = (reason: unknown): void => {
+      toast.error(authErrorMessage(reason, `Couldn’t delete ${shown}. Please try again.`), {
+        title: 'Delete failed'
+      })
+    }
+    setDeleting(key)
+    try {
+      let result = await window.api.deploy.remove(project.id, key)
+      if (!result.ok && result.needsLogin) {
+        const login = await window.api.auth.loginRayfin()
+        if (!login.ok) {
+          toast.error(
+            authErrorMessage(login.error, 'Fabric sign-in did not complete. Please try again.'),
+            {
+              title: 'Sign-in failed'
+            }
+          )
+          return
+        }
+        await onSignedIn?.()
+        result = await window.api.deploy.remove(project.id, key)
+      }
+      if (!result.ok) {
+        failed(result.error)
+        return
+      }
+      setConfirmDelete(null)
+      toast.success(`Deleted ${shown} and its data in Fabric.`)
+      onChanged()
+      await loadDeployments()
+    } catch (reason) {
+      failed(reason)
+    } finally {
+      setDeleting(null)
+    }
+  }
+
+  /**
+   * Asks before deleting `d`. `then` is what the project publishes to afterwards:
+   * for the app it publishes to now, the most recently published of the others.
+   */
+  function deleteConfirm(d: FabricDeployment, then?: FabricDeployment | null): JSX.Element {
+    const shown = d.name || d.workspaceName
+    const inWorkspace = workspaceById(d.workspaceId)?.displayName || d.workspaceName
+    const removing = deleting === (d.workspaceId ?? d.workspaceName)
+    const after =
+      then === undefined
+        ? 'Your app on this computer stays as it is.'
+        : then
+          ? `Your app on this computer stays, and publishes to ${then.name || then.workspaceName} from then on.`
+          : 'Your app on this computer stays, unpublished.'
+    return (
+      <div className="dep-callout" role="alert">
+        <span className="dep-callout-text">
+          Delete <strong>{shown}</strong> and all its data in {inWorkspace}?
+          <span className="dep-callout-detail">
+            It’s gone for everyone who uses it, and this can’t be undone. {after}
+          </span>
+        </span>
+        <div className="dep-actions">
+          <button
+            type="button"
+            className="btn btn--sm btn--danger"
+            disabled={Boolean(deleting || deleteWait)}
+            title={deleteWait}
+            onClick={() => void doDelete(d)}
+          >
+            {removing ? 'Deleting…' : 'Delete'}
+          </button>
+          <button
+            type="button"
+            className="btn btn--sm btn--ghost"
+            disabled={removing}
+            onClick={() => setConfirmDelete(null)}
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    )
   }
 
   async function saveRename(): Promise<void> {
@@ -480,7 +628,7 @@ export default function DeploymentsControl({
     }
   }
 
-  /** Open the Share dialog for the active deployment. When the list isn't loaded
+  /** Open the Share dialog for the active published app. When the list isn't loaded
    * yet, it loads first, so the button shows progress meanwhile and ignores
    * repeat clicks. */
   async function openShareForActive(): Promise<void> {
@@ -499,16 +647,19 @@ export default function DeploymentsControl({
       const target =
         deps.find((d) => d.active && d.workspaceId) ?? deps.find((d) => d.workspaceId) ?? null
       if (!target) {
-        toast.error('Deploy this app to a workspace before sharing.', { title: 'Nothing to share yet' })
+        toast.error('Publish this app to a workspace before sharing.', {
+          title: 'Nothing to share yet'
+        })
         return
       }
       setOpen(false)
       setSharing(target)
     } catch (reason) {
       if (projectIdRef.current !== projectId) return
-      toast.error(authErrorMessage(reason, 'Could not load the deployment to share. Please retry.'), {
-        title: 'Deployment check failed'
-      })
+      toast.error(
+        authErrorMessage(reason, 'Could not load the published app to share. Please retry.'),
+        { title: 'Published app check failed' }
+      )
     } finally {
       openingShareRef.current = false
       setOpeningShare(false)
@@ -533,6 +684,26 @@ export default function DeploymentsControl({
     void shareRef.current()
   }, [shareRequest, project.id])
 
+  // The failed-publish notice asked for the workspace picker. Like a share
+  // request, it's reported handled at once. The picker opens once the click that
+  // asked for it is over: opened during it, that click would go on to reach the
+  // window and close the panel again.
+  const openCreateRef = useRef(openCreate)
+  openCreateRef.current = openCreate
+  const onChooseHandledRef = useRef(onChooseRequestHandled)
+  onChooseHandledRef.current = onChooseRequestHandled
+  const handledChooseRef = useRef<number | null>(null)
+  const chooseTimer = useRef(0)
+  useEffect(() => {
+    if (!chooseRequest || chooseRequest.projectId !== project.id) return
+    if (handledChooseRef.current === chooseRequest.nonce) return
+    handledChooseRef.current = chooseRequest.nonce
+    onChooseHandledRef.current?.(chooseRequest.nonce)
+    window.clearTimeout(chooseTimer.current)
+    chooseTimer.current = window.setTimeout(() => openCreateRef.current(), 0)
+  }, [chooseRequest, project.id])
+  useEffect(() => () => window.clearTimeout(chooseTimer.current), [])
+
   /** Leave the panel, then do `then`. */
   const leave = (then: () => void) => (): void => {
     setOpen(false)
@@ -543,7 +714,7 @@ export default function DeploymentsControl({
     return (
       <input
         className="ws-input dep-rename"
-        aria-label="Deployment name"
+        aria-label="Published app name"
         autoFocus
         spellCheck={false}
         value={renameValue}
@@ -562,6 +733,10 @@ export default function DeploymentsControl({
   }
 
   const activeKey = activeDep ? (activeDep.workspaceId ?? activeDep.workspaceName) : null
+  /** The first publish picks a workspace; later ones add another. */
+  const createTitle = hasDeployment
+    ? 'Publish to another workspace'
+    : 'Publish to a Fabric workspace'
 
   return (
     <div className="dep-control" onClick={(e) => e.stopPropagation()}>
@@ -575,7 +750,7 @@ export default function DeploymentsControl({
           onClick={() => setOpen((o) => !o)}
         >
           <StatusDot status={status} />
-          <span className="sr-only">Deployment:</span>
+          <span className="sr-only">Published app:</span>
           <span className="dep-chip-label">{label}</span>
           {status === 'err' ? (
             <span className="dep-chip-note">· Failed</span>
@@ -621,17 +796,21 @@ export default function DeploymentsControl({
       )}
 
       {open && (
-        <div className="dep-pop" role="dialog" aria-label={creating ? 'New deployment' : 'Deployments'}>
+        <div
+          className="dep-pop"
+          role="dialog"
+          aria-label={creating ? createTitle : 'Published apps'}
+        >
           {creating ? (
             <div className="dep-sec">
-              <span className="dep-pop-title">New deployment</span>
+              <span className="dep-pop-title">{createTitle}</span>
               {account && (
                 <div className="dep-account">
                   <span
                     className="dep-account-text"
                     title={[account.user, account.tenant].filter(Boolean).join(' · ')}
                   >
-                    Deploys as <strong>{account.user ?? 'your Fabric account'}</strong>
+                    Publishes as <strong>{account.user ?? 'your Fabric account'}</strong>
                     {account.tenant ? ` · ${account.tenant}` : ''}
                   </span>
                   {onManageAccounts && (
@@ -649,13 +828,14 @@ export default function DeploymentsControl({
                 onSignedIn={onSignedIn}
                 running={running}
                 onCancel={() => setCreating(false)}
-                onSubmit={(depName, workspaceId) => {
-                  onCreate(depName, workspaceId, workspaceById(workspaceId)?.displayName)
+                onSubmit={(depName, workspaceId, itemName) => {
+                  onCreate(depName, workspaceId, workspaceById(workspaceId)?.displayName, itemName)
                   setOpen(false)
                   setCreating(false)
                 }}
                 checkTarget={checkActiveDeployTarget}
                 recentWorkspaces={recentWorkspaces}
+                refused={refused}
               />
             </div>
           ) : (
@@ -666,32 +846,48 @@ export default function DeploymentsControl({
                     renameInput()
                   ) : (
                     <span className="dep-title" title={toNew ?? activeLabel}>
-                      {toNew ?? (activeLabel || (reconciling ? 'Checking…' : 'Not deployed yet'))}
+                      {toNew ?? (activeLabel || (reconciling ? 'Checking…' : 'Not published yet'))}
                     </span>
                   )}
                   {activeDep && !toNew && renamingKey !== activeKey && (
-                    <button
-                      type="button"
-                      className="dep-ico"
-                      title="Rename this deployment"
-                      aria-label="Rename this deployment"
-                      onClick={() => startRename(activeDep)}
-                    >
-                      <Codicon name="edit" />
-                    </button>
+                    <span className="dep-title-actions">
+                      <button
+                        type="button"
+                        className="dep-ico"
+                        title="Rename this published app"
+                        aria-label="Rename this published app"
+                        onClick={() => startRename(activeDep)}
+                      >
+                        <Codicon name="edit" />
+                      </button>
+                      <button
+                        type="button"
+                        className="dep-ico"
+                        title={deleteWait ?? 'Delete this published app'}
+                        aria-label="Delete this published app"
+                        disabled={Boolean(deleting || deleteWait)}
+                        onClick={() => setConfirmDelete(activeKey)}
+                      >
+                        <Codicon name="trash" />
+                      </button>
+                    </span>
                   )}
                 </div>
                 <div className="dep-status">
                   <StatusDot status={status} />
                   <span>{statusText}</span>
                 </div>
+                {activeDep &&
+                  !toNew &&
+                  confirmDelete === activeKey &&
+                  deleteConfirm(activeDep, others[0] ?? null)}
 
                 {running && meter && (
                   <div className="dep-running">
                     <div
                       className="dep-bar"
                       role="progressbar"
-                      aria-label="Deploy progress"
+                      aria-label="Publish progress"
                       aria-valuemin={0}
                       aria-valuemax={100}
                       aria-valuenow={percent ?? 0}
@@ -709,21 +905,60 @@ export default function DeploymentsControl({
                   </div>
                 )}
 
-                {status === 'err' && (
+                {turnedDown ? (
                   <div className="dep-callout">
                     <span className="dep-callout-text">
-                      The last deploy didn&apos;t finish.
-                      {failure && <span className="dep-callout-detail">{failure}</span>}
+                      Couldn&apos;t publish to{' '}
+                      {turnedDownIn?.name ? `“${turnedDownIn.name}”` : 'that workspace'}.
+                      <span className="dep-callout-detail">
+                        {turnedDownIn?.region
+                          ? `Fabric apps aren’t available in ${turnedDownIn.region}, where its capacity is. `
+                          : 'Fabric apps aren’t available in its region. '}
+                        Choose a workspace on a capacity in another region.
+                      </span>
                     </span>
-                    {onDiagnose && (
-                      <div className="dep-actions">
-                        <button type="button" className="btn btn--sm btn--primary" onClick={leave(onDiagnose)}>
-                          <Codicon name="comment-discussion" />
-                          Find out why
-                        </button>
-                      </div>
-                    )}
+                    <div className="dep-actions">
+                      <button
+                        type="button"
+                        className="btn btn--sm btn--primary"
+                        disabled={held}
+                        title={held ? heldTitle : undefined}
+                        onClick={startCreate}
+                      >
+                        Choose another workspace
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn--sm btn--ghost"
+                        title="See which regions have Fabric apps (opens learn.microsoft.com)"
+                        onClick={() => void window.api.openExternal(REGION_AVAILABILITY_URL)}
+                      >
+                        <Codicon name="link-external" />
+                        Region availability
+                      </button>
+                    </div>
                   </div>
+                ) : (
+                  status === 'err' && (
+                    <div className="dep-callout">
+                      <span className="dep-callout-text">
+                        Publishing didn&apos;t finish.
+                        {failure && <span className="dep-callout-detail">{failure}</span>}
+                      </span>
+                      {onDiagnose && (
+                        <div className="dep-actions">
+                          <button
+                            type="button"
+                            className="btn btn--sm btn--primary"
+                            onClick={leave(onDiagnose)}
+                          >
+                            <Codicon name="comment-discussion" />
+                            Find out why
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )
                 )}
 
                 {waiting && (
@@ -731,7 +966,8 @@ export default function DeploymentsControl({
                     <span className="dep-callout-text">
                       {files ? (
                         <>
-                          <strong>{plural(files, 'file')}</strong> changed since {name} was deployed.
+                          <strong>{plural(files, 'file')}</strong> changed since {name} was
+                          published.
                         </>
                       ) : (
                         <>Your latest changes aren&apos;t on {name} yet.</>
@@ -839,50 +1075,69 @@ export default function DeploymentsControl({
 
               {others.length > 0 && (
                 <div className="dep-sec">
-                  <span className="dep-sec-title">Other deployments</span>
+                  <span className="dep-sec-title">Other published apps</span>
                   <ul className="dep-list">
                     {others.map((d) => {
                       const key = d.workspaceId ?? d.workspaceName
                       const meta = [
                         d.workspaceName,
                         workspaceById(d.workspaceId)?.sku,
-                        d.deployedAt ? `deployed ${timeAgo(d.deployedAt, now)}` : undefined
+                        d.deployedAt ? `published ${timeAgo(d.deployedAt, now)}` : undefined
                       ]
                         .filter(Boolean)
                         .join(' · ')
                       return (
-                        <li key={key} className="dep-row">
-                          <StatusDot status="ok" />
-                          <span className="dep-row-main">
-                            {renamingKey === key ? (
-                              renameInput()
-                            ) : (
-                              <span className="dep-row-name">{d.name || d.workspaceName}</span>
-                            )}
-                            <span className="dep-row-sub" title={meta}>
-                              {meta}
+                        <li key={key} className="dep-item">
+                          <div className="dep-row">
+                            <StatusDot status="ok" />
+                            <span className="dep-row-main">
+                              {renamingKey === key ? (
+                                renameInput()
+                              ) : (
+                                <span className="dep-row-name">{d.name || d.workspaceName}</span>
+                              )}
+                              <span className="dep-row-sub" title={meta}>
+                                {meta}
+                              </span>
                             </span>
-                          </span>
-                          {renamingKey !== key && (
+                            {renamingKey !== key && (
+                              <button
+                                type="button"
+                                className="dep-ico dep-row-edit"
+                                title="Rename this published app"
+                                aria-label={`Rename ${d.name || d.workspaceName}`}
+                                onClick={() => startRename(d)}
+                              >
+                                <Codicon name="edit" />
+                              </button>
+                            )}
+                            {renamingKey !== key && (
+                              <button
+                                type="button"
+                                className="dep-ico dep-row-edit"
+                                title={deleteWait ?? 'Delete this published app'}
+                                aria-label={`Delete ${d.name || d.workspaceName}`}
+                                disabled={Boolean(deleting || deleteWait)}
+                                onClick={() => setConfirmDelete(key)}
+                              >
+                                <Codicon name="trash" />
+                              </button>
+                            )}
                             <button
                               type="button"
-                              className="dep-ico dep-row-edit"
-                              title="Rename this deployment"
-                              aria-label={`Rename ${d.name || d.workspaceName}`}
-                              onClick={() => startRename(d)}
+                              className="btn btn--xs btn--ghost"
+                              disabled={Boolean(switching) || Boolean(deleting) || running || held}
+                              title={
+                                held
+                                  ? heldTitle
+                                  : `Preview and publish to ${d.name || d.workspaceName}`
+                              }
+                              onClick={() => void doSwitch(d)}
                             >
-                              <Codicon name="edit" />
+                              {switching === key ? 'Switching…' : 'Switch'}
                             </button>
-                          )}
-                          <button
-                            type="button"
-                            className="btn btn--xs btn--ghost"
-                            disabled={Boolean(switching) || running || held}
-                            title={held ? heldTitle : `Preview and deploy to ${d.name || d.workspaceName}`}
-                            onClick={() => void doSwitch(d)}
-                          >
-                            {switching === key ? 'Switching…' : 'Switch'}
-                          </button>
+                          </div>
+                          {confirmDelete === key && deleteConfirm(d)}
                         </li>
                       )
                     })}
@@ -894,11 +1149,11 @@ export default function DeploymentsControl({
                 <div className="dep-sec">
                   <label className="dep-toggle">
                     <span className="dep-toggle-text">
-                      <span className="dep-toggle-title">Deploy after each chat turn</span>
+                      <span className="dep-toggle-title">Publish after each chat turn</span>
                       <span className="dep-toggle-hint">
                         {autoDeploy.on
-                          ? 'When a turn changes your app, it deploys as the turn finishes.'
-                          : 'Changes stay on this computer, showing in the preview, until you deploy them.'}
+                          ? 'When a turn changes your app, it publishes as the turn finishes.'
+                          : 'Changes stay on this computer, showing in the preview, until you publish them.'}
                       </span>
                     </span>
                     <span className={`switch${autoDeploy.on ? ' switch--on' : ''}`}>
@@ -918,11 +1173,11 @@ export default function DeploymentsControl({
                   type="button"
                   className="dep-new"
                   onClick={startCreate}
-                  disabled={running || held}
-                  title={held ? heldTitle : undefined}
+                  disabled={running || held || Boolean(deleting)}
+                  title={held ? heldTitle : deleting ? deletingTitle : undefined}
                 >
                   <Codicon name="add" />
-                  New deployment…
+                  {createTitle}…
                 </button>
               </div>
             </>

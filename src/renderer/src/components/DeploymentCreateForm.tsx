@@ -1,16 +1,20 @@
 import { useEffect, useRef, useState, type JSX } from 'react'
 import { Codicon } from './icons'
 import { authErrorMessage } from '../authErrors'
+import { REGION_AVAILABILITY_URL, refusalFor, refusedRegions, type Refusal } from '../fabric'
 import type {
   DeployTargetCheck,
   FabricCapacity,
   FabricWorkspace,
-  FabricWorkspacesResult
+  FabricWorkspacesResult,
+  UnsupportedWorkspace
 } from '@shared/ipc'
 
 /** Where to send users who have no Fabric/Premium capacity yet. */
 const TRIAL_URL = 'https://learn.microsoft.com/fabric/fundamentals/fabric-trial'
 const BUY_URL = 'https://learn.microsoft.com/fabric/enterprise/buy-subscription'
+
+const NO_REFUSALS: readonly UnsupportedWorkspace[] = []
 
 /**
  * `checkTarget` for deploying the active project. A module-level function, so
@@ -40,7 +44,7 @@ function skuText(w: FabricWorkspace): string {
 /** Tooltip for a workspace's capacity chip. */
 function skuTitle(w: FabricWorkspace): string | undefined {
   if (w.capacityKind === 'unknown') {
-    return 'On a dedicated capacity, but its SKU isn’t visible to you (you don’t administer it) — verified when you deploy'
+    return 'On a dedicated capacity, but its SKU isn’t visible to you (you don’t administer it) — verified when you publish'
   }
   return w.capacityName ? `${w.capacityName} (${w.sku})` : w.sku
 }
@@ -51,6 +55,30 @@ function reasonFor(w: FabricWorkspace): string {
     return `Capacity ${w.sku ? `(${w.sku}) ` : ''}isn’t Fabric (F-SKU) or Premium (P-SKU)`
   }
   return 'No Fabric/Premium capacity assigned'
+}
+
+/** Why publishing to `w` will likely fail: Fabric turned down an app in it, on its capacity or in its region. */
+function refusalText(w: FabricWorkspace, { refused, by }: Refusal): string {
+  const when =
+    by === 'workspace'
+      ? `in ${w.displayName} when you published to it`
+      : by === 'capacity'
+        ? 'on this workspace’s capacity when you published'
+        : `in ${refused.region} when you published`
+  return `Fabric apps weren’t available ${when} earlier, so publishing here will likely fail.`
+}
+
+/** What the picker says about the workspaces Fabric turned apps down in. */
+function refusedNote(refused: readonly UnsupportedWorkspace[]): string {
+  const regions = refusedRegions(refused)
+  if (regions.length > 1) {
+    const list = `${regions.slice(0, -1).join(', ')} or ${regions[regions.length - 1]}`
+    return `Fabric apps weren’t available in ${list}, so workspaces there are marked. If no region works, your Fabric admin may need to turn on Fabric Apps.`
+  }
+  if (regions.length === 1) {
+    return `Fabric apps weren’t available in ${regions[0]}, so workspaces there are marked. Choose one on a capacity in another region.`
+  }
+  return 'Fabric apps weren’t available in a workspace you published to, so workspaces on its capacity are marked. Choose one on a capacity in another region.'
 }
 
 interface Props {
@@ -74,25 +102,32 @@ interface Props {
   cancelLabel?: string
   /** Secondary action; the Cancel button is hidden when omitted. */
   onCancel?: () => void
-  /** Submit: deploy `name` (friendly, may be empty) into `workspaceId`. */
-  onSubmit: (name: string, workspaceId: string) => void
-  /** Pre-fill the (editable) deployment name — e.g. "Development" for a first deploy. */
+  /** Submit: publish as `name` (friendly, may be empty) into `workspaceId`,
+   *  into the existing app `itemName` there when one was chosen. */
+  onSubmit: (name: string, workspaceId: string, itemName?: string) => void
+  /** Pre-fill the (editable) published app's name — e.g. "Development" for a first publish. */
   defaultName?: string
   /**
-   * Check a selected workspace for an app this deploy would replace. While it
-   * runs, Deploy waits; a conflict needs an explicit "Replace it anyway".
+   * Check a selected workspace for an app this publish would replace. While it
+   * runs, Publish waits; a conflict needs an explicit "Replace it anyway".
    */
   checkTarget?: (workspaceId: string) => Promise<DeployTargetCheck>
   /** The workspaces your apps use, most recent first (ids, or names in older
    *  records). Eligible ones are listed first, under Recent. */
   recentWorkspaces?: readonly string[]
+  /**
+   * Workspaces Fabric turned down an app in ("The feature is not available").
+   * They, and others on their capacity or in their region, are marked and
+   * listed last, and publishing to one asks first.
+   */
+  refused?: readonly UnsupportedWorkspace[]
 }
 
 /**
- * The presentational "pick a workspace and deploy" form. Extracted so the
- * app bar's deployments popover and the fullscreen create/deploy flow share
- * one consistent picker (eligible F-SKU/P-SKU list, greyed-out ineligible rows
- * with reasons, search, optional name, and the no-capacity / error empty states).
+ * The presentational "pick a workspace and publish" form, in the app bar's
+ * publish popover: one consistent picker (eligible F-SKU/P-SKU list, greyed-out
+ * ineligible rows with reasons, search, optional name, and the no-capacity /
+ * error empty states).
  * It owns only its transient input state; the workspace data is supplied (and
  * cached) by the parent.
  */
@@ -103,14 +138,15 @@ export default function DeploymentCreateForm({
   onReload,
   onSignedIn,
   running = false,
-  submitLabel = 'Create & deploy',
-  busyLabel = 'Deploying…',
+  submitLabel = 'Publish',
+  busyLabel = 'Publishing…',
   cancelLabel = 'Cancel',
   onCancel,
   onSubmit,
   defaultName = '',
   checkTarget,
-  recentWorkspaces
+  recentWorkspaces,
+  refused = NO_REFUSALS
 }: Props): JSX.Element {
   const [name, setName] = useState(defaultName)
   const [wsQuery, setWsQuery] = useState('')
@@ -118,6 +154,10 @@ export default function DeploymentCreateForm({
   const [targetCheck, setTargetCheck] = useState<{ workspaceId: string; result?: DeployTargetCheck } | null>(null)
   /** The workspace whose same-named app the user agreed to replace. */
   const [replaceIn, setReplaceIn] = useState<string | null>(null)
+  /** An existing app picked to publish into, in the workspace it's in. */
+  const [appIn, setAppIn] = useState<{ workspaceId: string; name: string } | null>(null)
+  /** A workspace Fabric turned down before that the user chose to publish to anyway. */
+  const [tryIn, setTryIn] = useState<string | null>(null)
   const [showIneligible, setShowIneligible] = useState(false)
   // Inline "create a new workspace" sub-flow: pick a capacity + name.
   const [creatingWs, setCreatingWs] = useState(false)
@@ -132,6 +172,11 @@ export default function DeploymentCreateForm({
   const [authExpired, setAuthExpired] = useState(false)
   const loginSeqRef = useRef(0)
   const loginBusyRef = useRef(false)
+
+  /** Fabric turned down an app on this capacity, or in its region. */
+  function capacityRefusal(c: FabricCapacity): Refusal | undefined {
+    return refusalFor({ id: '', capacityId: c.id, region: c.region }, refused)
+  }
 
   useEffect(() => () => {
     ++loginSeqRef.current
@@ -168,7 +213,12 @@ export default function DeploymentCreateForm({
       const res = await window.api.fabric.listCapacities()
       const list = res.ok && res.capacities ? res.capacities : []
       setCaps(list)
-      setSelectedCap(list.find((c) => c.id === selectedCap)?.id ?? list[0]?.id ?? '')
+      setSelectedCap(
+        list.find((c) => c.id === selectedCap)?.id ??
+          list.find((c) => !capacityRefusal(c))?.id ??
+          list[0]?.id ??
+          ''
+      )
       if (!res.ok) {
         setCreateErr(authErrorMessage(res.error, 'Could not load capacities. Please try again.'))
         if (res.needsLogin) setAuthExpired(true)
@@ -256,6 +306,12 @@ export default function DeploymentCreateForm({
   const q = wsQuery.trim().toLowerCase()
   const matchesQuery = (w: FabricWorkspace): boolean =>
     [w.displayName, w.region, w.capacityName, w.sku].some((field) => field?.toLowerCase().includes(q))
+  const refusal = (w: FabricWorkspace): Refusal | undefined => refusalFor(w, refused)
+  // Where Fabric turned apps down, and workspaces sharing that capacity or region, go last.
+  const usableFirst = (list: FabricWorkspace[]): FabricWorkspace[] => [
+    ...list.filter((w) => !refusal(w)),
+    ...list.filter((w) => refusal(w))
+  ]
   const recent: FabricWorkspace[] = []
   for (const key of recentWorkspaces ?? []) {
     if (recent.length === RECENT_LIMIT) break
@@ -263,8 +319,9 @@ export default function DeploymentCreateForm({
     const w = eligible.find((x) => x.id.toLowerCase() === k || x.displayName.toLowerCase() === k)
     if (w && !recent.includes(w)) recent.push(w)
   }
-  const others = eligible.filter((w) => !recent.includes(w))
-  const shownRecent = showWsSearch && q ? recent.filter(matchesQuery) : recent
+  const others = usableFirst(eligible.filter((w) => !recent.includes(w)))
+  const recentFirst = usableFirst(recent)
+  const shownRecent = showWsSearch && q ? recentFirst.filter(matchesQuery) : recentFirst
   const shownOthers = showWsSearch && q ? others.filter(matchesQuery) : others
   const shownEligible = [...shownRecent, ...shownOthers]
   const shownIneligible = showWsSearch && q ? ineligible.filter(matchesQuery) : ineligible
@@ -277,7 +334,15 @@ export default function DeploymentCreateForm({
   const targetState = selectedWorkspace && targetCheck?.workspaceId === selectedWorkspace.id ? targetCheck : null
   const checkingTarget = Boolean(targetState && !targetState.result)
   const replaces = targetState?.result?.conflict
-  const blockedByConflict = Boolean(replaces) && replaceIn !== selectedWs
+  const apps = targetState?.result?.apps ?? []
+  const chosenApp =
+    selectedWorkspace && appIn?.workspaceId === selectedWorkspace.id && apps.includes(appIn.name)
+      ? appIn.name
+      : undefined
+  // Choosing the app to publish into settles which one is replaced.
+  const blockedByConflict = Boolean(replaces) && replaceIn !== selectedWs && !chosenApp
+  const selectedRefusal = selectedWorkspace ? refusal(selectedWorkspace) : undefined
+  const blockedByRefusal = Boolean(selectedRefusal) && tryIn !== selectedWs
   const canSubmit =
     Boolean(selectedWorkspace) &&
     !running &&
@@ -285,29 +350,39 @@ export default function DeploymentCreateForm({
     !reauthing &&
     !signingIn &&
     !checkingTarget &&
-    !blockedByConflict
+    !blockedByConflict &&
+    !blockedByRefusal
 
   function submit(): void {
     if (!canSubmit || !selectedWorkspace) return
-    const friendly = name.trim() || selectedWorkspace.displayName || ''
-    onSubmit(friendly, selectedWorkspace.id)
+    const friendly = name.trim() || chosenApp || selectedWorkspace.displayName || ''
+    onSubmit(friendly, selectedWorkspace.id, chosenApp)
   }
 
-  const eligibleRow = (w: FabricWorkspace): JSX.Element => (
-    <button
-      key={w.id}
-      className={`ws-item${selectedWs === w.id ? ' ws-item--sel' : ''}`}
-      onClick={() => setSelectedWs(w.id)}
-    >
-      <span className="ws-item-main">
-        <span className="ws-item-name">{w.displayName}</span>
-        {w.region && <span className="ws-item-sub">{w.region}</span>}
-      </span>
-      <span className={`ws-sku ws-sku--${w.capacityKind}`} title={skuTitle(w)}>
-        {skuText(w)}
-      </span>
-    </button>
-  )
+  const eligibleRow = (w: FabricWorkspace): JSX.Element => {
+    const flagged = Boolean(refusal(w))
+    return (
+      <button
+        key={w.id}
+        className={`ws-item${selectedWs === w.id ? ' ws-item--sel' : ''}`}
+        onClick={() => setSelectedWs(w.id)}
+      >
+        <span className="ws-item-main">
+          <span className="ws-item-name">{w.displayName}</span>
+          {flagged ? (
+            <span className="ws-item-sub ws-item-flag">
+              {w.region ? `${w.region} · ` : ''}Fabric apps unavailable
+            </span>
+          ) : (
+            w.region && <span className="ws-item-sub">{w.region}</span>
+          )}
+        </span>
+        <span className={`ws-sku ws-sku--${w.capacityKind}`} title={skuTitle(w)}>
+          {skuText(w)}
+        </span>
+      </button>
+    )
+  }
 
   return (
     <div className="dep-create">
@@ -330,7 +405,7 @@ export default function DeploymentCreateForm({
 
       <div className="dep-field">
         <div className="dep-field-head">
-          <span className="dep-field-label">Deploy to workspace</span>
+          <span className="dep-field-label">Publish to workspace</span>
           <div className="dep-field-head-actions">
             <button
               className="ws-create-link"
@@ -353,6 +428,22 @@ export default function DeploymentCreateForm({
             </button>
           </div>
         </div>
+        {refused.length > 0 && (
+          <div className="ws-refused-note" role="note">
+            <Codicon name="warning" />
+            <span className="ws-refused-note-text">
+              {refusedNote(refused)}{' '}
+              <button
+                type="button"
+                className="link-btn"
+                title="See which regions have Fabric apps (opens learn.microsoft.com)"
+                onClick={() => void window.api.openExternal(REGION_AVAILABILITY_URL)}
+              >
+                Region availability
+              </button>
+            </span>
+          </div>
+        )}
         {creatingWs && (
           <div className="ws-create">
             <input
@@ -382,10 +473,14 @@ export default function DeploymentCreateForm({
                 value={selectedCap}
                 onChange={(e) => setSelectedCap(e.target.value)}
               >
-                {caps.map((c) => (
+                {[
+                  ...caps.filter((c) => !capacityRefusal(c)),
+                  ...caps.filter((c) => capacityRefusal(c))
+                ].map((c) => (
                   <option key={c.id} value={c.id}>
                     {c.displayName} · {c.sku ?? c.kind}
                     {c.region ? ` · ${c.region}` : ''}
+                    {capacityRefusal(c) ? ' · Fabric apps unavailable' : ''}
                   </option>
                 ))}
               </select>
@@ -486,17 +581,72 @@ export default function DeploymentCreateForm({
                 Checking {selectedWorkspace.displayName} for an app with the same name…
               </p>
             )}
-            {selectedWorkspace && replaces && (
+            {selectedWorkspace && replaces && !chosenApp && (
               <div className="ws-target-conflict" role="alert">
                 <span className="codicon codicon-warning" aria-hidden="true" />
                 <span className="ws-target-conflict-text">
                   {replaceIn === selectedWorkspace.id
-                    ? `Deploying will replace the app “${replaces}” in ${selectedWorkspace.displayName}.`
-                    : `${selectedWorkspace.displayName} already has an app named “${replaces}”. Deploying here would replace it, so pick another workspace.`}
+                    ? `Publishing will replace the app “${replaces}” in ${selectedWorkspace.displayName}.`
+                    : `${selectedWorkspace.displayName} already has an app named “${replaces}”. Publishing here would replace it, so pick another workspace.`}
                 </span>
                 {replaceIn !== selectedWorkspace.id && (
                   <button type="button" className="link-btn" onClick={() => setReplaceIn(selectedWorkspace.id)}>
                     Replace it anyway
+                  </button>
+                )}
+              </div>
+            )}
+            {selectedWorkspace && apps.length > 0 && (
+              <label className="dep-field ws-app">
+                <span className="dep-field-label">App</span>
+                <select
+                  className="ws-input"
+                  value={chosenApp ?? ''}
+                  onChange={(e) =>
+                    setAppIn(
+                      e.target.value
+                        ? { workspaceId: selectedWorkspace.id, name: e.target.value }
+                        : null
+                    )
+                  }
+                >
+                  <option value="">
+                    {replaces
+                      ? `${replaces} (same name as this app)`
+                      : `A new app${targetState?.result?.itemName ? ` named “${targetState.result.itemName}”` : ''}`}
+                  </option>
+                  {apps
+                    .filter((app) => app.toLowerCase() !== replaces?.toLowerCase())
+                    .map((app) => (
+                      <option key={app} value={app}>
+                        {app}
+                      </option>
+                    ))}
+                </select>
+              </label>
+            )}
+            {selectedWorkspace && chosenApp && (
+              <div className="ws-target-conflict" role="alert">
+                <span className="codicon codicon-warning" aria-hidden="true" />
+                <span className="ws-target-conflict-text">
+                  Publishing replaces the app “{chosenApp}” in {selectedWorkspace.displayName} with
+                  this one.
+                </span>
+              </div>
+            )}
+            {selectedWorkspace && selectedRefusal && (
+              <div className="ws-target-conflict ws-target-conflict--refused" role="alert">
+                <span className="codicon codicon-warning" aria-hidden="true" />
+                <span className="ws-target-conflict-text">
+                  {refusalText(selectedWorkspace, selectedRefusal)}
+                </span>
+                {tryIn !== selectedWorkspace.id && (
+                  <button
+                    type="button"
+                    className="link-btn"
+                    onClick={() => setTryIn(selectedWorkspace.id)}
+                  >
+                    Publish here anyway
                   </button>
                 )}
               </div>

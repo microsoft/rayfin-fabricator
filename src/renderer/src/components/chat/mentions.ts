@@ -1,4 +1,5 @@
 import type { FileNode } from '@shared/ipc'
+import { projectRelative } from './paths'
 
 /** A file the composer can reference via @-mention. */
 export interface MentionFile {
@@ -35,4 +36,104 @@ export function rankFiles(files: MentionFile[], query: string): MentionFile[] {
   }
   scored.sort((a, b) => a.s - b.s || a.f.path.length - b.f.path.length)
   return scored.slice(0, 8).map((x) => x.f)
+}
+
+/**
+ * The @-token the caret is in, from the text up to the caret: where its `@` is,
+ * what follows it, and whether it's quoted (`@"…`, for a path with spaces).
+ * `null` when the caret isn't in one.
+ */
+export function activeMention(
+  before: string
+): { start: number; query: string; quoted: boolean } | null {
+  const m = /(^|\s)@(?:"([^"]*)|([^\s@"]*))$/.exec(before)
+  if (!m) return null
+  const quoted = m[2] !== undefined
+  const query = quoted ? m[2] : m[3]
+  return { start: before.length - query.length - (quoted ? 2 : 1), query, quoted }
+}
+
+/**
+ * An @-query that names a path rather than a project file: `./` or `../`, `~/`,
+ * `/` or `\`, or a drive such as `C:\`. It browses folders, in the project or
+ * outside it.
+ */
+export function isPathQuery(query: string): boolean {
+  return /^(?:\.{1,2}[\\/]|~[\\/]|[\\/]|[a-z]:[\\/])/i.test(query)
+}
+
+/** A path query split at its last separator: the folder so far, and the name being typed in it. */
+export function splitPathQuery(query: string): { dir: string; partial: string } {
+  const cut = Math.max(query.lastIndexOf('/'), query.lastIndexOf('\\')) + 1
+  return { dir: query.slice(0, cut), partial: query.slice(cut) }
+}
+
+/** An entry of a folder, as `projects.files.listDir` lists it. */
+export interface DirEntry {
+  name: string
+  dir: boolean
+}
+
+/** What the @-picker offers: a file, a folder to browse into, or the folder being browsed. */
+export interface MentionOption {
+  key: string
+  kind: 'file' | 'dir' | 'here'
+  name: string
+  /** Where it is, as typed. */
+  detail: string
+  /** The reference that replaces the @-token being typed. */
+  insert: string
+  /** A folder: picking it lists what's in it instead of closing the picker. */
+  browse?: boolean
+}
+
+/**
+ * The entries of a folder that match the name being typed: names that start
+ * with it before names that contain it, folders before files. Hidden entries
+ * (a leading dot) show once a dot is typed.
+ */
+export function rankEntries(entries: readonly DirEntry[], partial: string, limit = 50): DirEntry[] {
+  const q = partial.toLowerCase()
+  const scored: { e: DirEntry; s: number }[] = []
+  for (const e of entries) {
+    if (e.name.startsWith('.') && !q.startsWith('.')) continue
+    const name = e.name.toLowerCase()
+    const s = name.startsWith(q) ? 0 : name.includes(q) ? 1 : -1
+    if (s >= 0) scored.push({ e, s })
+  }
+  scored.sort(
+    (a, b) =>
+      a.s - b.s ||
+      Number(b.e.dir) - Number(a.e.dir) ||
+      a.e.name.localeCompare(b.e.name, undefined, { sensitivity: 'base' })
+  )
+  return scored.slice(0, limit).map((x) => x.e)
+}
+
+/**
+ * The text that references `path` in a message: `@path`, or `@"path"` when it
+ * has spaces or is already quoted. `open` leaves the quote open, to go on
+ * browsing inside a folder.
+ */
+export function mentionText(path: string, quoted = false, open = false): string {
+  if (!quoted && !/\s/.test(path)) return `@${path}`
+  return `@"${path}${open ? '' : '"'}`
+}
+
+/**
+ * The reference to a file or folder on this computer, dropped on the composer
+ * or picked in the system's file dialog: inside the project, its path there (a
+ * folder as `./folder/`, as the picker spells it); outside, the full path. A
+ * folder ends with a separator.
+ */
+export function pathReference(path: string, projectRoot: string, dir: boolean): string {
+  const rel = projectRelative(path, projectRoot)
+  if (rel !== null) return mentionText(dir ? (rel ? `./${rel}/` : './') : rel)
+  const sep = path.includes('\\') ? '\\' : '/'
+  return mentionText(dir && !/[\\/]$/.test(path) ? `${path}${sep}` : path)
+}
+
+/** An image the composer attaches rather than references: PNG, JPEG, GIF, WebP or BMP. */
+export function isImagePath(path: string): boolean {
+  return /\.(png|jpe?g|gif|webp|bmp)$/i.test(path)
 }

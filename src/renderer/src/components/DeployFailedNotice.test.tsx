@@ -43,7 +43,7 @@ afterEach(() => {
   vi.mocked(isRaySentAway).mockReturnValue(false)
 })
 
-describe('what a failed deploy offers', () => {
+describe('what a failed publish offers', () => {
   it('sorts outcomes into what can be done about them', () => {
     expect(deployTrouble('error')).toBe('failed')
     expect(deployTrouble('not-found')).toBe('failed')
@@ -51,12 +51,13 @@ describe('what a failed deploy offers', () => {
     expect(deployTrouble('not-signed-in')).toBe('signin')
     expect(deployTrouble('auth-cache-error')).toBe('signin')
     expect(deployTrouble('cancelled')).toBe('stopped')
+    expect(deployTrouble('workspace-unsupported')).toBe('unsupported')
   })
 
   it('has Ray swim in and say it, then offer to find out why', () => {
     const props = show()
     expect(screen.getByRole('alert').textContent).toBe(
-      'That deploy didn’t make it to Fabric. Want me to find out why?'
+      'Your app didn’t make it to Fabric. Want me to find out why?'
     )
     act(() => vi.advanceTimersByTime(800))
     fireEvent.click(screen.getByRole('button', { name: /^Ray, the Fabricator stingray/ }))
@@ -68,7 +69,9 @@ describe('what a failed deploy offers', () => {
   it('says the same thing plainly once Ray was sent away', () => {
     vi.mocked(isRaySentAway).mockReturnValue(true)
     const props = show()
-    expect(screen.getByRole('alert').textContent).toBe('The deploy didn’t finish. Help can find out why.')
+    expect(screen.getByRole('alert').textContent).toBe(
+      'Couldn’t publish this app. Help can find out why.'
+    )
     expect(screen.queryByRole('button', { name: /Ray/ })).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: 'Find out why' }))
     expect(props.onDiagnose).toHaveBeenCalledOnce()
@@ -83,7 +86,7 @@ describe('what a failed deploy offers', () => {
     expect(props.onRefreshAuth).toHaveBeenCalledOnce()
   })
 
-  it('waits for another sign-in or deploy before refreshing', () => {
+  it('waits for another sign-in or publish before refreshing', () => {
     const props = show({ outcome: 'not-signed-in', authBusy: true })
     const refresh = screen.getByRole('button', { name: 'Refresh Fabric authentication' }) as HTMLButtonElement
     expect(refresh.disabled).toBe(true)
@@ -91,10 +94,48 @@ describe('what a failed deploy offers', () => {
     expect(props.onRefreshAuth).not.toHaveBeenCalled()
   })
 
-  it('offers nothing to diagnose for a deploy that was stopped', () => {
+  it('offers nothing to diagnose for a publish that was stopped', () => {
     show({ outcome: 'cancelled' })
     expect(screen.queryByRole('button', { name: 'Find out why' })).toBeNull()
     expect(screen.queryByRole('button', { name: /^Ray/ })).toBeNull()
+  })
+
+  it('points to another workspace when Fabric turned the app down in this one', () => {
+    const openExternal = vi.fn()
+    vi.stubGlobal('api', { openExternal })
+    const onChooseWorkspace = vi.fn()
+    const props = show({
+      outcome: 'workspace-unsupported',
+      unsupported: { id: 'ws1', name: 'Sales', region: 'UK South' },
+      onChooseWorkspace
+    })
+    expect(screen.getByRole('alert').textContent).toBe(
+      'That workspace’s capacity is in UK South, and Fabric apps aren’t there yet. Let’s pick a workspace in another region.'
+    )
+    const choose = screen.getByRole('button', { name: 'Choose another workspace' })
+    expect(choose.className).toContain('btn--primary')
+    fireEvent.click(choose)
+    expect(onChooseWorkspace).toHaveBeenCalledOnce()
+    fireEvent.click(screen.getByRole('button', { name: 'Region availability' }))
+    expect(openExternal).toHaveBeenCalledWith(
+      'https://learn.microsoft.com/fabric/admin/region-availability'
+    )
+    // The cause is known: no diagnosis, and Ray isn't a button for one.
+    expect(screen.queryByRole('button', { name: 'Find out why' })).toBeNull()
+    expect(screen.queryByRole('button', { name: /^Ray/ })).toBeNull()
+    expect(props.onDiagnose).not.toHaveBeenCalled()
+  })
+
+  it('says so plainly, without a region Fabric didn’t name', () => {
+    vi.mocked(isRaySentAway).mockReturnValue(true)
+    show({
+      outcome: 'workspace-unsupported',
+      unsupported: { id: 'ws1' },
+      onChooseWorkspace: vi.fn()
+    })
+    expect(screen.getByRole('alert').textContent).toBe(
+      'Fabric apps aren’t available in this workspace’s region. Choose a workspace in another region.'
+    )
   })
 })
 
@@ -108,7 +149,7 @@ describe('the details', () => {
     expect(screen.queryByText(/Applying runtime settings/)).toBeNull()
   })
 
-  it('shows the error for a deploy from an earlier session, which has no log', () => {
+  it('shows the error for a publish from an earlier session, which has no log', () => {
     show({ log: undefined })
     fireEvent.click(screen.getByRole('button', { name: 'Show details' }))
     expect(screen.getByText('Runtime settings sync failed: 400 Bad Request')).toBeTruthy()

@@ -5,19 +5,22 @@ import {
   type CSSProperties,
   type FormEvent,
   type ReactNode,
-  type JSX,
+  type JSX
 } from 'react'
 import type { StudioProject, TeamWorkspace } from '@shared/ipc'
 import { useSuppressPreview } from '../overlay'
 import { useModalFocus } from '../modalFocus'
-import { hueOf } from './team/map/parts'
+import { initials, markHue } from './gallery/model'
 
 interface Props {
   project: StudioProject
   /** Return an error message to keep the dialog open, or null after a successful rename. */
   onRename: (project: StudioProject, name: string) => Promise<string | null>
   onRemoveFromList: (project: StudioProject) => void
-  onMoveToTrash: (project: StudioProject) => void
+  /** Open Remove project, which asks what to remove. */
+  onReviewRemoval: (project: StudioProject) => void
+  /** Open Export project, which saves the project as a file for someone else. */
+  onExport?: (project: StudioProject) => void
   onClose: () => void
   /** Team workspaces this project can move into (experimental). */
   teamWorkspaces?: TeamWorkspace[]
@@ -31,25 +34,41 @@ function messageFor(error: unknown): string {
     : 'Could not rename the project. Please try again.'
 }
 
-/** A group of related controls: a quiet heading over a card of rows, as in Settings. */
-function Section({ title, children }: { title: string; children: ReactNode }): JSX.Element {
-  const id = useId()
+/** One thing you can do with the project: an icon, what it does, and its control. */
+function Action({
+  icon,
+  title,
+  children,
+  control,
+  danger
+}: {
+  icon: string
+  title: string
+  children: ReactNode
+  control?: ReactNode
+  danger?: boolean
+}): JSX.Element {
   return (
-    <section className="set-section" aria-labelledby={id}>
-      <h3 className="set-section-title" id={id}>
-        {title}
-      </h3>
-      <div className="set-card">{children}</div>
-    </section>
+    <div className={`project-action${danger ? ' project-action--danger' : ''}`}>
+      <span className="project-action-icon" aria-hidden="true">
+        <span className={`codicon codicon-${icon}`} />
+      </span>
+      <div className="project-action-text">
+        <span className="project-action-title">{title}</span>
+        {children}
+      </div>
+      {control}
+    </div>
   )
 }
 
-/** Keeps project metadata, recents cleanup, and local-file cleanup visibly separate. */
+/** The project's name, then what you can do with it: export it, hide it from recents, or remove it. */
 export default function ManageProjectModal({
   project,
   onRename,
   onRemoveFromList,
-  onMoveToTrash,
+  onReviewRemoval,
+  onExport,
   onClose,
   teamWorkspaces,
   onMoveToTeam
@@ -57,6 +76,8 @@ export default function ManageProjectModal({
   useSuppressPreview()
   const titleId = useId()
   const nameId = useId()
+  const nameHintId = useId()
+  const actionsId = useId()
   const dialogRef = useModalFocus<HTMLDivElement>()
   const [name, setName] = useState(project.name)
   const [saving, setSaving] = useState(false)
@@ -134,15 +155,25 @@ export default function ManageProjectModal({
     onRemoveFromList(project)
   }
 
-  function moveToTrash(): void {
+  function reviewRemoval(): void {
     onClose()
-    onMoveToTrash(project)
+    onReviewRemoval(project)
+  }
+
+  function exportProject(): void {
+    onClose()
+    onExport?.(project)
   }
 
   const recentsHint = project.team
-    ? 'Remove this entry from Fabricator. Your work saved to GitHub stays, and you can open the app again from its team workspace.'
-    : 'Remove this entry from Fabricator without changing the local folder or any Fabric app.'
+    ? 'Hide from your recent list. Your work on GitHub stays, and you can open it again from its team workspace.'
+    : project.missing
+      ? 'Fabricator can’t find this project on this computer. Remove it from your recent list.'
+      : hasDeploy
+        ? 'Hide from your recent list. Files and the Fabric app stay intact.'
+        : 'Hide from your recent list. Files stay intact.'
   const canMove = !project.team && onMoveToTeam && moveTargets.length > 0
+  const canExport = Boolean(onExport) && !project.team && !project.missing
 
   return (
     <div className="modal-backdrop" onClick={saving ? undefined : onClose}>
@@ -158,7 +189,7 @@ export default function ManageProjectModal({
           <h2 id={titleId}>Manage project</h2>
           <button
             type="button"
-            className="btn btn--sm btn--ghost"
+            className="icon-btn"
             aria-label="Close project management"
             disabled={saving}
             onClick={onClose}
@@ -170,69 +201,68 @@ export default function ManageProjectModal({
         <div className="modal-body project-manage-body">
           <div className="project-manage-summary">
             <span
-              className="home-project-mark"
+              className="home-project-mark project-manage-mark"
               aria-hidden="true"
-              style={{ '--hue': hueOf(project.name) } as CSSProperties}
+              style={{ '--hue': markHue(project.name) } as CSSProperties}
             >
-              {project.name.trim()[0]?.toUpperCase() ?? '?'}
+              {initials(project.name)}
             </span>
             <span className="project-manage-summary-text">
               <strong>{project.name}</strong>
               <span className="project-manage-path" title={project.path}>
-                {project.path}
+                <span className="codicon codicon-folder" aria-hidden="true" />
+                <span className="project-manage-path-text">{project.path}</span>
               </span>
             </span>
           </div>
 
-          <Section title="Project details">
-            <form className="set-item" onSubmit={(event) => void saveName(event)}>
-              <div className="set-item-text">
-                <label className="set-item-title" htmlFor={nameId}>
-                  Project name
-                </label>
-                <span className="set-item-desc">
-                  Changing the name also updates <code>rayfin/rayfin.yml</code>.
-                </span>
-              </div>
-              <div className="project-manage-field">
-                <input
-                  id={nameId}
-                  className="project-manage-input"
-                  value={name}
-                  autoFocus
-                  spellCheck={false}
-                  onChange={(event) => {
-                    setName(event.target.value)
-                    setError(null)
-                  }}
-                />
-                <button
-                  type="submit"
-                  className={`btn btn--sm${canSave ? ' btn--primary' : ''}`}
-                  disabled={!canSave}
-                >
-                  {saving ? 'Saving...' : 'Save name'}
-                </button>
-              </div>
-              {error && (
-                <p className="project-manage-error" role="alert">
-                  {error}
-                </p>
-              )}
-            </form>
-          </Section>
+          <form className="project-manage-name" onSubmit={(event) => void saveName(event)}>
+            <label className="project-manage-label" htmlFor={nameId}>
+              Project name
+            </label>
+            <div className="project-manage-field">
+              <input
+                id={nameId}
+                className="project-manage-input"
+                value={name}
+                autoFocus
+                spellCheck={false}
+                aria-describedby={nameHintId}
+                onChange={(event) => {
+                  setName(event.target.value)
+                  setError(null)
+                }}
+              />
+              <button
+                type="submit"
+                className={`btn${canSave ? ' btn--primary' : ''}`}
+                disabled={!canSave}
+              >
+                {saving ? 'Saving…' : 'Save'}
+              </button>
+            </div>
+            <span className="project-manage-hint" id={nameHintId}>
+              Also renames it in <code>rayfin/rayfin.yml</code>.
+            </span>
+            {error && (
+              <p className="project-manage-error" role="alert">
+                {error}
+              </p>
+            )}
+          </form>
 
-          {canMove && (
-            <Section title="Team workspace">
-              <div className="set-item">
-                <div className="set-item-text">
-                  <span className="set-item-title">Move to a team workspace</span>
-                  <span className="set-item-desc">
-                    Copies this app and its chat into the team workspace so your team can work on
-                    it. The team pipeline deploys it as a new app, without the data in this
-                    project&apos;s current deployment. This local project stays as it is.
-                  </span>
-                </div>
+          <section className="project-manage-actions" aria-labelledby={actionsId}>
+            <h3 className="project-manage-heading" id={actionsId}>
+              Project actions
+            </h3>
+
+            {canMove && (
+              <Action icon="organization" title="Move to a team workspace">
+                <span className="project-action-desc">
+                  Copies this app and its chat into the team workspace so your team can work on it.
+                  The team pipeline deploys it as a new app, without the data in this project&apos;s
+                  published app. This local project stays as it is.
+                </span>
                 <div className="project-manage-field">
                   <select
                     className="project-manage-input"
@@ -249,7 +279,7 @@ export default function ManageProjectModal({
                   </select>
                   <button
                     type="button"
-                    className="btn btn--sm"
+                    className="btn"
                     disabled={saving || !moveTarget}
                     onClick={() => void moveToTeam()}
                   >
@@ -261,61 +291,82 @@ export default function ManageProjectModal({
                     {moveError}
                   </p>
                 )}
-              </div>
-            </Section>
-          )}
+              </Action>
+            )}
 
-          <Section title="Remove">
-            <div className="set-item">
-              <div className="set-item-text">
-                <span className="set-item-title">Recent projects</span>
-                <span className="set-item-desc">{recentsHint}</span>
-              </div>
-              <div className="set-item-control">
+            {canExport && (
+              <Action
+                icon="package"
+                title="Export project"
+                control={
+                  <button
+                    type="button"
+                    className="btn project-manage-next"
+                    disabled={saving}
+                    onClick={exportProject}
+                  >
+                    Export
+                    <span className="codicon codicon-chevron-right" aria-hidden="true" />
+                  </button>
+                }
+              >
+                <span className="project-action-desc">
+                  Save a copy someone else can import into Fabricator.
+                </span>
+              </Action>
+            )}
+
+            <Action
+              icon="history"
+              title="Recent projects"
+              control={
                 <button
                   type="button"
-                  className="btn btn--sm"
+                  className="btn"
+                  aria-label="Remove from recent projects"
                   disabled={saving}
                   onClick={removeFromRecents}
                 >
-                  Remove from recent projects
+                  Remove
                 </button>
-              </div>
-            </div>
+              }
+            >
+              <span className="project-action-desc">{recentsHint}</span>
+            </Action>
+
             {project.team ? (
-              <div className="set-item">
-                <div className="set-item-text">
-                  <span className="set-item-title">Team app</span>
-                  <span className="set-item-desc">
-                    This app belongs to the team workspace{' '}
-                    {teamName ? <strong>{teamName}</strong> : 'it was opened from'}. Its owners can
-                    remove it for everyone from the workspace&apos;s settings.
-                  </span>
-                </div>
-              </div>
-            ) : (
-              <div className="set-item">
-                <div className="set-item-text">
-                  <span className="set-item-title">Remove project</span>
-                  <span className="set-item-desc">
-                    {hasDeploy
-                      ? "Review two independent removal options in the next step: move this local folder to your system trash, and optionally delete this project's deployed Fabric app and its data for good. Your Fabric workspace is never deleted."
-                      : 'Move this local folder to your system trash in the next step. You can restore it there; no Fabric app will be changed.'}
-                  </span>
-                </div>
-                <div className="set-item-control">
+              <Action icon="organization" title="Team app">
+                <span className="project-action-desc">
+                  This app belongs to the team workspace{' '}
+                  {teamName ? <strong>{teamName}</strong> : 'it was opened from'}. Its owners can
+                  remove it for everyone from the workspace&apos;s settings.
+                </span>
+              </Action>
+            ) : project.missing ? null : (
+              <Action
+                icon="trash"
+                title="Remove project"
+                danger
+                control={
                   <button
                     type="button"
-                    className="btn btn--sm project-manage-danger"
+                    className="btn project-manage-danger"
                     disabled={saving}
-                    onClick={moveToTrash}
+                    onClick={reviewRemoval}
                   >
-                    Review removal options...
+                    Review options
+                    <span className="codicon codicon-chevron-right" aria-hidden="true" />
                   </button>
-                </div>
-              </div>
+                }
+              >
+                <span className="project-action-desc">
+                  {hasDeploy
+                    ? 'Trash the folder, and optionally its published app.'
+                    : 'Trash the folder. No Fabric app is changed.'}
+                </span>
+              </Action>
             )}
-          </Section>
+          </section>
         </div>
 
         <div className="modal-footer">

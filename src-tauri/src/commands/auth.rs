@@ -12,10 +12,11 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use tauri::{AppHandle, State};
 
+use crate::commands::fabric::ProbeFailure;
 use crate::services::crashlog;
 use crate::services::emit::proc_streamer;
 use crate::services::exec::{self, OnData, RunOptions};
-use crate::services::store;
+use crate::services::{fabric_accounts, fabric_auth, store};
 use crate::services::telemetry::{self, TelemetryIdentity};
 use crate::state::AppState;
 use crate::types::{AuthCheck, AuthStatus, AzAuthStatus, CopilotAuthStatus, ProcResult, RayfinAuthStatus};
@@ -54,6 +55,9 @@ static NOT_SIGNED_IN_RE: Lazy<Regex> =
 static SIGNED_IN_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)signed\s+in").unwrap());
 static USER_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)User:\s*(.+)").unwrap());
 static TENANT_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)Tenant:\s*(.+)").unwrap());
+/// What the Azure CLI says when it has no account at all.
+static AZ_SIGNED_OUT_RE: Lazy<Regex> =
+  Lazy::new(|| Regex::new(r#"(?i)please run ['"]?az login['"]? to set ?up (?:an? )?account"#).unwrap());
 
 /// Keep credential changes from interrupting a deploy or authentication probe.
 pub(crate) async fn rayfin_auth_read() -> tokio::sync::RwLockReadGuard<'static, ()> {
@@ -88,12 +92,16 @@ fn installed_project_dir() -> Option<PathBuf> {
 /// Run the Rayfin CLI for Fabric auth, preferring a project's locally-installed
 /// CLI (so no global install is required) and falling back to a global `rayfin`
 /// on PATH when there's no project. The token cache is shared across installs,
-/// so either resolves the same signed-in session.
+/// so either resolves the same signed-in session. Every account command opens
+/// that cache, so it waits its turn (see [`fabric_auth::one_at_a_time`]).
 pub(crate) async fn run_rayfin(project_dir: Option<&Path>, args: &[&str], opts: RunOptions) -> exec::RunResult {
-  match project_dir {
-    Some(dir) => exec::run_project_rayfin(dir, args, opts).await,
-    None => exec::run("rayfin", args, opts).await,
-  }
+  fabric_auth::one_at_a_time(async {
+    match project_dir {
+      Some(dir) => exec::run_project_rayfin(dir, args, opts).await,
+      None => exec::run("rayfin", args, opts).await,
+    }
+  })
+  .await
 }
 
 /// Rayfin's environment-override variables (an alternate Fabric environment).
@@ -159,27 +167,13 @@ async fn get_rayfin_auth_for(project_dir: Option<&Path>) -> RayfinAuthStatus {
   )
   .await;
   let text = format!("{}\n{}", res.stdout, res.stderr);
-  let signed_in = res.ok && !NOT_SIGNED_IN_RE.is_match(&text) && SIGNED_IN_RE.is_match(&text);
-  if !signed_in {
+  if res.ok && NOT_SIGNED_IN_RE.is_match(&text) {
     set_identity(None);
-    return RayfinAuthStatus {
-      error: if res.ok && NOT_SIGNED_IN_RE.is_match(&text) {
-        None
-      } else if res.ok {
-        Some("The Rayfin CLI returned an unrecognized sign-in status. Re-check or sign in to Fabric again.".into())
-      } else {
-        Some(cli_failure_detail(
-          &res,
-          "Fabric authentication check",
-          "Open a Rayfin project and sign in to Fabric again.",
-        ))
-      },
-      ..Default::default()
-    };
+    return RayfinAuthStatus::default();
   }
-  if let Err(error) = crate::commands::fabric::probe_rayfin_auth(project_dir).await {
-    set_identity(None);
-    return RayfinAuthStatus { error: Some(error), ..Default::default() };
+  if !(res.ok && SIGNED_IN_RE.is_match(&text)) {
+    let identity = fabric_accounts::dir_of(&fabric_accounts::active_id()).and_then(|dir| fabric_accounts::identity(&dir));
+    return status_without_cli(&res, identity);
   }
   let user = USER_RE
     .captures(&text)
@@ -189,15 +183,48 @@ async fn get_rayfin_auth_for(project_dir: Option<&Path>) -> RayfinAuthStatus {
     .captures(&text)
     .and_then(|c| c.get(1))
     .map(|m| m.as_str().trim().to_string());
-  set_identity(Some(TelemetryIdentity {
-    email: user.clone(),
-    tenant: tenant.clone(),
-  }));
+  match crate::commands::fabric::probe_rayfin_auth(project_dir).await {
+    Ok(()) => signed_in(user, tenant, None),
+    Err(ProbeFailure::SignIn(error)) => signed_out(Some(error)),
+    Err(ProbeFailure::Unverified(reason)) => signed_in(user, tenant, Some(reason)),
+  }
+}
+
+/// Signed in as `user`; `unverified` says why Fabric couldn't confirm it just now.
+fn signed_in(user: Option<String>, tenant: Option<String>, unverified: Option<String>) -> RayfinAuthStatus {
+  set_identity(Some(TelemetryIdentity { email: user.clone(), tenant: tenant.clone() }));
   RayfinAuthStatus {
     signed_in: true,
+    unverified: unverified.is_some(),
+    error: unverified.map(|reason| format!("Couldn't confirm your Fabric sign-in just now. {reason}")),
     user,
     tenant,
-    error: None,
+  }
+}
+
+fn signed_out(error: Option<String>) -> RayfinAuthStatus {
+  set_identity(None);
+  RayfinAuthStatus { error, ..Default::default() }
+}
+
+/// The CLI couldn't say whether you're signed in (it failed, timed out, or
+/// answered unexpectedly). Not knowing isn't being signed out: when the account's
+/// folder still holds a sign-in (`identity`), that's who you are, unverified.
+fn status_without_cli(res: &exec::RunResult, identity: Option<(String, Option<String>)>) -> RayfinAuthStatus {
+  let detail = |hint: &str| {
+    if res.ok {
+      format!("The Rayfin CLI returned an unrecognized sign-in status. {hint}")
+    } else {
+      cli_failure_detail(res, "Fabric authentication check", hint)
+    }
+  };
+  match identity {
+    Some((user, tenant)) => signed_in(Some(user), tenant, Some(detail("Re-check your accounts in a moment."))),
+    None => signed_out(Some(detail(if res.ok {
+      "Re-check or sign in to Fabric again."
+    } else {
+      "Open a Rayfin project and sign in to Fabric again."
+    }))),
   }
 }
 
@@ -222,16 +249,27 @@ pub async fn get_az_auth() -> AzAuthStatus {
     ),
   );
   if !token.ok {
-    return AzAuthStatus {
-      error: Some(cli_failure_detail(
-        &token,
-        "Azure authentication check",
-        "Check your connection and sign in to Azure again.",
-      )),
-      ..Default::default()
-    };
+    return az_token_failure(&token);
   }
   parse_az_account(&show)
+}
+
+/// The Azure CLI's sign-in when its token check failed. Azure is optional, so
+/// an Azure CLI that isn't installed or has never been signed in is simply
+/// signed out. A sign-in that stopped working, or a check that couldn't run,
+/// is an error worth showing.
+fn az_token_failure(res: &exec::RunResult) -> AzAuthStatus {
+  if res.not_found || AZ_SIGNED_OUT_RE.is_match(&res.stderr) || AZ_SIGNED_OUT_RE.is_match(&res.stdout) {
+    return AzAuthStatus::default();
+  }
+  AzAuthStatus {
+    error: Some(cli_failure_detail(
+      res,
+      "Azure authentication check",
+      "Check your connection and sign in to Azure again.",
+    )),
+    ..Default::default()
+  }
 }
 
 /// Verify the requested providers concurrently.
@@ -627,7 +665,11 @@ pub(crate) async fn login_rayfin(project_dir: Option<&Path>, tenant: Option<Stri
     let auth = get_rayfin_auth_for(project_dir).await;
     if auth.signed_in {
       telemetry::track_signin(cached_identity().as_ref(), "login");
-      on_data(exec::Stream::System, "Fabric authentication verified.\n");
+      let note = match (&auth.error, auth.unverified) {
+        (Some(reason), true) => format!("Signed in. {reason}\n"),
+        _ => "Fabric authentication verified.\n".to_string(),
+      };
+      on_data(exec::Stream::System, &note);
     }
     let result = verified_login("fabric-login", "Fabric", &res, auth.signed_in, auth.error);
     if let Some(error) = &result.error {
@@ -948,6 +990,36 @@ process.exit(config.loginExit);
       result.ok = true;
       assert_eq!(parse_az_account(&result).tenant_name.as_deref(), Some(name), "{profile}");
     }
+  }
+
+  #[test]
+  fn a_missing_or_never_signed_in_azure_cli_is_signed_out_not_failing() {
+    for signed_out in [
+      res(None, true, "", "az was not found on PATH"),
+      res(Some(1), false, "", "ERROR: Please run 'az login' to setup account.\n"),
+    ] {
+      let status = az_token_failure(&signed_out);
+      assert!(!status.signed_in);
+      assert!(status.error.is_none(), "{}", signed_out.stderr);
+    }
+    // A sign-in that stopped working still says why.
+    let expired = "ERROR: AADSTS700082: The refresh token has expired due to inactivity.\nTo re-authenticate, please run:\naz login --scope https://management.core.windows.net//.default\n";
+    let status = az_token_failure(&res(Some(1), false, "", expired));
+    assert!(!status.signed_in);
+    assert!(status.error.unwrap().contains("AADSTS700082"));
+  }
+
+  #[test]
+  fn a_cli_that_cant_say_leaves_a_stored_sign_in_unverified_rather_than_signed_out() {
+    let timed_out = res(None, false, "", "");
+    let status = status_without_cli(&timed_out, Some(("ana@contoso.com".into(), Some("contoso".into()))));
+    assert!(status.signed_in && status.unverified);
+    assert_eq!(status.user.as_deref(), Some("ana@contoso.com"));
+    assert!(status.error.unwrap().starts_with("Couldn't confirm your Fabric sign-in just now."));
+
+    let status = status_without_cli(&timed_out, None);
+    assert!(!status.signed_in && !status.unverified);
+    assert!(status.error.unwrap().contains("sign in to Fabric again"));
   }
 
   #[test]

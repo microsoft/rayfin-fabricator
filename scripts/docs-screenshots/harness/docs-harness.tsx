@@ -8,6 +8,7 @@ import './assets/main.css'
 import { useEffect, useState, type ReactNode } from 'react'
 import ReactDOM from 'react-dom/client'
 import type {
+  AppSettings,
   AuthStatus,
   ByokModelInfo,
   ByokStatus,
@@ -17,6 +18,22 @@ import type {
   FabricCapacitiesResult,
   FabricWorkspace,
   FileNode,
+  GalleryApp,
+  GalleryStatus,
+  GoalResult,
+  GoalsSnapshot,
+  LocalColumn,
+  LocalEntity,
+  LocalIdentity,
+  LocalLogEvent,
+  LocalRows,
+  LocalSecret,
+  LocalSeed,
+  LocalStatus,
+  LocalStorageFolder,
+  LocalUser,
+  McpCheckResult,
+  McpServer,
   MigrationInspectedPage,
   MigrationPage,
   MigrationReportItem,
@@ -39,6 +56,7 @@ import type {
 import { OverlayProvider } from './overlay'
 import { ToastProvider } from './toast'
 import { applyTheme } from './theme'
+import { useLocalBackend } from './localBackend'
 import SetupScreen from './screens/SetupScreen'
 import { HelpView } from './components/help/HelpView'
 import TeamMapView from './components/team/map/TeamMapView'
@@ -56,13 +74,20 @@ import DeploymentsControl from './components/DeploymentsControl'
 import AccountMenu from './components/AccountMenu'
 import AccountsModal from './components/AccountsModal'
 import SettingsModal from './components/SettingsModal'
+import ChatDefaultsModal from './components/ChatDefaultsModal'
 import BlueprintTab from './components/blueprint/BlueprintTab'
 import { ModelPicker } from './components/models/ModelPicker'
-import { AddMenu } from './components/chat/ComposerMenus'
+import { AddMenu, PluginsMenu } from './components/chat/ComposerMenus'
+import { offeredPlugins } from './components/chat/plugins'
 import { DataTray } from './components/chat/DataTray'
 import ConnectDataModal from './components/ConnectDataModal'
 import MigrateReportScreen from './components/migrate/MigrateReportScreen'
 import MigrationCard from './components/migrate/MigrationCard'
+import AppGalleryView from './components/gallery/AppGalleryView'
+import McpServersModal from './components/mcp/McpServersModal'
+import GoalsView from './components/goals/GoalsView'
+import type { GoalsController } from './goals/store'
+import { AUTO_SELECTION } from './modelSelection'
 import Spotlight from './components/spotlight/Spotlight'
 import { workbenchSearch } from './components/spotlight/workbenchSearch'
 import type { DataSource } from './fabricData'
@@ -73,6 +98,62 @@ import workbenchDark from '../../../website/public/screenshots/workbench.webp'
 import workbenchLight from '../../../website/public/screenshots/workbench.light.webp'
 
 const ok = <T,>(value: T) => (): Promise<T> => Promise.resolve(value)
+
+/** The sample user's MCP servers: Microsoft Learn (read-only), a chart server, and a tracker that signs in. */
+const sampleMcpServers: McpServer[] = [
+  {
+    id: 'microsoft-learn',
+    name: 'Microsoft Learn',
+    transport: 'http',
+    url: 'https://learn.microsoft.com/api/mcp',
+    readOnly: true,
+    addedAt: '2026-10-30T16:00:00Z'
+  },
+  {
+    id: 'charts',
+    name: 'Charts',
+    transport: 'stdio',
+    command: 'npx',
+    args: ['-y', '@antv/mcp-server-chart'],
+    readOnly: false,
+    addedAt: '2026-10-30T16:05:00Z'
+  },
+  {
+    id: 'issue-tracker',
+    name: 'Issue tracker',
+    transport: 'http',
+    url: 'https://mcp.example.com/mcp',
+    readOnly: false,
+    addedAt: '2026-10-30T16:10:00Z'
+  }
+]
+
+/** What checking each sample server finds: the real servers' tools. */
+const sampleMcpChecks: Record<string, McpCheckResult> = {
+  'microsoft-learn': {
+    status: 'connected',
+    tools: ['microsoft_docs_search', 'microsoft_code_sample_search', 'microsoft_docs_fetch'].map((name) => ({ name }))
+  },
+  charts: {
+    status: 'connected',
+    tools: [
+      'generate_area_chart', 'generate_bar_chart', 'generate_boxplot_chart', 'generate_column_chart',
+      'generate_district_map', 'generate_dual_axes_chart', 'generate_fishbone_diagram', 'generate_flow_diagram',
+      'generate_funnel_chart', 'generate_histogram_chart', 'generate_line_chart', 'generate_liquid_chart',
+      'generate_mind_map', 'generate_network_graph', 'generate_organization_chart', 'generate_path_map',
+      'generate_pie_chart', 'generate_pin_map', 'generate_radar_chart', 'generate_sankey_chart',
+      'generate_scatter_chart', 'generate_treemap_chart', 'generate_venn_chart', 'generate_violin_chart',
+      'generate_waterfall_chart', 'generate_word_cloud_chart', 'generate_spreadsheet'
+    ].map((name) => ({ name }))
+  },
+  'issue-tracker': { status: 'needs-sign-in' }
+}
+
+/** The sample settings: the capture's theme. */
+function sampleSettings(): AppSettings {
+  const theme = new URLSearchParams(location.search).get('theme') === 'light' ? 'light' : 'dark'
+  return { theme, experiments: { teamWorkspaces: false } }
+}
 
 /** A Copilot model for the pickers. */
 const copilotModel = (
@@ -238,7 +319,7 @@ const inApp = (id: string, title: string, description: string, promotable = true
 
 /** The Skills tab of the sample app (a Universal App project). */
 const skills: SkillInfo[] = [
-  { id: 'rayfin', title: 'Rayfin essentials', description: 'Core Rayfin knowledge: data models, sign-in, deploys and the CLI.', icon: '◆', base: true, active: true },
+  { id: 'rayfin', title: 'Rayfin essentials', description: 'Core Rayfin knowledge: data models, sign-in, publishing and the CLI.', icon: '◆', base: true, active: true },
   { id: 'rayfin-functions', title: 'Rayfin Functions', description: 'Server-side functions your app can call.', icon: 'λ', base: true, active: true },
   { id: 'rayfin-connectors', title: 'Rayfin Connectors', description: 'Use existing Fabric data: lakehouses, warehouses, SQL databases, semantic models and KQL.', icon: '⇄', base: true, active: true },
   builtIn('polished-ui', 'Polished, modern UI', 'A clean, consistent look: spacing, type, color and components that match.', 'Look & feel', true),
@@ -267,7 +348,7 @@ name: secure-by-default
 description: "Keep the app's data and users safe by default. Use when adding sign-in, entities, permissions, sharing or admin features, or anything that reads or writes people's data. Triggers: security, secure, permissions, access control, row-level security, RLS, policy, private data, owner, sign in, authentication, authorization, secrets, API key, admin, sharing, roles"
 metadata:
   author: Fabricator
-  version: 1.0.0
+  version: 1.1.0
 ---
 # Secure by default
 
@@ -336,6 +417,254 @@ function SelectSecret({ name, children }: { name: string; children: ReactNode })
   }, [name])
   return <>{children}</>
 }
+
+/*
+ * Local development: the sample app running on this computer on the bundled local backend
+ * (rayfin-local), for the local preview, Blueprint's Data view, Preview as and the Secrets
+ * view's local values. Every person here is made up.
+ */
+
+const LOCAL_APP_URL = 'http://localhost:5173/'
+const LOCAL_API_URL = 'http://localhost:7171'
+const LOCAL_PROJECT_DIR = 'C:\\Users\\avery\\RayfinProjects\\contoso-expenses'
+const minutesAgo = (minutes: number): string => new Date(Date.now() - minutes * 60_000).toISOString()
+const daysAgo = (days: number): string => new Date(Date.now() - days * 86_400_000).toISOString()
+
+const LOCAL_ENTITIES = ['Expense', 'Report', 'Receipt', 'Category']
+const LOCAL_FUNCTIONS = ['summarizeReport', 'syncBudgets', 'archiveReceipts', 'readReceipt']
+
+/** The sample app's local backend, running for a while with the developer signed in. */
+function localStatus(projectId: string): LocalStatus {
+  const started = minutesAgo(42)
+  return {
+    projectId,
+    state: 'running',
+    revision: 7,
+    phase: null,
+    pid: 18244,
+    version: '0.2.0',
+    projectRoot: LOCAL_PROJECT_DIR,
+    signInAs: 'developer',
+    ready: {
+      appUrl: LOCAL_APP_URL,
+      apiUrl: LOCAL_API_URL,
+      embedUrl: `${LOCAL_API_URL}/.rayfin-local/portal/embed`,
+      portalUrl: `${LOCAL_API_URL}/.rayfin-local/portal`,
+      dataDir: `${LOCAL_PROJECT_DIR}\\.rayfin-local`,
+      signInAs: { kind: 'developer' },
+      sdk: { version: '1.36.2', supported: true },
+      features: {
+        data: { enabled: true, entities: LOCAL_ENTITIES },
+        functions: { enabled: true, names: LOCAL_FUNCTIONS },
+        storage: { enabled: true, folders: ['receipts'] },
+        auth: { enabled: true, fabric: true, password: false },
+        connectors: [
+          { name: 'finance-warehouse', type: 'fabric-warehouse', supported: true },
+          { name: 'spend-model', type: 'fabric-semanticmodel', supported: true }
+        ]
+      },
+      time: started
+    },
+    analysis: {
+      ok: true,
+      sdk: { version: '1.36.2', supported: true },
+      entities: LOCAL_ENTITIES,
+      storageFolders: ['receipts'],
+      message: null,
+      time: started
+    },
+    schema: { result: 'unchanged', changes: [], losses: [], message: null, live: false, time: started },
+    functions: { state: 'ready', names: LOCAL_FUNCTIONS, errors: [], message: null, time: started },
+    vite: { state: 'ready', url: LOCAL_APP_URL, version: '7.1.3', message: null, time: started },
+    config: null,
+    warnings: [],
+    newerSdk: false,
+    error: null,
+    stopped: null,
+    crashes: 0,
+    startedAt: started,
+    updatedAt: minutesAgo(3)
+  }
+}
+
+/** Its recent output, as the supervisor records it. */
+const LOCAL_OUTPUT: Array<[minutes: number, source: string, line: string]> = [
+  [42, 'rayfin-local', 'rayfin-local 0.2.0 is starting Contoso Expenses.'],
+  [42, 'rayfin-local', 'Analyzed the app (Rayfin 1.36.2): 4 entities.'],
+  [42, 'rayfin-local', 'The database is up to date.'],
+  [42, 'rayfin-local', 'Building the functions…'],
+  [41, 'rayfin-local', `Functions ready: ${LOCAL_FUNCTIONS.join(', ')}.`],
+  [41, 'vite', '  VITE v7.1.3  ready in 612 ms'],
+  [41, 'vite', `  ➜  Local:   ${LOCAL_APP_URL}`],
+  [41, 'rayfin-local', `Vite is serving ${LOCAL_APP_URL}.`],
+  [41, 'rayfin-local', `Ready: the app at ${LOCAL_APP_URL}, the backend at ${LOCAL_API_URL}.`],
+  [26, 'functions', 'summarizeReport: completed in 840 ms'],
+  [12, 'vite', '[vite] hmr update /src/pages/Expenses.tsx, /src/index.css'],
+  [3, 'vite', '[vite] hmr update /src/components/ExpenseTable.tsx']
+]
+
+function localLogs(projectId: string): LocalLogEvent[] {
+  return LOCAL_OUTPUT.map(([minutes, source, line], i) => ({
+    projectId,
+    seq: i + 1,
+    source,
+    level: 'info',
+    line,
+    time: minutesAgo(minutes)
+  }))
+}
+
+/** The developer (the sample user's own account) and two local test users. */
+const localUsers: LocalUser[] = [
+  {
+    id: 'f2c4a7e1-5b3d-4c8e-9a61-7d2e8b4f0c13',
+    username: 'avery.chen@contoso.com',
+    email: 'avery.chen@contoso.com',
+    createdAt: daysAgo(6),
+    signIn: ['entra'],
+    developer: true
+  },
+  {
+    id: '8d1e6b2a-3f4c-4a9d-b7e5-0c6a2f9d1e48',
+    username: 'jordan.lee@example.com',
+    email: 'jordan.lee@example.com',
+    createdAt: daysAgo(2),
+    signIn: [],
+    developer: false
+  },
+  {
+    id: '4b7f0e93-2c1a-4d6b-8e5f-9a3c7d1b2e60',
+    username: 'sam.rivera@example.com',
+    email: 'sam.rivera@example.com',
+    createdAt: daysAgo(1),
+    signIn: ['password'],
+    developer: false
+  }
+]
+
+const localIdentity: LocalIdentity = { kind: 'developer', user: localUsers[0] }
+
+const AVERY = localUsers[0].id
+const JORDAN = localUsers[1].id
+const CATEGORY_IDS = ['3a9c1f42-7e2b-4d8a-9c5e-1b6f0d4a8e21', '9e4b2c71-0a5d-4f3e-8b6c-2d7a1e9f5c34', 'c7d1e8a3-4b9f-4e2c-a6d5-8f3b0e1c9a47', '5f2a9d6e-8c1b-4a7e-9d3f-6e0b4c2a1d58']
+const REPORT_IDS = ['2b8e5c1d-9f4a-4c3e-b7d2-0a6e1f8c5b39', 'e6a3f9c2-1d7b-4e8a-9c4f-3b5d0e2a7f16', '7c0d4b8e-2a5f-4d1c-8e9b-6f3a1c7d0e82']
+
+/** Sample rows per entity: the columns rayfin-local reports, and the rows it formats. */
+const localTables: Record<string, { columns: LocalColumn[]; rows: Record<string, unknown>[] }> = {
+  Category: {
+    columns: [
+      { name: 'id', type: 'uuid', key: true },
+      { name: 'name', type: 'text', key: false }
+    ],
+    rows: ['Travel', 'Meals', 'Software', 'Office'].map((name, i) => ({ id: CATEGORY_IDS[i], name }))
+  },
+  Report: {
+    columns: [
+      { name: 'id', type: 'uuid', key: true },
+      { name: 'title', type: 'text', key: false }
+    ],
+    rows: ['October travel', 'Team offsite', 'Q4 software'].map((title, i) => ({ id: REPORT_IDS[i], title }))
+  },
+  Expense: {
+    columns: [
+      { name: 'id', type: 'uuid', key: true },
+      { name: 'owner_id', type: 'text', key: false },
+      { name: 'amount', type: 'decimal', key: false },
+      { name: 'spentAt', type: 'date', key: false },
+      { name: 'category_id', type: 'uuid', key: false },
+      { name: 'report_id', type: 'uuid', key: false }
+    ],
+    rows: [
+      [412.6, '2026-10-02', 0, 0],
+      [38.4, '2026-10-02', 1, 0],
+      [129.99, '2026-10-05', 2, 2],
+      [64.2, '2026-10-07', 1, 1],
+      [18.75, '2026-10-09', 3, 1],
+      [256.0, '2026-10-12', 0, 0],
+      [42.5, '2026-10-14', 1, 1],
+      [19.0, '2026-10-16', 2, 2],
+      [88.3, '2026-10-19', 3, null],
+      [23.1, '2026-10-21', 1, null],
+      [540.0, '2026-10-24', 0, 0],
+      [12.4, '2026-10-27', 3, null]
+    ].map(([amount, spentAt, category, report], i) => ({
+      id: `a${i.toString(16)}5e1c9d-4b2f-4c8a-9e7d-${(0x3f1b2c4d5e60 + i * 0x1111).toString(16)}`,
+      owner_id: i % 4 === 3 ? JORDAN : AVERY,
+      amount,
+      spentAt,
+      category_id: CATEGORY_IDS[category as number],
+      report_id: report === null ? null : REPORT_IDS[report as number]
+    }))
+  },
+  Receipt: {
+    columns: [
+      { name: 'id', type: 'uuid', key: true },
+      { name: 'owner_id', type: 'text', key: false },
+      { name: 'fileName', type: 'text', key: false },
+      { name: 'expense_id', type: 'uuid', key: false }
+    ],
+    rows: ['hotel-folio.pdf', 'team-lunch.jpg', 'design-tool-invoice.pdf', 'taxi-airport.jpg', 'monitor-stand.jpg'].map(
+      (fileName, i) => ({
+        id: `b${i}7d2e4a-8c1f-4b6e-9a3d-${(0x5c2e7a9b1d40 + i * 0x2222).toString(16)}`,
+        owner_id: AVERY,
+        fileName,
+        expense_id: null
+      })
+    )
+  }
+}
+
+const localEntities: LocalEntity[] = LOCAL_ENTITIES.map((name) => ({ name, rows: localTables[name].rows.length }))
+
+/** The sample app's storage folder of receipt files. */
+const localFolders: LocalStorageFolder[] = [{ name: 'receipts', displayName: 'Receipts', files: 5, bytes: 1_843_200 }]
+
+/** Which screenshot this page renders. */
+const SHOT = new URLSearchParams(location.search).get('shot') ?? ''
+
+/**
+ * The seed data the sample app declares in `rayfin/seed`: the same rows and receipt files, the
+ * developer's and a test user's. `seed-offer` shows the preview offering it to empty local data.
+ */
+const localSeed: LocalSeed = {
+  exists: true,
+  entities: LOCAL_ENTITIES.map((name) => ({
+    name,
+    file: `rayfin/seed/data/${name}.json`,
+    rows: localTables[name].rows.length
+  })),
+  storage: [{ folder: 'receipts', files: 5, bytes: 1_843_200 }],
+  users: ['$developer', '$user:jordan.lee@example.com'],
+  problems: []
+}
+const seedOffer = SHOT === 'seed-offer'
+
+/** A page of an entity's sample rows, sorted the way the Data view asks. */
+function localRows(entity: string, offset: number, limit: number, orderBy?: string, desc?: boolean): LocalRows {
+  const table = localTables[entity] ?? { columns: [], rows: [] }
+  const rows = [...table.rows]
+  if (orderBy) {
+    const rank = (a: unknown, b: unknown): number =>
+      a === b
+        ? 0
+        : a === null || a === undefined
+          ? -1
+          : b === null || b === undefined
+            ? 1
+            : typeof a === 'number' && typeof b === 'number'
+              ? a - b
+              : String(a).localeCompare(String(b))
+    rows.sort((a, b) => (desc ? -1 : 1) * rank(a[orderBy], b[orderBy]))
+  }
+  return { columns: table.columns, rows: rows.slice(offset, offset + limit), total: rows.length }
+}
+
+/** Where each of the Secrets view's sample secrets gets its value on this computer. */
+const localSecrets: LocalSecret[] = [
+  { name: 'OPENAI_API_KEY', declared: true, description: 'Summarizes expense notes', source: 'local' },
+  { name: 'SLACK_WEBHOOK_URL', declared: true, description: 'Posts approved expenses to #finance', source: 'none' },
+  { name: 'STRIPE_SECRET_KEY', declared: true, description: 'Reimburses approved expenses', source: 'local' }
+]
 
 /* Blueprint: the sample app's files, as Blueprint reads them, and what Fabric says about them. */
 
@@ -714,6 +1043,77 @@ const salesInspection: ReportInspection = {
   }
 }
 
+/* App gallery: every Rayfin app the sample user can open in Fabric, most of them not on this computer. */
+
+const MARKETING_WS = 'b1111111-1111-4111-8111-111111111111'
+const OPERATIONS_WS = 'b2222222-2222-4222-8222-222222222222'
+const TRIPS_WS = 'e1111111-1111-4111-8111-111111111111'
+
+const galleryApp = (
+  n: number,
+  name: string,
+  workspaceId: string,
+  workspaceName: string,
+  over: Partial<GalleryApp> = {}
+): GalleryApp => {
+  const id = over.id ?? `f${n}f${n}f${n}f${n}-${n}${n}${n}${n}-4${n}${n}${n}-8${n}${n}${n}-${String(n).repeat(12)}`
+  return {
+    id,
+    name,
+    workspaceId,
+    workspaceName,
+    portalUrl: `https://app.fabric.microsoft.com/groups/${workspaceId}/appbackends/${id}`,
+    ...over
+  }
+}
+
+const galleryApps: GalleryApp[] = [
+  galleryApp(0, 'contoso-expenses', APPS_WS, 'Contoso Apps', {
+    id: EXPENSES_ITEM,
+    description: 'Submit expenses, attach receipts, and approve your team’s reports.',
+    local: { projectId: 'p2', projectName: 'Contoso Expenses' },
+    hostingUrl: EXPENSES_URL
+  }),
+  galleryApp(1, 'budget-planner', FINANCE_WS, 'Finance analytics', {
+    description: 'Plan next year’s budget by department, with this year’s spend beside it.'
+  }),
+  galleryApp(2, 'vendor-portal', FINANCE_WS, 'Finance analytics', {
+    description: 'Vendors upload invoices and follow their payments.'
+  }),
+  galleryApp(3, 'campaign-tracker', MARKETING_WS, 'Marketing', {
+    description: 'Campaigns, budgets and results in one place.',
+    local: { projectId: 'p3', projectName: 'Campaign tracker' }
+  }),
+  galleryApp(4, 'event-check-in', MARKETING_WS, 'Marketing'),
+  galleryApp(5, 'field-inspections', OPERATIONS_WS, 'Operations', {
+    description: 'Inspectors record site visits, photos and follow-ups from the field.'
+  }),
+  galleryApp(6, 'inventory-counts', OPERATIONS_WS, 'Operations'),
+  galleryApp(7, 'trip-logger', TRIPS_WS, 'Trips', {
+    description: 'Log business trips and mileage.',
+    team: { workspaceId: sampleWorkspace.id, name: sampleWorkspace.name, preview: false },
+    local: { projectId: 'p1', projectName: 'Trip Logger' }
+  }),
+  galleryApp(8, 'sales-dashboard', SALES_WS, 'Sales analytics', { description: 'Daily sales by region and store.' }),
+  galleryApp(9, 'store-scorecards', SALES_WS, 'Sales analytics'),
+  galleryApp(1, 'onboarding-checklist', 'c0000000-0000-4000-8000-000000000000', 'My workspace', {
+    id: 'f1a2b3c4-1111-4aaa-8bbb-0c1d2e3f4a5b',
+    description: 'Tasks for a new hire’s first two weeks.'
+  })
+]
+
+/** What each app's deploy status says: its address and when it last published. */
+const galleryStatuses: Record<string, GalleryStatus> = Object.fromEntries(
+  galleryApps.map((app, i) => [
+    app.id,
+    {
+      id: app.id,
+      hostingUrl: app.hostingUrl ?? `https://${app.name}-${(i + 3).toString(16).repeat(10)}-westus.webapp.fabricapps.net`,
+      publishedAt: [minutesAgo(120), daysAgo(1), daysAgo(9), daysAgo(3), daysAgo(40), minutesAgo(25), daysAgo(16), daysAgo(2), daysAgo(5), daysAgo(70), daysAgo(12)][i]
+    }
+  ])
+)
+
 /** A report page's preview, as the Migration card shows it: shapes only, on a white page. */
 function pageThumb(shapes: string): string {
   const svg =
@@ -893,6 +1293,11 @@ function installApi(): void {
     byok: {
       status: ok(sampleByok)
     },
+    // MCP servers: the sample user's three, and what checking each finds.
+    mcp: {
+      list: ok(sampleMcpServers),
+      check: (id: string) => Promise.resolve(sampleMcpChecks[id] ?? { status: 'failed', error: 'Unknown server.' })
+    },
     // Accounts: the sample user's one account in each service.
     github: {
       accounts: ok({ ghInstalled: true, accounts: [{ login: 'averychen', active: true, signedIn: true }] })
@@ -928,6 +1333,25 @@ function installApi(): void {
     },
     secrets: {
       list: ok(secrets)
+    },
+    // The sample app's local backend, running.
+    local: {
+      status: (projectId: string) => Promise.resolve(localStatus(projectId)),
+      start: (projectId: string) => Promise.resolve(localStatus(projectId)),
+      restart: (projectId: string) => Promise.resolve(localStatus(projectId)),
+      logs: (projectId: string, limit = 500) => Promise.resolve(localLogs(projectId).slice(-limit)),
+      users: ok(localUsers),
+      identity: ok(localIdentity),
+      entities: ok(seedOffer ? localEntities.map((entity) => ({ ...entity, rows: 0 })) : localEntities),
+      rows: (_projectId: string, entity: string, offset: number, limit: number, orderBy?: string, desc?: boolean) =>
+        Promise.resolve(localRows(entity, offset, limit, orderBy, desc)),
+      storage: ok(seedOffer ? localFolders.map((folder) => ({ ...folder, files: 0, bytes: 0 })) : localFolders),
+      seed: ok(localSeed),
+      secrets: ok(localSecrets)
+    },
+    // What the app reads at launch: the sample settings.
+    settings: {
+      get: () => Promise.resolve(sampleSettings())
     },
     projects: {
       // Settings shows where new projects go.
@@ -974,6 +1398,12 @@ function installApi(): void {
       reports: (workspaceId: string) => Promise.resolve({ ok: true, reports: migrationReports[workspaceId] ?? [] }),
       search: ok({ ok: true, reports: [] }),
       inspect: ok(salesInspection)
+    },
+    // The app gallery: read with the same Azure CLI sign-in.
+    gallery: {
+      list: ok({ ok: true, apps: galleryApps, account: { user: 'avery.chen@contoso.com' } }),
+      status: (apps: Array<{ id: string }>) =>
+        Promise.resolve(apps.map((app) => galleryStatuses[app.id] ?? { id: app.id, unknown: true }))
     },
     team: {
       map: ok(sampleMap()),
@@ -1178,8 +1608,10 @@ const setupDoctor: DoctorReport = {
     tool('node', 'Node.js', '24.13.0'),
     tool('npm', 'npm', '11.16.0'),
     tool('git', 'Git', '2.49.0'),
-    tool('az', 'Azure CLI', '2.83.0'),
-    { ...tool('gh', 'GitHub CLI (gh)', '2.95.0'), required: false }
+    { ...tool('az', 'Azure CLI', '2.83.0'), required: false },
+    { ...tool('gh', 'GitHub CLI (gh)', '2.95.0'), required: false },
+    // Setup lists the bundled local backend.
+    { ...tool('rayfin-local', 'Local backend', '0.2.0'), required: false }
   ]
 }
 
@@ -1198,7 +1630,7 @@ const groundedHelp = {
 }
 
 /**
- * One finished Help exchange: a deploy that failed, diagnosed from the journal
+ * One finished Help exchange: publishing that failed, diagnosed from the journal
  * and the docs, with the button that fixes it. `savedAt` is empty so the shot
  * doesn't show the "picking up where you left off" seam.
  */
@@ -1207,15 +1639,15 @@ const helpConversation = {
   data: [
     {
       id: 'ask-1',
-      question: 'why did my deploy fail?',
+      question: 'why couldn’t I publish my app?',
       attachments: [],
       answer:
-        'Your Fabric sign-in expired part way through the deploy, so Fabricator could not upload the app.\n\n' +
-        'The deploy stopped with "The access token has expired". Contoso Expenses is still running on the version you deployed on Tuesday — nothing was lost.\n\n' +
+        'Your Fabric sign-in expired part way through publishing, so Fabricator could not upload the app.\n\n' +
+        'Publishing stopped with "The access token has expired". The published Contoso Expenses still runs the version you published on Tuesday — nothing was lost.\n\n' +
         '1. In the account menu, select **Refresh Fabric authentication** and finish signing in.\n' +
-        '2. In the app bar, select **Redeploy**.\n\n' +
+        '2. In the app bar, select **Try again**.\n\n' +
         'If it stops again at the same point, the workspace may no longer be assigned to a Fabric capacity. ' +
-        'See [Deploy problems](https://spatney.github.io/rayfin-fabricator/docs/troubleshooting/deploy).',
+        'See [Publishing and Fabric problems](https://spatney.github.io/rayfin-fabricator/docs/troubleshooting/deploy).',
       tools: [
         { id: 't1', name: 'read', title: 'Read the activity journal', status: 'done' },
         { id: 't2', name: 'grep', title: 'Searched the documentation for "access token has expired"', status: 'done' },
@@ -1224,7 +1656,7 @@ const helpConversation = {
       actions: [{ id: 'refresh-fabric-auth', label: 'Refresh Fabric authentication' }],
       citations: [
         {
-          title: 'Deploy problems',
+          title: 'Publishing and Fabric problems',
           url: 'https://spatney.github.io/rayfin-fabricator/docs/troubleshooting/deploy'
         }
       ],
@@ -1264,21 +1696,29 @@ function Steps({ clicks, children }: { clicks: string[]; children: ReactNode }):
   return <>{children}</>
 }
 
-/** The Build chat's composer, chat-wide beside an empty preview, with its model picker
- *  (and any Fabric data waiting to go with the next message, or a banner above it, such as
- *  a report migration's card). */
+/** The Build chat's composer, chat-wide beside an empty preview, with its plugins and model
+ *  picker (and any Fabric data waiting to go with the next message, or a banner above it, such
+ *  as a report migration's card). `plugins` are on; `workIq` offers Work IQ, as its experiment does,
+ *  and `servers` are the MCP servers the MCP servers experiment offers. */
 function ComposerPicker({
   value,
   data,
   banner,
+  plugins = [],
+  workIq = false,
+  servers,
   project = 'Contoso Expenses'
 }: {
   value: ModelSelection
   data?: DataSource[]
   banner?: ReactNode
+  plugins?: string[]
+  workIq?: boolean
+  servers?: McpServer[]
   project?: string
 }): JSX.Element {
   const [selection, setSelection] = useState(value)
+  const [on, setOn] = useState(plugins)
   return (
     <div style={{ flex: 1, display: 'grid', gridTemplateColumns: '720px 1fr' }}>
       <div className="chat" style={{ justifyContent: 'flex-end' }}>
@@ -1300,12 +1740,16 @@ function ComposerPicker({
             </div>
             <div className="composer-actions">
               <div className="composer-left">
-                <AddMenu
-                  locked={false}
-                  attaching={false}
-                  onImage={noop}
-                  onConnectData={noop}
-                  onReferenceFile={noop}
+                <AddMenu attaching={false} onImage={noop} onConnectData={noop} onBrowse={noop} />
+                <PluginsMenu
+                  plugins={offeredPlugins({ workIq, mcpServers: Boolean(servers) })}
+                  servers={servers}
+                  on={on}
+                  onToggle={(id, value) =>
+                    setOn((ids) => (value ? [...ids, id] : ids.filter((i) => i !== id)))
+                  }
+                  onManageServers={servers ? noop : undefined}
+                  onLearnMore={noop}
                 />
                 <ModelPicker value={selection} disabled={false} onChange={setSelection} tiers onManageKeys={noop} />
               </div>
@@ -1343,8 +1787,9 @@ function ConnectDataShot(): JSX.Element {
 }
 
 /**
- * Settings, with its Theme set to the capture's theme. `experiments` opens Experiments and
- * scrolls it into view, the way the Team workspaces docs show it.
+ * Settings, with the sample settings: its Theme set to the capture's theme, and Local
+ * development on. `experiments` opens Experiments and scrolls it into view, the way the Team
+ * workspaces docs show it.
  */
 function SettingsShot({ experiments = false }: { experiments?: boolean }): JSX.Element {
   useEffect(() => {
@@ -1374,41 +1819,191 @@ function SettingsShot({ experiments = false }: { experiments?: boolean }): JSX.E
       resized.disconnect()
     }
   }, [experiments])
-  const theme = new URLSearchParams(location.search).get('theme') === 'light' ? 'light' : 'dark'
   return (
     <SettingsModal
-      settings={{ theme, experiments: { teamWorkspaces: false } }}
+      settings={sampleSettings()}
       versions={{ app: '1.21.0', tauri: '2.11.3', webview2: '154.0.4258.62', copilot: '1.0.96' }}
       onChange={noop}
       onClose={noop}
       onManageAccounts={noop}
       onManageKeys={noop}
+      onManageChatDefaults={noop}
       onReviewSetup={noop}
     />
   )
 }
 
-/** Accounts, scrolled to Model providers: an Anthropic key saved, OpenAI's key being added. */
-function ModelProvidersShot(): JSX.Element {
+/**
+ * The sample app's Goals tab after a run: three checks passed, one failed and one not proven.
+ * The failed one is open on what Copilot found and the calls it made: Report allows anonymous
+ * reads in the sample's data model, so signed out the app lists every report.
+ */
+function GoalsShot(): JSX.Element {
+  const ranAt = new Date(Date.now() - 6 * 60_000).toISOString()
+  const checks = [
+    {
+      id: 'g1',
+      text: 'An employee can add an expense with an amount, date and category, then find it in their list.'
+    },
+    { id: 'g2', text: 'Someone who isn’t signed in can’t see any expenses, receipts or reports.' },
+    { id: 'g3', text: 'Employees see and change only their own expenses.' },
+    { id: 'g4', text: 'An employee can file an expense in a report, then find it there.' },
+    { id: 'g5', text: 'An employee can attach a photo of the receipt to an expense.' }
+  ]
+  const result = (
+    checkId: string,
+    status: GoalResult['status'],
+    summary: string,
+    evidence: string[] = [],
+    calls: string[] = []
+  ): GoalResult => ({
+    checkId,
+    check: checks.find((c) => c.id === checkId)?.text ?? '',
+    status,
+    summary,
+    calls,
+    evidence,
+    ranAt,
+    fingerprint: 'sample',
+    stale: false
+  })
+  const snapshot: GoalsSnapshot = {
+    exists: true,
+    purpose:
+      'Employees log what they spend for work, with a photo of each receipt, and file their expenses in reports such as October travel. Each employee sees and changes only their own expenses.',
+    checks,
+    results: [
+      result(
+        'g1',
+        'passed',
+        'Jordan added a $42.50 Meals expense for October 14, and it came back first in his list with its category.'
+      ),
+      result(
+        'g2',
+        'failed',
+        'Signed out, the app listed all 3 reports with their titles. Expenses and receipts were refused.',
+        [
+          'Signed out, reports returned October travel, Team offsite and Q4 software.',
+          "Report allows anonymous reads: @anonymous('read') in rayfin/data/Report.ts.",
+          'Expenses and receipts refused the same call: Not authorized.'
+        ],
+        [
+          'as anonymous (signed out): query { reports { items { title } } } → 200 {"data":{"reports":{"items":[{"title":"October travel"},{"title":"Team offsite"},{"title":"Q4 software"}]}}}',
+          'as anonymous (signed out): query { expenses { items { id amount } } } → 200 GraphQL error: Not authorized. (AUTH_NOT_AUTHORIZED)',
+          'as anonymous (signed out): query { receipts { items { id fileName } } } → 200 GraphQL error: Not authorized. (AUTH_NOT_AUTHORIZED)'
+        ]
+      ),
+      result(
+        'g3',
+        'passed',
+        'As Jordan, none of Avery’s expenses came back, and changing one of them by its ID was refused.'
+      ),
+      result(
+        'g4',
+        'passed',
+        'Jordan filed his expense in Team offsite, and it then came back with the report’s expenses.'
+      ),
+      result(
+        'g5',
+        'not-proven',
+        'Receipt photos go to the app’s file storage, which Copilot can’t reach by calling the app.'
+      )
+    ],
+    lastRun: {
+      ranAt,
+      durationMs: 228_000,
+      summary:
+        'Expenses stay with the employee who logged them, and adding and filing them works. Reports don’t: Report allows anonymous reads, so anyone with the app’s address can list every report’s title. Receipt photos go to file storage, which the calls can’t reach.',
+      checkIds: checks.map((c) => c.id),
+      all: true,
+      complete: true
+    },
+    allPassed: false,
+    cannotRun: null,
+    running: false
+  }
+  const goals: GoalsController = {
+    projectId: 'p2',
+    loading: false,
+    loadError: null,
+    snapshot,
+    run: {
+      running: false,
+      adopted: false,
+      startedAt: 0,
+      checkIds: null,
+      phase: null,
+      activity: [],
+      results: [],
+      stopping: false
+    },
+    runError: null,
+    dismissRunError: noop,
+    draft: { running: false, activity: [] },
+    draftError: null,
+    dismissDraftError: noop,
+    selection: AUTO_SELECTION,
+    setSelection: noop,
+    reload: () => Promise.resolve(snapshot),
+    save: noopAsync,
+    startRun: noop,
+    cancelRun: noop,
+    startDraft: () => Promise.resolve(null),
+    cancelDraft: noop
+  }
   return (
-    <Steps clicks={['[aria-label="Add your OpenAI API key"]']}>
-      <AccountsModal
-        auth={setupAuth}
-        onAuthChanged={noop}
-        fabric={{
-          busy: false,
-          signingIn: false,
-          signingOut: false,
-          canRefresh: false,
-          onSignIn: noop,
-          onSignOut: noop,
-          onRefresh: noop
-        }}
-        modelProviders={{ focus: true }}
-        onReviewSetup={noop}
-        onClose={noop}
+    <Steps clicks={['.gl-check--failed .gl-check-btn']}>
+      <GoalsView
+        project={{ ...project, id: 'p2', name: 'Contoso Expenses', team: undefined }}
+        goals={goals}
+        visible
+        chatBusy={false}
+        onFix={noop}
+        onOpenFile={noop}
       />
     </Steps>
+  )
+}
+
+/**
+ * Takes the focus off what a dialog focused as it opened: opened with the mouse, it draws no
+ * focus ring, but a page nobody has touched yet does.
+ */
+function Unfocused({ children }: { children: ReactNode }): JSX.Element {
+  useEffect(() => {
+    const id = window.setTimeout(() => (document.activeElement as HTMLElement | null)?.blur(), 400)
+    return () => window.clearTimeout(id)
+  }, [])
+  return <>{children}</>
+}
+
+/**
+ * Accounts with the sample user signed in to each service, as it opens from the account menu,
+ * or `providers` scrolled to Model providers: an Anthropic key saved, OpenAI's key being added.
+ */
+function AccountsShot({ providers = false }: { providers?: boolean }): JSX.Element {
+  const accounts = (
+    <AccountsModal
+      auth={setupAuth}
+      onAuthChanged={noop}
+      fabric={{
+        busy: false,
+        signingIn: false,
+        signingOut: false,
+        canRefresh: !providers,
+        onSignIn: noop,
+        onSignOut: noop,
+        onRefresh: noop
+      }}
+      modelProviders={{ focus: providers }}
+      onReviewSetup={noop}
+      onClose={noop}
+    />
+  )
+  return providers ? (
+    <Steps clicks={['[aria-label="Add your OpenAI API key"]']}>{accounts}</Steps>
+  ) : (
+    <Unfocused>{accounts}</Unfocused>
   )
 }
 
@@ -1442,11 +2037,11 @@ function TypeInto({
 }
 
 /**
- * A Rayfin 1.36 deploy of the sample app, as `rayfin up` streams it, timed so the
+ * A Rayfin 1.36 publish of the sample app, as `rayfin up` streams it, timed so the
  * capture (10 s of virtual time) lands in the build.
  */
 const DEPLOY_LOG: Array<[number, string]> = [
-  [0, 'Deploying Contoso Expenses to Fabric…\n'],
+  [0, 'Publishing Contoso Expenses to Fabric…\n'],
   [600, '👀 Found Rayfin project root: C:\\Users\\avery\\RayfinProjects\\contoso-expenses\n'],
   [2500, '[rayfin] license: Checking user license\n'],
   [3200, '[rayfin] dependencies: Inspecting project dependencies\n[rayfin] workspace: Resolving workspace\n'],
@@ -1456,7 +2051,7 @@ const DEPLOY_LOG: Array<[number, string]> = [
   [6000, '[rayfin] persist: Recording deployment\n[rayfin] static: Deploying static content\n']
 ]
 
-/** The deploy screen in a preview-sized frame, fed the sample deploy's log. */
+/** The publish screen in a preview-sized frame, fed the sample publish's log. */
 function Deploying(): JSX.Element {
   const [log, setLog] = useState<string[]>([])
   useEffect(() => {
@@ -1484,9 +2079,9 @@ function Deploying(): JSX.Element {
   )
 }
 
-/** The sample app's deploy failing on a Fabric feature its tenant hasn't turned on, as Rayfin 1.36 reports it. */
+/** The sample app failing to publish on a Fabric feature its tenant hasn't turned on, as Rayfin 1.36 reports it. */
 const FAILED_DEPLOY_LOG = [
-  'Deploying Contoso Expenses to Fabric…\n',
+  'Publishing Contoso Expenses to Fabric…\n',
   '[rayfin] license: Checking user license\n',
   '[rayfin] dependencies: Inspecting project dependencies\n',
   '[rayfin] workspace: Resolving workspace\n',
@@ -1497,7 +2092,7 @@ const FAILED_DEPLOY_LOG = [
   '   Details: The PostgreSQLDatabase feature is not enabled.\n'
 ]
 
-/** The preview after that deploy failed: Ray above it, offering to find out why. */
+/** The preview after that publish failed: Ray above it, offering to find out why. */
 function DeployFailed(): JSX.Element {
   const app = {
     id: 'p2',
@@ -1552,8 +2147,9 @@ const expensesApp: StudioProject = {
 }
 
 /**
- * The app bar's deployment control, its panel open on the sample app's Development
- * deployment: live, nothing waiting, signed in.
+ * The app bar's publish control, its panel open on the sample app's Development
+ * published app: live, nothing waiting, signed in, and publishing after each chat turn off,
+ * the default.
  */
 function Deployments(): JSX.Element {
   const app: StudioProject = { ...expensesApp, deploymentNames: { [APPS_WS]: 'Development' } }
@@ -1575,7 +2171,7 @@ function Deployments(): JSX.Element {
               account={{ user: 'avery.chen@contoso.com', tenant: 'Contoso' }}
               onManageAccounts={noop}
               onSignIn={noop}
-              autoDeploy={{ on: true, onChange: noop }}
+              autoDeploy={{ on: false, onChange: noop }}
             />
           </Open>
           <div className="app-bar-global">
@@ -1651,9 +2247,10 @@ function AccountMenuShot(): JSX.Element {
 
 /**
  * Blueprint, filling the window as it fills the Build area: the Architecture view of the sample
- * app, or with `view="data"` its Data model view.
+ * app, with `view="data"` its Data model view, or with `view="local-data"` its Data view of the
+ * sample app's local data.
  */
-function Blueprint({ view = 'architecture' }: { view?: 'architecture' | 'data' }): JSX.Element {
+function Blueprint({ view = 'architecture' }: { view?: 'architecture' | 'data' | 'local-data' }): JSX.Element {
   // Blueprint opens on the view last chosen for the project.
   localStorage.setItem(`rayfin.model.view.${expensesApp.id}`, view)
   return (
@@ -1674,8 +2271,53 @@ function Blueprint({ view = 'architecture' }: { view?: 'architecture' | 'data' }
   )
 }
 
+/**
+ * The preview of the sample app running on this computer, in a preview-sized frame: its
+ * toolbar with Local and Published, and the running local backend, whose output is open unless
+ * `output` is false.
+ */
+function LocalPreview({ output = true }: { output?: boolean }): JSX.Element {
+  const local = useLocalBackend(expensesApp.id)
+  const pane = (
+    <PreviewPane
+      project={expensesApp}
+      deploy={undefined}
+      local={local}
+      view="local"
+      onViewChange={noop}
+      onDiagnoseLocal={noop}
+      onSendToChat={noop}
+      focused={false}
+      onToggleFocus={noop}
+    />
+  )
+  return (
+    <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <div
+        style={{
+          width: 900,
+          height: 560,
+          display: 'flex',
+          flexDirection: 'column',
+          border: '1px solid var(--border)',
+          borderRadius: 10,
+          overflow: 'hidden'
+        }}
+      >
+        {output ? <Steps clicks={['.local-output-btn']}>{pane}</Steps> : pane}
+      </div>
+    </div>
+  )
+}
+
 function Shot({ id }: { id: string | null }): JSX.Element {
   switch (id) {
+    case 'local-data':
+      return <Blueprint view="local-data" />
+    case 'preview-local':
+      return <LocalPreview />
+    case 'seed-offer':
+      return <LocalPreview output={false} />
     case 'team-overview': {
       const map = sampleMap()
       // Started a minute and a half ago, so the run's timer reads like a live deploy.
@@ -1722,11 +2364,17 @@ function Shot({ id }: { id: string | null }): JSX.Element {
         <PortConflictModal
           conflict={{
             port: 5173,
-            occupant: { pid: 18244, name: 'node.exe', commandLine: 'node node_modules/vite/bin/vite.js --port 5173' },
+            // A preview of another app, left running by rayfin-local.
+            occupant: {
+              pid: 18244,
+              name: 'node.exe',
+              commandLine: `"C:\\Program Files\\nodejs\\node.exe" ${LOCAL_PROJECT_DIR}\\.rayfin-local\\cache\\js\\vite-dev-3f2a91c07d1e\\vite-dev.mjs --root ${LOCAL_PROJECT_DIR}\\packages\\frontend --port 5173`
+            },
             canStop: true,
             suggestedPort: 5174,
             needsPush: true
           }}
+          projects={[{ name: 'Contoso Expenses', path: LOCAL_PROJECT_DIR }]}
           context="turn"
           busy={null}
           error={null}
@@ -1816,16 +2464,53 @@ function Shot({ id }: { id: string | null }): JSX.Element {
           <ComposerPicker value={{ model: 'claude-opus-5.5', effort: 'high', autoTier: '', contextTier: '' }} />
         </Steps>
       )
+    case 'accounts':
+      return <AccountsShot />
     case 'model-providers':
-      return <ModelProvidersShot />
+      return <AccountsShot providers />
     case 'add-menu':
       return (
         <Steps clicks={['.add-menu .composer-icon-btn', '[data-sub="data"]']}>
           <ComposerPicker value={{ model: 'claude-opus-5.5', effort: 'high', autoTier: '', contextTier: '' }} />
         </Steps>
       )
+    case 'plugins':
+      // Fabric IQ is on in the sample app's chat, and the Work IQ experiment offers Work IQ.
+      return (
+        <Steps clicks={['.plugins-menu button']}>
+          <ComposerPicker
+            value={{ model: '', effort: '', autoTier: '', contextTier: '' }}
+            plugins={['fabric-iq']}
+            workIq
+          />
+        </Steps>
+      )
     case 'connect-data':
       return <ConnectDataShot />
+    case 'mcp-plugins':
+      // The MCP servers experiment is on: Charts is on in the sample app's chat, beside Fabric IQ.
+      return (
+        <Steps clicks={['.plugins-menu button']}>
+          <ComposerPicker
+            value={{ model: '', effort: '', autoTier: '', contextTier: '' }}
+            plugins={['fabric-iq', 'mcp:charts']}
+            servers={sampleMcpServers}
+          />
+        </Steps>
+      )
+    case 'mcp-servers':
+      // The sample user's servers, each just checked.
+      return (
+        <Steps
+          clicks={[
+            '[aria-label="Check Microsoft Learn"]',
+            '[aria-label="Check Charts"]',
+            '[aria-label="Check Issue tracker"]'
+          ]}
+        >
+          <McpServersModal onClose={noop} />
+        </Steps>
+      )
     case 'data-chips':
       return (
         <ComposerPicker
@@ -1837,6 +2522,22 @@ function Shot({ id }: { id: string | null }): JSX.Element {
       return <SettingsShot />
     case 'settings-experiments':
       return <SettingsShot experiments />
+    case 'goals':
+      return <GoalsShot />
+    case 'chat-defaults':
+      // The sample user's new apps start on Claude Opus 5.5 with Fabric IQ and Charts on.
+      return (
+        <Unfocused>
+          <ChatDefaultsModal
+            defaults={{ model: 'claude-opus-5.5', effort: 'high', plugins: ['fabric-iq', 'mcp:charts'] }}
+            experiments={{ workIq: true, mcpServers: true }}
+            onChange={noop}
+            onClose={noop}
+            onManageKeys={noop}
+            onManageMcpServers={noop}
+          />
+        </Unfocused>
+      )
     case 'migrate-report':
       // The picker opens on Contoso Apps, where the sample app deploys; the shot opens Sales
       // analytics and picks Sales performance, and Fabricator shows what it can read of it.
@@ -1864,6 +2565,13 @@ function Shot({ id }: { id: string | null }): JSX.Element {
             />
           }
         />
+      )
+    case 'app-gallery':
+      // Every app the sample user can open, with the sample app's details open.
+      return (
+        <Steps clicks={[`[data-app-id="${EXPENSES_ITEM}"]`]}>
+          <AppGalleryView onClose={noop} onOpenProject={noop} onNewProject={noop} />
+        </Steps>
       )
     default:
       return <p style={{ padding: 24 }}>Unknown shot: {String(id)}</p>

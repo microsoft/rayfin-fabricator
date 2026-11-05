@@ -25,10 +25,12 @@ use regex::Regex;
 use serde_json::Value;
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_opener::OpenerExt;
 use uuid::Uuid;
 
 use crate::commands::chat_tools;
 use crate::commands::screenshot;
+use crate::services::agent_skills::{self, Guidance};
 use crate::services::copilot::{is_recoverable_session_error, PlanModeHandler};
 use crate::services::diagnostics;
 use crate::services::emit::emit_chat_event;
@@ -36,11 +38,16 @@ use crate::services::journal;
 use crate::services::history;
 use crate::services::byok;
 use crate::services::copilot::ModelChoice;
+use crate::services::exec::CancelToken;
+use crate::services::iq::{self, IqConfig};
+use crate::services::mcp::{self, McpServers};
 use crate::services::store;
+use crate::services::usage;
 use crate::state::{AppState, TurnRoute};
 use crate::types::{
-  ChatEvent, ChatMessage, ChatOptions, ChatPlanDependency, ChatPlanTodo, ChatToolCall, ChatToolState, ChatTurnResult,
-  CopilotModel, SteerResult,
+  AppSettings, ChatDefaults, ChatEvent, ChatFusion, ChatFusionModel, ChatMessage, ChatOptions, ChatPathInfo,
+  ChatPlanDependency, ChatPlanTodo, ChatToolCall, ChatToolState, ChatTurnResult, ChatUsage, CopilotModel,
+  CopilotQuota, McpServerEntry, SteerResult, StudioProject,
 };
 
 /// Up to this many copilot invocations per turn on a transient pre-work failure.
@@ -49,20 +56,91 @@ const MAX_ATTEMPTS: u32 = 3;
 /// deploys) can legitimately run well past an hour.
 const TURN_TIMEOUT_MS: u64 = 2 * 60 * 60_000;
 
-/// Guidance prepended to each chat message while the user has turned off
-/// "Deploy after each chat turn". Fabricator's always-on instructions say it
-/// deploys after every turn, so the exception travels with the message, as the
-/// team guidance does.
-const MANUAL_DEPLOY_NOTE: &str = "[Fabricator: the user turned off Deploy after each chat turn, so Fabricator doesn't deploy when this turn ends. The changes stay on this computer until the user deploys them. Fabricator's local preview shows frontend changes as you make them, but it uses the deployed backend, so changes to data, permissions or functions work only after a deploy. Still don't deploy yourself. End by saying what to try in the preview and whether it needs a deploy first.]";
+/// Notes prepended to each chat message of a personal app, on how its changes
+/// go live, which the session's guidance leaves to the message: whether chat
+/// turns publish (the published apps panel's "Publish after each chat turn")
+/// can change between turns. Team apps get the team's note instead.
+///
+/// Fabricator runs the app on this computer (the Local guidance), and turns don't publish.
+const LOCAL_NOTE: &str = "[Fabricator: this app runs on this computer. Publish after each chat turn is off, so your changes stay here until the user publishes them.]";
+/// Fabricator runs the app on this computer, and publishes it after each turn.
+const LOCAL_AUTO_PUBLISH_NOTE: &str = "[Fabricator: this app runs on this computer. Publish after each chat turn is on, so Fabricator also publishes the app to Microsoft Fabric when this turn ends.]";
+/// Fabricator runs the app on this computer, and it was never published. Turns
+/// don't publish it whatever Publish after each chat turn says: the first
+/// publish is the user's, who chooses where the app goes.
+const LOCAL_UNPUBLISHED_NOTE: &str = "[Fabricator: this app runs on this computer and hasn't been published yet, so your changes stay here until the user publishes it.]";
+/// A published app the local backend can't run all of (the Fabric-backed
+/// guidance), whose turns don't publish.
+const FALLBACK_NOTE: &str = "[Fabricator: this app's backend runs on Microsoft Fabric, because the local backend can't run all of it. The preview shows your frontend changes against the published backend. Publish after each chat turn is off, so changes to data, permissions or functions reach that backend only once the user publishes. End by saying what to try in the preview and whether it needs a publish first.]";
+/// A published app the local backend can't run all of, published after each turn.
+const FALLBACK_AUTO_PUBLISH_NOTE: &str = "[Fabricator: this app's backend runs on Microsoft Fabric, because the local backend can't run all of it. Publish after each chat turn is on, so Fabricator publishes the app when this turn ends, and the preview then shows the result.]";
 
-/// The text sent to Copilot for a chat message in `project_id`. Manual deploy
-/// doesn't apply to team apps: their pipeline deploys them.
-fn turn_text(project_id: &str, text: &str, manual_deploy: bool) -> String {
-  if manual_deploy && !crate::services::team::is_team_project_id(project_id) {
-    format!("{MANUAL_DEPLOY_NOTE}\n\n{text}")
-  } else {
-    crate::services::team::chat_text(project_id, text)
+/// The text sent to Copilot for a chat message in `project`, with the note on
+/// how its changes go live, and on the Fabric IQ and Work IQ servers (`iq`) and
+/// the user's own MCP servers (`mcp`) it can use.
+fn turn_text(
+  project: &StudioProject,
+  text: &str,
+  guidance: Guidance,
+  manual_publish: bool,
+  iq: &iq::Prepared,
+  mcp: &mcp::Prepared,
+) -> String {
+  let notes: Vec<String> = [iq.note(), mcp.note()].into_iter().flatten().collect();
+  let text = if notes.is_empty() { text.to_string() } else { format!("{}\n\n{text}", notes.join("\n\n")) };
+  if project.team.is_some() {
+    return crate::services::team::chat_text(&project.id, &text);
   }
+  let note = match (guidance, manual_publish) {
+    (Guidance::Local, true) => LOCAL_NOTE,
+    (Guidance::Local, false) if !agent_skills::is_published(project) => LOCAL_UNPUBLISHED_NOTE,
+    (Guidance::Local, false) => LOCAL_AUTO_PUBLISH_NOTE,
+    (Guidance::FabricBacked, true) => FALLBACK_NOTE,
+    (Guidance::FabricBacked, false) => FALLBACK_AUTO_PUBLISH_NOTE,
+  };
+  format!("{note}\n\n{text}")
+}
+
+/// Connects a turn's session to the Fabric IQ and Work IQ servers that are on,
+/// asking the user to sign in when one needs it.
+async fn prepare_iq(
+  app: &AppHandle,
+  project_id: &str,
+  turn_id: &str,
+  session: &Session,
+  iq: IqConfig,
+  cancel: &CancelToken,
+) -> iq::Prepared {
+  if !iq.any() {
+    return iq::Prepared::default();
+  }
+  let notice = |text: String| emit_chat_event(app, project_id, turn_id, ChatEvent::Notice { text });
+  let open = |url: &str| {
+    app.opener().open_url(url, None::<&str>).map_err(|e| format!("Fabricator couldn't open the browser ({e})"))
+  };
+  let ui = iq::Ui { notice: &notice, open: &open };
+  iq::prepare(session, iq, &ui, &iq::Microsoft, &iq::MEMORY, cancel, iq::Waits::default()).await
+}
+
+/// Connects a turn's session to the user's MCP servers that are on, asking the
+/// user to sign in to one in the browser when it needs that.
+async fn prepare_mcp(
+  app: &AppHandle,
+  project_id: &str,
+  turn_id: &str,
+  session: &Session,
+  servers: &McpServers,
+  cancel: &CancelToken,
+) -> mcp::Prepared {
+  if servers.is_empty() {
+    return mcp::Prepared::default();
+  }
+  let notice = |text: String| emit_chat_event(app, project_id, turn_id, ChatEvent::Notice { text });
+  let open = |url: &str| {
+    app.opener().open_url(url, None::<&str>).map_err(|e| format!("Fabricator couldn't open the browser ({e})"))
+  };
+  let ui = iq::Ui { notice: &notice, open: &open };
+  mcp::prepare(session, servers, &ui, &mcp::MEMORY, cancel, mcp::Waits::default()).await
 }
 
 /// Stderr signatures that indicate a transient, safe-to-retry failure.
@@ -251,6 +329,11 @@ struct TurnCtx {
   /// For a turn on a provider's model (your own key): the provider and model
   /// names, to put its errors in plain language.
   provider: Option<(String, String)>,
+  /// The id and name of each MCP server the user added that's on in the chat,
+  /// so the work log names the server a tool came from.
+  mcp_servers: Vec<(String, String)>,
+  /// What Copilot Fusion chose for the turn so far, on a Fusion tier.
+  fusion: Option<ChatFusion>,
 }
 
 impl TurnCtx {
@@ -272,7 +355,23 @@ impl TurnCtx {
       stream_closed: false,
       ended_empty: false,
       provider: None,
+      mcp_servers: vec![],
+      fusion: None,
     }
+  }
+
+  /// The name of the user's MCP server a tool call came from, and the tool's
+  /// own name, by what the runtime reports, or else by the tool's name
+  /// (`chart-generate_bar_chart`).
+  fn mcp_tool(&self, data: &Value, tool_name: &str) -> Option<(String, String)> {
+    let field = |key: &str| data.get(key).and_then(Value::as_str).filter(|s| !s.is_empty());
+    let after = |id: &str| tool_name.strip_prefix(id).and_then(|t| t.strip_prefix('-')).filter(|t| !t.is_empty());
+    let (id, name) = match field("mcpServerName") {
+      Some(server) => self.mcp_servers.iter().find(|(id, _)| id == server)?,
+      None => self.mcp_servers.iter().filter(|(id, _)| after(id).is_some()).max_by_key(|(id, _)| id.len())?,
+    };
+    let tool = field("mcpToolName").or_else(|| after(id))?;
+    Some((name.clone(), tool.to_string()))
   }
 
   /// Record the start of a tool call (metadata always; cheap).
@@ -396,7 +495,11 @@ fn map_event(event_type: &str, data: &Value, sink: &mut dyn FnMut(ChatEvent), ct
     "tool.execution_start" => {
       let tool_name = data.get("toolName").and_then(|v| v.as_str()).unwrap_or("tool").to_string();
       let args = data.get("arguments");
-      let title = chat_tools::tool_title(&tool_name, args);
+      // A tool of a server the user added goes by its own name, with the server's.
+      let (title, server) = match ctx.mcp_tool(data, &tool_name) {
+        Some((server, tool)) => (tool, Some(server)),
+        None => (chat_tools::tool_title(&tool_name, args), None),
+      };
       let command = args.and_then(|a| a.get("command")).and_then(|v| v.as_str()).unwrap_or("");
       if RAYFIN_UP_RE.is_match(command) {
         ctx.ran_deploy = true;
@@ -415,6 +518,7 @@ fn map_event(event_type: &str, data: &Value, sink: &mut dyn FnMut(ChatEvent), ct
           paths: chat_tools::tool_paths(&tool_name, args),
           name: tool_name,
           title,
+          server,
           state: ChatToolState::Running,
           ..Default::default()
         },
@@ -469,6 +573,45 @@ fn map_event(event_type: &str, data: &Value, sink: &mut dyn FnMut(ChatEvent), ct
       // here rather than in the drain loop's async plan_changed/todos_changed path.
       if let Some(mode) = data.get("newMode").and_then(|v| v.as_str()).and_then(map_sdk_mode) {
         sink(ChatEvent::ModeChanged { mode });
+      }
+    }
+    // Copilot Fusion planned a request, couldn't plan one and fell back to one
+    // model, or started a model on a phase: what it chose goes under the turn.
+    "session.fusion_resolved" | "session.fusion_route_failed" | "assistant.fusion_phase_started" => {
+      let field = |key: &str| data.get(key).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty());
+      let before = ctx.fusion.clone();
+      let fusion = ctx.fusion.get_or_insert_with(ChatFusion::default);
+      if let Some(level) = field("syntheticModel") {
+        fusion.level = level.to_string();
+      }
+      let (pattern, model, phase) = match event_type {
+        "session.fusion_resolved" => (field("pattern"), None, None),
+        "session.fusion_route_failed" => (Some("fallback"), field("fallbackModel"), None),
+        _ => (None, field("model"), field("phaseKind")),
+      };
+      if let Some(pattern) = pattern.filter(|p| !fusion.patterns.iter().any(|known| known == p)) {
+        fusion.patterns.push(pattern.to_string());
+      }
+      if let Some(hint) = field("hint") {
+        fusion.hint = Some(hint.to_string());
+      }
+      if let Some(model) = model {
+        let known = match fusion.models.iter().position(|m| m.id == model) {
+          Some(i) => i,
+          None => {
+            fusion.models.push(ChatFusionModel { id: model.to_string(), phases: vec![] });
+            fusion.models.len() - 1
+          }
+        };
+        let phases = &mut fusion.models[known].phases;
+        if let Some(phase) = phase.filter(|p| !phases.iter().any(|known| known == p)) {
+          phases.push(phase.to_string());
+        }
+      }
+      if ctx.fusion != before {
+        if let Some(fusion) = &ctx.fusion {
+          sink(ChatEvent::Fusion { fusion: fusion.clone() });
+        }
       }
     }
     "session.idle" => {
@@ -707,16 +850,23 @@ pub(crate) async fn run_turn(
   let plan_handler: Arc<dyn ExitPlanModeHandler> = bridge.clone();
   let user_input_handler: Arc<dyn UserInputHandler> = bridge;
 
-  // Build Fabricator's in-process tools for this turn. They let the agent locate
-  // and wire semantic models; visual validation happens via headless `npm run
-  // preview` and Fabricator auto-deploys after the turn.
-  let fab_tools = crate::services::agent_tools::fabricator_tools(app.clone(), project_id.clone());
+  // The guidance and Fabricator's in-process tools fit where the app's backend
+  // runs (see `agent_skills::guidance_for`): on this computer, with the local
+  // backend tools beside the semantic-model ones, or on Microsoft Fabric. The
+  // session is resumed with another set when that changes.
+  let guidance = agent_skills::guidance_for(&project, &crate::services::local_backend::snapshot(&app, &project_id));
+  let fab_tools = crate::services::agent_tools::fabricator_tools(app.clone(), project_id.clone(), guidance);
 
   // Your own API keys: every session gets the provider registry so
   // a thread can switch between Copilot's models and the user's own, and a turn
   // on a provider's model first checks it can run, so it never quietly runs on
   // another model.
   let byok_registry = state.byok.session_registry();
+  // The plugins on in this chat: the Fabric IQ and Work IQ servers it can research
+  // with, and the MCP servers the user added (an experiment).
+  let settings = store::get_settings();
+  let iq = IqConfig::for_project(&project, &settings);
+  let mcp_servers = McpServers::for_project(&project, &settings);
   let provider_model = project.model.clone().filter(|m| byok::is_provider_selection(m));
   let provider = provider_model.as_deref().and_then(byok::describe);
   let choice = ModelChoice::new(
@@ -735,7 +885,10 @@ pub(crate) async fn run_turn(
       Some(plan_handler.clone()),
       Some(user_input_handler.clone()),
       fab_tools.clone(),
+      Some(guidance),
       byok_registry.clone(),
+      iq,
+      mcp_servers.clone(),
     );
   let first_open = match &provider_model {
     Some(model) => match state.byok.ensure_ready(model) {
@@ -785,6 +938,12 @@ pub(crate) async fn run_turn(
   if let Err(e) = session.rpc().mode().set(ModeSetRequest { mode: session_mode.clone(), ..Default::default() }).await {
     log::warn!("failed to set session mode {session_mode:?}: {e}");
   }
+  // Fabric IQ, Work IQ and the user's MCP servers connect (and sign in) before
+  // the message goes, so their tools are there for it.
+  let (mut iq_ready, mut mcp_ready) = tokio::join!(
+    prepare_iq(&app, &project_id, &turn_id, &session, iq, &token),
+    prepare_mcp(&app, &project_id, &turn_id, &session, &mcp_servers, &token),
+  );
 
   // Point the plan handler at this turn's UI for the duration of the turn.
   // `plan_context` records whether this turn was started in Plan mode:
@@ -815,6 +974,7 @@ pub(crate) async fn run_turn(
   let new_ctx = || {
     let mut ctx = TurnCtx::new(full);
     ctx.provider = provider.clone();
+    ctx.mcp_servers = mcp_servers.names();
     ctx
   };
   let mut ctx = new_ctx();
@@ -862,6 +1022,10 @@ pub(crate) async fn run_turn(
           if let Err(e) = session.rpc().mode().set(ModeSetRequest { mode: session_mode.clone(), ..Default::default() }).await {
             log::warn!("failed to set recovered session mode {session_mode:?}: {e}");
           }
+          (iq_ready, mcp_ready) = tokio::join!(
+            prepare_iq(&app, &project_id, &turn_id, &session, iq, &token),
+            prepare_mcp(&app, &project_id, &turn_id, &session, &mcp_servers, &token),
+          );
         }
         Err(error) => {
           send_error = Some(error);
@@ -882,7 +1046,18 @@ pub(crate) async fn run_turn(
     let opts = match continuation {
       Some(prompt) => MessageOptions::new(prompt.to_string()),
       None => {
-        let opts = MessageOptions::new(turn_text(&project_id, &text, store::manual_deploy_enabled()));
+        let text = match crate::commands::goals::chat_note(&project) {
+          Some(note) => format!("{note}\n\n{text}"),
+          None => text.clone(),
+        };
+        let opts = MessageOptions::new(turn_text(
+          &project,
+          &text,
+          guidance,
+          store::manual_deploy_enabled(),
+          &iq_ready,
+          &mcp_ready,
+        ));
         if attach.is_empty() { opts } else { opts.with_attachments(attach.clone()) }
       }
     };
@@ -927,6 +1102,8 @@ pub(crate) async fn run_turn(
             return DrainEnd::Cancelled;
           }
           recv = sub.recv() => match recv {
+            // A Fusion draft may yet be revised: its settled answer follows.
+            Ok(ev) if crate::services::copilot::is_fusion_draft(&ev) => {}
             Ok(ev) => match classify_plan_event(&ev.event_type, plan_context) {
               // Signal-only (no payload): defer the actual read/emit until the
               // burst settles (see `todos_dirty` above).
@@ -1048,6 +1225,14 @@ pub(crate) async fn run_turn(
   state.plan.clear_route(&session_key);
   state.plan.reject_pending_plan(&session_key);
   state.plan.reject_pending_question(&session_key);
+
+  // Keep what the chat has used so far, for when its session isn't open. Saved
+  // before the turn's result goes out, so the chat reads the new totals.
+  if !ctx.stream_closed {
+    if let Ok(Some(used)) = tokio::time::timeout(Duration::from_secs(5), usage::read(&session)).await {
+      history::save_usage(&project_id, &used);
+    }
+  }
 
   // Record one lightweight diagnostics line for this turn (off the streaming hot
   // path, best-effort). `outcome` mirrors the branches below.
@@ -1407,6 +1592,35 @@ pub async fn chat_export_plan(app: AppHandle, suggested_name: String, content: S
   Ok(Some(path.display().to_string()))
 }
 
+/// Let the user pick files and folders on this computer, in one system dialog,
+/// to add to a message: the composer adds each as an attachment. Empty when the
+/// dialog is closed.
+#[tauri::command]
+pub async fn chat_pick_paths(app: AppHandle) -> Vec<String> {
+  crate::services::path_picker::pick_files_and_folders(&app, "Choose files or folders for Copilot to read")
+    .await
+    .into_iter()
+    .map(|path| path.to_string_lossy().into_owned())
+    .collect()
+}
+
+/// Which of `paths`, dropped on the composer or picked on this computer, are
+/// folders. Paths that don't exist are left out.
+#[tauri::command]
+pub async fn chat_inspect_paths(paths: Vec<String>) -> Vec<ChatPathInfo> {
+  tokio::task::spawn_blocking(move || inspect_paths(&paths)).await.unwrap_or_default()
+}
+
+fn inspect_paths(paths: &[String]) -> Vec<ChatPathInfo> {
+  paths
+    .iter()
+    .filter_map(|path| {
+      let meta = std::fs::metadata(path).ok()?;
+      Some(ChatPathInfo { path: path.clone(), dir: meta.is_dir() })
+    })
+    .collect()
+}
+
 #[tauri::command]
 pub fn chat_set_options(project_id: String, options: ChatOptions) {
   let choice = ModelChoice::new(options.model, options.effort, options.auto_tier, options.context_tier);
@@ -1416,6 +1630,87 @@ pub fn chat_set_options(project_id: String, options: ChatOptions) {
     p.auto_tier = choice.auto_tier;
     p.context_tier = choice.context_tier;
   });
+}
+
+/// Turns a plugin on or off in a project's chat, from its next message, and
+/// returns the plugins now on there: Fabric IQ, Work IQ, or an MCP server the
+/// user added (`mcp:<id>`).
+#[tauri::command]
+pub fn chat_set_plugin(project_id: String, plugin: String, on: bool) -> Result<Vec<String>, String> {
+  let iq = iq::Iq::from_plugin(&plugin);
+  let server = mcp::server_of_plugin(&plugin).map(str::to_string);
+  if iq.is_none() && server.is_none() {
+    return Err(format!("Fabricator doesn't have the plugin {plugin}."));
+  }
+  if store::find_project(&project_id).is_none() {
+    return Err("Project not found.".into());
+  }
+  if let Some(id) = &server {
+    if on && !store::mcp_servers().iter().any(|s| &s.id == id) {
+      return Err("That MCP server isn't in Fabricator anymore.".into());
+    }
+  }
+  let state = store::mutate_project(&project_id, |p| {
+    p.plugins.retain(|id| *id != plugin);
+    if on {
+      p.plugins.push(plugin.clone());
+    }
+  });
+  if let Some(iq) = iq {
+    iq::toggled(iq, IqConfig::in_use(&state.projects, &store::get_settings()));
+  }
+  if let Some(id) = &server {
+    mcp::MEMORY.reset(&project_id, id);
+  }
+  Ok(state.projects.into_iter().find(|p| p.id == project_id).map(|p| p.plugins).unwrap_or_default())
+}
+
+/// Chat defaults as they're saved: the model choice normalized as a project's
+/// chat keeps it, and each plugin Fabricator has, once. An MCP server counts
+/// only while it's added; a plugin whose experiment is off is kept for when
+/// it's on again.
+pub(crate) fn chat_defaults(defaults: ChatDefaults, servers: &[McpServerEntry]) -> ChatDefaults {
+  let choice = ModelChoice::new(defaults.model, defaults.effort, defaults.auto_tier, defaults.context_tier);
+  let mut plugins: Vec<String> = Vec::new();
+  for plugin in defaults.plugins.iter().map(|p| p.trim()) {
+    let known = iq::Iq::from_plugin(plugin).is_some()
+      || mcp::server_of_plugin(plugin).is_some_and(|id| servers.iter().any(|s| s.id == id));
+    if known && !plugins.iter().any(|p| p == plugin) {
+      plugins.push(plugin.to_string());
+    }
+  }
+  ChatDefaults {
+    model: choice.model,
+    effort: choice.effort,
+    auto_tier: choice.auto_tier,
+    context_tier: choice.context_tier,
+    plugins,
+  }
+}
+
+/// What a new project's chat starts with: the chat defaults, with only the
+/// plugins chat offers it now (Work IQ and MCP servers while their experiments
+/// are on, and a server only while it's added). Auto with none on without them.
+pub(crate) fn new_project_chat(settings: &AppSettings) -> (ModelChoice, Vec<String>) {
+  let Some(defaults) = settings.chat_defaults.clone() else {
+    return (ModelChoice::default(), Vec::new());
+  };
+  let experiments = settings.experiments.as_ref();
+  let work_iq = experiments.and_then(|f| f.work_iq).unwrap_or(false);
+  let mcp_servers = experiments.and_then(|f| f.mcp_servers).unwrap_or(false);
+  let plugins = defaults
+    .plugins
+    .iter()
+    .filter(|plugin| match iq::Iq::from_plugin(plugin) {
+      Some(iq::Iq::Fabric) => true,
+      Some(iq::Iq::Work) => work_iq,
+      None => {
+        mcp_servers && mcp::server_of_plugin(plugin).is_some_and(|id| settings.mcp_servers.iter().any(|s| s.id == id))
+      }
+    })
+    .cloned()
+    .collect();
+  (ModelChoice::new(defaults.model, defaults.effort, defaults.auto_tier, defaults.context_tier), plugins)
 }
 
 /// List the Copilot models available to the signed-in user, for the chat model
@@ -1436,6 +1731,29 @@ pub async fn chat_auto_tiers(state: State<'_, AppState>) -> Result<Option<crate:
   state.copilot.auto_tiers().await
 }
 
+/// What this project's chat has used: live from its Copilot session while that's
+/// open, else as of its last turn. `None` before the chat has a session.
+#[tauri::command]
+pub async fn chat_usage(state: State<'_, AppState>, project_id: String) -> Result<Option<ChatUsage>, String> {
+  let Some(session_id) = store::find_project(&project_id).and_then(|p| p.copilot_session_id) else {
+    return Ok(None);
+  };
+  let open = state.copilot.peek_session(&project_id).await.filter(|s| s.id().as_str() == session_id);
+  if let Some(session) = open {
+    if let Ok(Some(used)) = tokio::time::timeout(Duration::from_secs(5), usage::read(&session)).await {
+      history::save_usage(&project_id, &used);
+      return Ok(Some(used));
+    }
+  }
+  Ok(history::load_usage(&project_id).filter(|used| used.session_id == session_id))
+}
+
+/// The signed-in account's Copilot allowance, read fresh: how much of it is left.
+#[tauri::command]
+pub async fn chat_quota(state: State<'_, AppState>) -> Result<Option<CopilotQuota>, String> {
+  state.copilot.account_quota().await
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -1448,6 +1766,130 @@ mod tests {
       map_event(event_type, data, &mut sink, ctx);
     }
     out
+  }
+
+  /// What Copilot Fusion chose goes under the turn: each change once, with a
+  /// request it couldn't plan shown as a fallback.
+  #[test]
+  fn what_copilot_fusion_chose_goes_under_the_turn() {
+    let mut ctx = TurnCtx::new(false);
+    let phase = |kind: &str, model: &str| json!({ "phaseKind": kind, "model": model });
+    let events = collect(
+      &[
+        ("session.fusion_resolved", json!({ "syntheticModel": "hydrafusion", "pattern": "critique", "hint": "Using Critique." })),
+        ("assistant.fusion_phase_started", phase("draft", "claude-sonnet-5")),
+        ("assistant.fusion_phase_started", phase("draft", "claude-sonnet-5")),
+        ("assistant.fusion_phase_started", phase("critic", "gpt-5.6-sol")),
+        ("assistant.fusion_phase_started", phase("revision", "claude-sonnet-5")),
+        ("session.fusion_route_failed", json!({ "syntheticModel": "hydrafusion", "fallbackModel": "gpt-5.6-sol" })),
+      ],
+      &mut ctx,
+    );
+    let fusions: Vec<ChatFusion> = events
+      .into_iter()
+      .filter_map(|e| match e {
+        ChatEvent::Fusion { fusion } => Some(fusion),
+        _ => None,
+      })
+      .collect();
+    assert_eq!(fusions.len(), 5, "a phase seen before changes nothing");
+    let last = fusions.last().unwrap();
+    assert_eq!((last.level.as_str(), last.hint.as_deref()), ("hydrafusion", Some("Using Critique.")));
+    assert_eq!(last.patterns, ["critique", "fallback"]);
+    let models: Vec<(&str, Vec<&str>)> =
+      last.models.iter().map(|m| (m.id.as_str(), m.phases.iter().map(String::as_str).collect())).collect();
+    assert_eq!(models, [("claude-sonnet-5", vec!["draft", "revision"]), ("gpt-5.6-sol", vec!["critic"])]);
+  }
+
+  #[test]
+  fn each_message_says_where_the_app_runs_and_whether_the_turn_publishes() {
+    let project: StudioProject = serde_json::from_value(json!({
+      "id": "p", "name": "App", "path": "C:\\apps\\app", "addedAt": "2026-01-01T00:00:00.000Z",
+      "lastDeploy": { "url": "https://app.example", "status": "success" }
+    }))
+    .unwrap();
+    // The app runs here, or falls back to its published backend.
+    assert_eq!(turn_text(&project, "Add a list", Guidance::Local, true, &iq::Prepared::default(), &mcp::Prepared::default()), format!("{LOCAL_NOTE}\n\nAdd a list"));
+    assert!(turn_text(&project, "x", Guidance::Local, false, &iq::Prepared::default(), &mcp::Prepared::default()).starts_with(LOCAL_AUTO_PUBLISH_NOTE));
+    assert!(turn_text(&project, "x", Guidance::FabricBacked, true, &iq::Prepared::default(), &mcp::Prepared::default()).starts_with(FALLBACK_NOTE));
+    assert!(turn_text(&project, "x", Guidance::FabricBacked, false, &iq::Prepared::default(), &mcp::Prepared::default()).starts_with(FALLBACK_AUTO_PUBLISH_NOTE));
+    // Never published: no turn publishes it, even with publishing after each turn on.
+    let mut unpublished = project.clone();
+    unpublished.last_deploy = None;
+    assert!(turn_text(&unpublished, "x", Guidance::Local, false, &iq::Prepared::default(), &mcp::Prepared::default()).starts_with(LOCAL_UNPUBLISHED_NOTE));
+    assert!(turn_text(&unpublished, "x", Guidance::Local, true, &iq::Prepared::default(), &mcp::Prepared::default()).starts_with(LOCAL_NOTE));
+    assert!(LOCAL_NOTE.contains("runs on this computer") && LOCAL_NOTE.contains("Publish after each chat turn is off"));
+    assert!(LOCAL_UNPUBLISHED_NOTE.contains("hasn't been published yet") && !LOCAL_UNPUBLISHED_NOTE.contains("when this turn ends"));
+    assert!(FALLBACK_NOTE.contains("published backend") && FALLBACK_NOTE.contains("whether it needs a publish first"));
+    for note in [LOCAL_NOTE, LOCAL_AUTO_PUBLISH_NOTE, LOCAL_UNPUBLISHED_NOTE, FALLBACK_NOTE, FALLBACK_AUTO_PUBLISH_NOTE] {
+      assert!(note.starts_with("[Fabricator: ") && note.ends_with(']'), "{note}");
+      // Publishing is what the UI calls it: no note talks about deploying.
+      assert!(!note.to_lowercase().contains("deploy"), "{note}");
+    }
+  }
+
+  #[test]
+  fn a_message_names_the_iq_servers_it_can_research_with() {
+    let project: StudioProject = serde_json::from_value(json!({
+      "id": "p", "name": "App", "path": "C:\\apps\\app", "addedAt": "2026-01-01T00:00:00.000Z"
+    }))
+    .unwrap();
+    let work = iq::Prepared { ready: IqConfig { fabric: false, work: true }, unavailable: vec![] };
+    let note = work.note().unwrap();
+    assert_eq!(
+      turn_text(&project, "Who owns billing?", Guidance::Local, true, &work, &mcp::Prepared::default()),
+      format!("{LOCAL_NOTE}\n\n{note}\n\nWho owns billing?")
+    );
+    // The user's MCP servers come after them.
+    let chart = mcp::Prepared {
+      ready: vec![mcp::connect::Ready { id: "chart".into(), name: "Chart".into(), read_only: false }],
+      unavailable: vec![],
+    };
+    let chart_note = chart.note().unwrap();
+    assert_eq!(
+      turn_text(&project, "Chart sales", Guidance::Local, true, &work, &chart),
+      format!("{LOCAL_NOTE}\n\n{note}\n\n{chart_note}\n\nChart sales")
+    );
+    assert_eq!(
+      turn_text(&project, "Chart sales", Guidance::Local, true, &iq::Prepared::default(), &chart),
+      format!("{LOCAL_NOTE}\n\n{chart_note}\n\nChart sales")
+    );
+  }
+
+  #[test]
+  fn a_tool_of_an_mcp_server_the_user_added_goes_by_its_own_name_and_the_servers() {
+    let mut ctx = TurnCtx::new(false);
+    ctx.mcp_servers = vec![("chart".into(), "Chart".into()), ("chart-2".into(), "Charts".into())];
+    let events = collect(
+      &[
+        (
+          "tool.execution_start",
+          json!({"toolCallId":"t1","toolName":"chart-generate_bar_chart","mcpServerName":"chart","mcpToolName":"generate_bar_chart","arguments":{"title":"Sales"}}),
+        ),
+        // A runtime that doesn't name the server: by the tool's name, the longest id first.
+        ("tool.execution_start", json!({"toolCallId":"t2","toolName":"chart-2-generate_pie_chart","arguments":{}})),
+        (
+          "tool.execution_start",
+          json!({"toolCallId":"t3","toolName":"workiq-ask","mcpServerName":"workiq","mcpToolName":"ask","arguments":{"question":"Who owns billing?"}}),
+        ),
+      ],
+      &mut ctx,
+    );
+    let tools: Vec<(String, Option<String>)> = events
+      .into_iter()
+      .filter_map(|e| match e {
+        ChatEvent::ToolStart { tool } => Some((tool.title, tool.server)),
+        _ => None,
+      })
+      .collect();
+    assert_eq!(
+      tools,
+      [
+        ("generate_bar_chart".to_string(), Some("Chart".to_string())),
+        ("generate_pie_chart".to_string(), Some("Charts".to_string())),
+        ("Who owns billing?".to_string(), None),
+      ]
+    );
   }
 
   #[test]
@@ -1928,5 +2370,76 @@ mod tests {
     assert_eq!(sanitize_export_name("  "), "plan");
     assert_eq!(sanitize_export_name("💥💥"), "plan");
     assert_eq!(sanitize_export_name("normal-name_1"), "normal-name_1");
+  }
+
+  #[test]
+  fn dropped_paths_say_which_are_folders_and_skip_what_is_gone() {
+    let dir = std::env::temp_dir().join(format!("fabricator-drop-test-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(dir.join("Design docs")).unwrap();
+    std::fs::write(dir.join("brief.md"), "# Brief").unwrap();
+    let at = |name: &str| dir.join(name).to_string_lossy().to_string();
+    let paths = vec![at("Design docs"), at("brief.md"), at("missing.md")];
+    assert_eq!(
+      inspect_paths(&paths),
+      vec![ChatPathInfo { path: at("Design docs"), dir: true }, ChatPathInfo { path: at("brief.md"), dir: false }]
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+  }
+
+  fn server(id: &str) -> McpServerEntry {
+    McpServerEntry { id: id.into(), name: id.into(), ..Default::default() }
+  }
+
+  #[test]
+  fn chat_defaults_are_saved_as_a_chat_keeps_them_with_each_plugin_once() {
+    let plugins = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+    let saved = chat_defaults(
+      ChatDefaults {
+        model: Some(" claude-opus-5.5 ".into()),
+        effort: Some("high".into()),
+        auto_tier: Some("efficiency".into()),
+        context_tier: Some("long_context".into()),
+        plugins: plugins(&["mcp:chart", "fabric-iq", " fabric-iq ", "work-iq", "mcp:gone", "mcp:", "a-later-plugin"]),
+      },
+      &[server("chart")],
+    );
+    assert_eq!(
+      saved,
+      ChatDefaults {
+        model: Some("claude-opus-5.5".into()),
+        effort: Some("high".into()),
+        auto_tier: None,
+        context_tier: Some("long_context".into()),
+        plugins: plugins(&["mcp:chart", "fabric-iq", "work-iq"]),
+      }
+    );
+    // On Auto, Copilot decides the effort; what Auto optimizes for stays.
+    let auto = chat_defaults(
+      ChatDefaults { model: Some("auto".into()), effort: Some("high".into()), auto_tier: Some("efficiency".into()), ..Default::default() },
+      &[],
+    );
+    assert_eq!((auto.model, auto.effort, auto.auto_tier.as_deref()), (None, None, Some("efficiency")));
+  }
+
+  #[test]
+  fn a_new_project_starts_with_the_chat_defaults_chat_offers_it() {
+    let settings = |work_iq: bool, mcp_servers: bool| -> AppSettings {
+      let mut settings: AppSettings = serde_json::from_value(json!({
+        "theme": "dark",
+        "experiments": { "workIq": work_iq, "mcpServers": mcp_servers },
+        "chatDefaults": { "model": "gpt-6-sol", "effort": "xhigh", "plugins": ["work-iq", "fabric-iq", "mcp:chart", "mcp:gone"] }
+      }))
+      .unwrap();
+      settings.mcp_servers = vec![server("chart")];
+      settings
+    };
+    let (chat, plugins) = new_project_chat(&settings(true, true));
+    assert_eq!((chat.model.as_deref(), chat.effort.as_deref()), (Some("gpt-6-sol"), Some("xhigh")));
+    assert_eq!(plugins, ["work-iq", "fabric-iq", "mcp:chart"]);
+    // Work IQ and MCP servers only while their experiments are on.
+    assert_eq!(new_project_chat(&settings(false, false)).1, ["fabric-iq"]);
+    // Without chat defaults, as before: Auto, with every plugin off.
+    let (chat, plugins) = new_project_chat(&serde_json::from_value(json!({ "theme": "dark" })).unwrap());
+    assert_eq!((chat, plugins), (ModelChoice::default(), Vec::<String>::new()));
   }
 }

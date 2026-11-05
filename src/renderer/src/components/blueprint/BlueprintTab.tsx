@@ -21,6 +21,7 @@ import ModelView from '../ModelView'
 import SemanticModelView from '../SemanticModelView'
 import { Codicon } from '../icons'
 import ArchitectureView from './ArchitectureView'
+import DataView from './DataView'
 import { BlueprintHeadSlot } from './ViewHead'
 import './blueprint.css'
 
@@ -30,6 +31,8 @@ interface Props {
   refreshKey: number
   onOpenFile: (path: string) => void
   onSendToChat: (display: string, prompt: string, stage?: boolean) => void
+  /** Open Add Fabric data in the chat: what's picked waits in the composer. */
+  onConnectData?: () => void
   onSignedIn?: () => Promise<void> | void
   /** The Fabric account Fabricator deploys with: whose credentials a personal app uses. */
   fabricUser?: string
@@ -39,7 +42,8 @@ interface Props {
   onOpenSecrets?: () => void
 }
 
-export type BlueprintView = 'architecture' | 'data' | 'fabric'
+/** `data` is the Data model view; `local-data` the Data explorer, which shows the local data. */
+export type BlueprintView = 'architecture' | 'data' | 'local-data' | 'fabric'
 
 const VIEW_PREF_PREFIX = 'rayfin.model.view.'
 /** Enough for any real functions folder; a runaway tree doesn't stall the tab. */
@@ -50,9 +54,9 @@ const MAX_CONNECTOR_FILES = 150
 function readViewPref(projectId: string): BlueprintView | null {
   try {
     const v = localStorage.getItem(VIEW_PREF_PREFIX + projectId)
-    // The Fabric data view was called Semantic model before it drew SQL sources too.
+    // The Fabric connections view was called Semantic model before it drew SQL sources too.
     if (v === 'semantic') return 'fabric'
-    return v === 'architecture' || v === 'data' || v === 'fabric' ? v : null
+    return v === 'architecture' || v === 'data' || v === 'local-data' || v === 'fabric' ? v : null
   } catch {
     return null
   }
@@ -187,16 +191,18 @@ async function loadBlueprint(projectId: string, projectName: string): Promise<Lo
 }
 
 /**
- * The Blueprint tab: how the app is put together. Three views share one header:
+ * The Blueprint tab: how the app is put together. Four views share one header:
  *
  *  - **Architecture**: the app's parts, what it connects to, and which identity
  *    each connection signs in as (each person, or the app, and whose credentials);
  *  - **Data model**: the entity diagram of the app's data model (`rayfin/data`,
  *    or the data package rayfin.yml names);
- *  - **Fabric data**: diagrams of the Fabric data it connects to (shown only
- *    when it connects to some): semantic models, read live from `fabric.yaml` or
- *    a connector, and the tables of its SQL database, warehouse and lakehouse
- *    connectors, read from the project.
+ *  - **Fabric connections**: diagrams of the Fabric data it connects to (shown
+ *    only when it connects to some): semantic models, read live from
+ *    `fabric.yaml` or a connector, and the tables of its SQL database,
+ *    warehouse and lakehouse connectors, read from the project;
+ *  - **Data explorer**: the rows, stored files and local users the app's local
+ *    backend keeps on this computer, with clearing and deleting them.
  *
  * The chosen view is remembered per project.
  */
@@ -205,6 +211,7 @@ export default function BlueprintTab({
   refreshKey,
   onOpenFile,
   onSendToChat,
+  onConnectData,
   onSignedIn,
   fabricUser,
   teamManifest,
@@ -261,7 +268,7 @@ export default function BlueprintTab({
   const semanticModels = useMemo(() => arch?.semanticModels ?? [], [arch])
   const sqlSources = useMemo(() => loaded?.sqlSources ?? [], [loaded])
   const fabricSources = semanticModels.length + sqlSources.length
-  // A remembered Fabric data view falls back when the app no longer connects to any.
+  // A remembered Fabric connections view falls back when the app no longer connects to any.
   const active: BlueprintView = view === 'fabric' && !fabricSources ? 'architecture' : view
 
   const owner = fabricUser || activeAccount
@@ -298,16 +305,27 @@ export default function BlueprintTab({
       ? [
           {
             id: 'fabric' as const,
-            label: 'Fabric data',
+            label: 'Fabric connections',
             icon: 'plug',
             count: fabricSources > 1 ? fabricSources : undefined
           }
         ]
-      : [])
+      : []),
+    { id: 'local-data', label: 'Data explorer', icon: 'table' }
   ]
 
   let body: JSX.Element
-  if (!loaded) {
+  if (active === 'local-data') {
+    // Read from the local backend, so it doesn't wait for the project's files.
+    body = (
+      <DataView
+        project={project}
+        refreshKey={refreshKey}
+        dataModel={loaded?.dataModel}
+        onSendToChat={onSendToChat}
+      />
+    )
+  } else if (!loaded) {
     body = <div className="model-empty">Reading your app…</div>
   } else if (active === 'data') {
     body = (
@@ -352,6 +370,7 @@ export default function BlueprintTab({
         workspaceName={workspaceName}
         onOpenFile={onOpenFile}
         onSendToChat={onSendToChat}
+        onConnectData={onConnectData}
         onOpenEntity={openEntity}
         onOpenFabricData={openFabricData}
         onOpenSecrets={onOpenSecrets}

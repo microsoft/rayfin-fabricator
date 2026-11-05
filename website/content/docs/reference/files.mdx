@@ -1,6 +1,6 @@
 ---
 title: "Files and folders"
-description: "Where Fabricator keeps your projects, app data, chat history, Advisor reports, logs and caches on Windows and macOS."
+description: "Where Fabricator keeps your projects, your apps' local data, app data, chat history, Advisor reports, Goals results, logs and caches on Windows and macOS."
 ---
 
 Fabricator keeps app state separate from your Rayfin project files. Project folders are the code you build. App data is Fabricator's local state, logs, cache, and saved UI data.
@@ -18,14 +18,17 @@ Fabricator creates this folder when it needs to save app-owned files.
 
 | Path | What it contains | Safe to delete? |
 | --- | --- | --- |
-| `studio.json` | Settings, the workspace folder path, recent projects, active project, and team workspace list. | Yes, but Fabricator forgets settings and project lists. It does not delete the project folders. |
+| `studio.json` | Settings, the workspace folder path, recent projects with when you last opened and whether you pinned each, the active project, and team workspace list. With the **MCP servers** experiment, also the MCP servers you added: each one's name, command or URL, and the names of its environment variables or headers. | Yes, but Fabricator forgets settings and project lists. It does not delete the project folders. |
 | `chats/` | Saved chat history, one JSON file per project. | Yes, if you no longer need chat history. |
 | `advisor/` | Saved Advisor reports and Advisor UI state for projects. | Yes, if you are comfortable losing saved findings, dismissals, and baselines. |
+| `goals/` | The last Goals results, one JSON file per project. The goals themselves are in each app's `GOALS.md`. | Yes, but the checks then show as not run until you run them again. |
 | `suggestions/` | Cached starter suggestion sets for projects. | Yes. Fabricator can recreate suggestions. |
 | `logs/` | Diagnostics JSONL files, exported diagnostics bundles, and crash or hang logs. | Yes, if you no longer need them for bug reports. |
+| `logs/local-backend/` | Each project's recent local backend output, in files named for the project's ID, up to about 2 MB per project. | Yes. Fabricator starts new files as your apps run. |
+| `logs/goals/` | The output of the copies that Goals runs check, in files named for the project's ID, up to about 2 MB per project. | Yes. Fabricator starts new files as checks run. |
 | `fabric-accounts.json`, `fabric-accounts/` | The Fabric accounts you added after the first, each in its own Rayfin CLI config folder, and which one is in use. | Only to sign out of those accounts. Use **Accounts** instead; see [Manage your accounts](/docs/start/accounts). |
 
-Diagnostics files older than the retention window are pruned at startup.
+Diagnostics files older than the retention window are pruned at startup. An exported diagnostics bundle includes the last lines of each project's local backend output, when there is any, with secrets, email addresses and your home folder masked.
 
 ## Workspace folder
 
@@ -35,6 +38,32 @@ Change it from **Settings → Workspace folder → Change…**. Changing the wor
 
 Your workspace folder contains the actual app source code, git repository, Rayfin files, package files, and any app assets. Do not delete a project folder unless you mean to delete that app's local working copy.
 
+## Your app's local data
+
+Each app other than a team app runs on this computer with its own backend while you build, and keeps its state in a `.rayfin-local` folder in its project folder:
+
+- The app's local database: its data, its local users and their sessions.
+- Files the app stored.
+- The keys that sign the app's local sign-ins and stored-file links.
+- The values of its secrets on this computer.
+
+The folder has its own `.gitignore`, so git ignores it: it isn't in History, and it doesn't go to GitHub with the app. Copilot's chat can't read or change it. Its data starts empty unless you load the project's seed data, and stays on this computer. Nothing is copied from your published app, and publishing doesn't copy it to Fabric.
+
+A project can bring seed data for its local data in its `rayfin/seed` folder. Unlike `.rayfin-local`, that folder is part of the project's code: git tracks it, and it goes to GitHub with the app. See [Start with seed data](/docs/build/local-development#start-with-seed-data).
+
+To see or clear the data, use Blueprint's **Data explorer**; see [See your app's local data](/docs/build/data-model#see-your-apps-local-data). Moving a project folder to the trash takes its local data with it. Team apps run on their Fabric deployment, so their data lives in Fabric instead.
+
+## Installed apps
+
+Apps you install from `.rayfin` files live in a folder that stays on this computer, one folder per app:
+
+| OS | Installed apps folder |
+| --- | --- |
+| Windows | `%LOCALAPPDATA%\com.rayfin.fabricator\apps` |
+| macOS | `~/Library/Application Support/com.rayfin.fabricator/apps` |
+
+Each app's folder holds its code, its installed packages and its build, and its data in a `.rayfin-local` folder, as a project's does. Updating the app keeps its data. Removing the app from **Installed apps** on **Your projects** deletes its folder. The logs folder keeps each installed app's output in an `apps` folder. See [Share an app as a file](/docs/ship/app-files).
+
 ## Report migration material
 
 A project you created with **Migrate a Power BI report** keeps what Copilot works from in `.fabricator/migration/` in the project folder: the report's definition, its semantic model's tables and measures, and an image and the text of each page. Fabricator keeps the folder out of git, because the page images and text show real data. The app doesn't use it, so you can delete it once every page is migrated. See [Migrate a Power BI report](/docs/build/migrate-power-bi#where-the-reports-material-lives).
@@ -43,9 +72,57 @@ A project you created with **Migrate a Power BI report** keeps what Copilot work
 
 Fabricator stores temporary screenshot attachments under the operating system temp folder in a `rayfin-fabricator-shots` directory. It deletes the screenshot files it owns after they are no longer needed.
 
+## Files being checked for security risks
+
+While it checks a project or app file for security risks, Fabricator unpacks it into a folder of its own in a cache folder that stays on this computer:
+
+| OS | Cache folder |
+| --- | --- |
+| Windows | `%LOCALAPPDATA%\com.rayfin.fabricator\checks` |
+| macOS | `~/Library/Caches/com.rayfin.fabricator/checks` |
+
+It deletes each folder when its check ends, and anything left there the next time it starts. See [Check a project or app for security risks](/docs/build/security-check).
+
+## Copies of apps being checked against their goals
+
+When you run an app's Goals checks, Fabricator copies the app into a folder of its own in a cache folder that stays on this computer, and runs the copy there:
+
+| OS | Cache folder |
+| --- | --- |
+| Windows | `%LOCALAPPDATA%\com.rayfin.fabricator\goals` |
+| macOS | `~/Library/Caches/com.rayfin.fabricator/goals` |
+
+The copy holds the app's code and the local values of its secrets, but not its git history, its build or its local data. See [What a Goals run can do](/docs/reference/how-it-works#what-a-goals-run-can-do). Fabricator deletes each copy when its run ends, and anything left there the next time it starts. See [Check your app against its goals](/docs/ship/goals).
+
+## Packages for new projects
+
+Fabricator keeps what it needs to create projects faster in a cache folder that stays on this computer:
+
+| OS | Cache folder |
+| --- | --- |
+| Windows | `%LOCALAPPDATA%\com.rayfin.fabricator\new-projects` |
+| macOS | `~/Library/Caches/com.rayfin.fabricator/new-projects` |
+
+It holds the package versions recorded for the last four combinations of Rayfin release and template you created projects with, a few hundred kilobytes each, and the packages installed ahead of time for your next new project, about 500 MB. Recorded versions are used for a week. The first time Fabricator starts after that, it deletes them, with any packages installed ahead of time from them. Those packages move into the new project's folder, so they're used only when that folder is on the same drive as the cache folder. Otherwise, the new project installs the recorded versions.
+
+The folder is safe to delete. The next project you create then installs its packages from npm, which takes longer, and Fabricator fills the folder again. See [Create a new project](/docs/build/projects#create-a-new-project).
+
+## Pictures of your apps
+
+The pictures **Your projects** and the app gallery show, which Fabricator draws from each app's preview, are in a cache folder that stays on this computer, one small WebP file per project:
+
+| OS | Cache folder |
+| --- | --- |
+| Windows | `%LOCALAPPDATA%\com.rayfin.fabricator\thumbnails` |
+| macOS | `~/Library/Caches/com.rayfin.fabricator/thumbnails` |
+
+Fabricator deletes a project's picture when you remove the project from **Your projects**. The folder is safe to delete: projects show their letters until Fabricator draws their pictures again. See [Find your way around recent projects](/docs/build/projects#find-your-way-around-recent-projects).
+
 ## Credentials
 
-Fabricator does not store Copilot, Azure, or Rayfin credentials in `studio.json`. Those credentials are owned by the tools and services that sign you in, such as the bundled Copilot engine, Azure CLI, GitHub CLI, Rayfin CLI, and platform credential stores.
+Fabricator does not store Copilot, Azure, or Rayfin credentials in `studio.json`. Those credentials are owned by the tools and services that sign you in, such as the bundled Copilot engine, Azure CLI, GitHub CLI, Rayfin CLI, and platform credential stores. The local backend that runs your apps keeps the tokens it gets from them in memory only.
+
+The keys you add for your own model providers, and the values of the environment variables and headers of the MCP servers you add, are in Windows Credential Manager or the macOS Keychain, not in `studio.json`.
 
 ## What to keep for bug reports
 

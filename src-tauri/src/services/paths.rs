@@ -11,6 +11,10 @@ use std::path::PathBuf;
 /// the packaged `productName`; "rayfin-desktop" is the dev-mode app name.
 const DATA_DIR_CANDIDATES: &[&str] = &["Rayfin Fabricator", "rayfin-desktop"];
 
+/// The app's Tauri `identifier`, which names its folders on this computer only,
+/// such as the web view's data.
+const IDENTIFIER: &str = "com.rayfin.fabricator";
+
 /// Roaming app-data base (`%APPDATA%` on Windows, XDG/Library elsewhere).
 fn data_base() -> PathBuf {
   dirs::data_dir().unwrap_or_else(|| home_dir().join("AppData").join("Roaming"))
@@ -55,6 +59,19 @@ fn validated_dev_data_dir(value: &std::ffi::OsStr) -> Result<PathBuf, &'static s
     );
   }
   Ok(path)
+}
+
+/// The per-user cache directory, for large files Fabricator can make again. It
+/// stays on this computer: `%LOCALAPPDATA%\com.rayfin.fabricator` on Windows
+/// (not the roaming app data, and not `%LOCALAPPDATA%\Rayfin Fabricator`, where
+/// the app is installed) and `~/Library/Caches/com.rayfin.fabricator` on macOS.
+/// A debug build with `FABRICATOR_DEV_DATA_DIR` keeps it in that folder.
+pub fn cache_dir() -> PathBuf {
+  #[cfg(debug_assertions)]
+  if std::env::var_os("FABRICATOR_DEV_DATA_DIR").is_some() {
+    return data_dir().join("cache");
+  }
+  dirs::cache_dir().unwrap_or_else(temp_dir).join(IDENTIFIER)
 }
 
 /// Ensure the data directory exists and return it.
@@ -118,6 +135,30 @@ pub fn advisor_state_file(project_id: &str) -> PathBuf {
   advisor_dir().join(format!("{}.state.json", safe_segment(project_id)))
 }
 
+/// Directory holding each project's last Goals results. On this computer, never
+/// in the project: the goals themselves are the project's `GOALS.md`.
+pub fn goals_dir() -> PathBuf {
+  let d = data_dir().join("goals");
+  let _ = std::fs::create_dir_all(&d);
+  d
+}
+
+/// The saved Goals results for one project, by a safe single path segment.
+pub fn goals_file(project_id: &str) -> PathBuf {
+  goals_dir().join(format!("{}.json", safe_segment(project_id)))
+}
+
+/// Where a Goals run copies the app to check it on fresh data, one folder per
+/// run, removed when the run ends. On this computer only, beside the other caches.
+pub fn goals_runs_dir() -> PathBuf {
+  cache_dir().join("goals")
+}
+
+/// `id` as a safe single path segment.
+pub fn safe_name(id: &str) -> String {
+  safe_segment(id)
+}
+
 fn safe_segment(id: &str) -> String {
   id.chars()
     .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
@@ -146,6 +187,26 @@ pub fn store_file() -> PathBuf {
   data_dir().join("studio.json")
 }
 
+/// Where apps installed from `.rayfin` files live, with their packages and
+/// data: on this computer only (`%LOCALAPPDATA%\com.rayfin.fabricator\apps`,
+/// `~/Library/Application Support/com.rayfin.fabricator/apps`), never in the
+/// roaming app data, which would carry their packages from computer to
+/// computer. A debug build with `FABRICATOR_DEV_DATA_DIR` keeps them there.
+pub fn apps_dir() -> PathBuf {
+  #[cfg(debug_assertions)]
+  if std::env::var_os("FABRICATOR_DEV_DATA_DIR").is_some() {
+    return data_dir().join("apps");
+  }
+  dirs::data_local_dir().unwrap_or_else(data_base).join(IDENTIFIER).join("apps")
+}
+
+/// Where a project or app file is unpacked while it's checked for security
+/// risks before it's imported or installed, one folder per check, removed when
+/// the check ends. On this computer only, beside the other caches.
+pub fn package_checks_dir() -> PathBuf {
+  cache_dir().join("checks")
+}
+
 /// Storage left behind by the retired Design Studio experiment (drafts,
 /// receipts, imported assets). Removed best-effort at startup.
 pub fn retired_design_studio_dir() -> PathBuf {
@@ -162,6 +223,19 @@ pub fn retired_npm_cache_dir() -> PathBuf {
 /// Scratch directory for preview region-screenshots (deferred feature).
 pub fn shots_dir() -> PathBuf {
   temp_dir().join("rayfin-fabricator-shots")
+}
+
+/// Where project thumbnails live: one small image per project, drawn from its
+/// preview. On this computer only, beside the other caches: Fabricator draws
+/// them again.
+pub fn thumbnails_dir() -> PathBuf {
+  cache_dir().join("thumbnails")
+}
+
+/// One project's thumbnail. The id is sanitized so it is always a safe single
+/// path segment.
+pub fn thumbnail_file(project_id: &str) -> PathBuf {
+  thumbnails_dir().join(format!("{}.webp", safe_segment(project_id)))
 }
 
 #[cfg(test)]

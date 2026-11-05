@@ -839,7 +839,7 @@ export default function SemanticModelView({
   const sourceBar =
     sources.length > 1 ? (
       <div className="semantic-sources">
-        <div className="seg semantic-seg" role="group" aria-label="Fabric data">
+        <div className="seg semantic-seg" role="group" aria-label="Fabric connections">
           {sources.map((s) => (
             <button
               key={s.key}
@@ -862,7 +862,8 @@ export default function SemanticModelView({
     </div>
   )
 
-  if (!selected) return frame(<div className="semantic-empty">There’s no Fabric data to draw.</div>)
+  if (!selected)
+    return frame(<div className="semantic-empty">There are no Fabric connections to draw.</div>)
 
   if (sqlSource && !sqlSource.tables.length) {
     const discovered = shortDate(sqlSource.discoveredAt)
@@ -924,8 +925,8 @@ export default function SemanticModelView({
       <div className="semantic-empty semantic-empty--cta">
         <div className="semantic-empty-title">Sign in to Azure to view the semantic model</div>
         <p className="semantic-empty-sub">
-          The semantic model’s schema is read live from Fabric using your Azure CLI session. Sign
-          in with <code>az login</code> to continue.
+          Fabricator reads the model’s tables, measures and relationships from Fabric with your
+          Azure sign-in.
         </p>
         <button
           className="btn btn--primary"
@@ -1034,7 +1035,7 @@ export default function SemanticModelView({
   return (
     <div className="semantic-view">
       <ViewHead
-        title="Fabric data"
+        title="Fabric connections"
         subtitle={
           <>
             {sources.length === 1 && `${selected.label} · `}

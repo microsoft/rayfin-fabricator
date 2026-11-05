@@ -73,20 +73,27 @@ pub fn looks_binary(buf: &[u8]) -> bool {
   buf.iter().take(8192).any(|&b| b == 0)
 }
 
-/// Annotate a project with whether its on-disk folder is still a Rayfin project.
-pub fn with_missing(mut project: StudioProject) -> StudioProject {
+/// Annotate a project with what its folder says now: whether it's still a Rayfin
+/// project (`missing`), whether its published app works only inside the
+/// Fabric portal shell (`needs_fabric_portal`), the Rayfin version it has
+/// installed (`rayfin_version`), and when its thumbnail was saved (`thumbnail_at`).
+pub fn annotate_project(mut project: StudioProject) -> StudioProject {
   project.missing = Some(!is_rayfin_project(&project.path));
+  project.needs_fabric_portal =
+    Some(crate::commands::fabric::needs_fabric_portal(Path::new(&project.path)));
+  project.rayfin_version = crate::commands::rayfin_version::local_version(&project.path);
+  project.thumbnail_at = crate::services::thumbnails::saved_at(&project.id);
   project
 }
 
-/// Annotate every project in a state snapshot with its `missing` flag. While the
+/// Annotate every project in a state snapshot (see [`annotate_project`]). While the
 /// Team workspaces experiment is off, team projects and workspaces stay stored
 /// but are left out of the snapshot.
 pub fn annotate_state(mut state: ProjectsState) -> ProjectsState {
   if !crate::services::store::team_workspaces_enabled() {
     hide_team(&mut state);
   }
-  state.projects = state.projects.into_iter().map(with_missing).collect();
+  state.projects = state.projects.into_iter().map(annotate_project).collect();
   state
 }
 

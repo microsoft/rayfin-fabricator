@@ -6,7 +6,8 @@ import type {
   ChatAdvisorSummary,
   ChatEventEnvelope,
   ChatPlanArtifact,
-  ChatPlanQuestion
+  ChatPlanQuestion,
+  FileDropEvent
 } from '@shared/ipc'
 import { makeProject } from '../../test/harness'
 import { deferred } from '../../test/deferred'
@@ -18,10 +19,16 @@ import ChatPanel, { reduceChatMessage, type OutboundPrompt, type UIChatMessage }
 import { tryAgainPrompt } from './chat/prompts'
 import { invalidateCopilotModels } from '../copilotModels'
 import { setPendingData } from '../fabricData'
+import { setPendingFiles } from './chat/fileRefs'
 
 vi.mock('../monaco', () => ({}))
 vi.mock('@monaco-editor/react', () => ({
   default: () => <textarea data-testid="plan-editor" />
+}))
+// jsdom has no canvas to re-encode an attached image with.
+vi.mock('./chat/images', async (original) => ({
+  ...(await original<typeof import('./chat/images')>()),
+  toPngAndThumb: async (src: string) => ({ png: src, thumb: `${src}#thumb` })
 }))
 
 /**
@@ -1008,6 +1015,34 @@ describe('ChatPanel submit-pause while deploying', () => {
   })
 })
 
+describe('ChatPanel before the first publish', () => {
+  it('builds an app that has never been published', async () => {
+    const onTurnStart = vi.fn()
+    await act(async () => {
+      render(
+        <ChatPanel
+          project={makeProject('p1', { lastDeploy: undefined })}
+          messages={[]}
+          onChange={() => {}}
+          draft=""
+          onTurnStart={onTurnStart}
+        />
+      )
+    })
+    const ta = screen.getByPlaceholderText(PLACEHOLDER) as HTMLTextAreaElement
+    await act(async () => {
+      fireEvent.change(ta, { target: { value: 'Add a task list' } })
+    })
+    await act(async () => {
+      fireEvent.keyDown(ta, { key: 'Enter' })
+    })
+    expect(onTurnStart).toHaveBeenCalledTimes(1)
+    expect(
+      (window as unknown as { api: { chat: { send: ReturnType<typeof vi.fn> } } }).api.chat.send
+    ).toHaveBeenCalled()
+  })
+})
+
 describe('ChatPanel images and the chosen model', () => {
   it('holds images back from a model on your own key that can’t read them', async () => {
     const api = (window as unknown as { api: { chat: { listModels: ReturnType<typeof vi.fn>; send: ReturnType<typeof vi.fn> } } }).api
@@ -1039,6 +1074,44 @@ describe('ChatPanel images and the chosen model', () => {
       fireEvent.keyDown(screen.getByPlaceholderText(PLACEHOLDER), { key: 'Enter' })
     })
     expect(api.chat.send).not.toHaveBeenCalled()
+  })
+})
+
+describe('ChatPanel plugins', () => {
+  it('saves a plugin for this app’s chat, and turns it back when that fails', async () => {
+    const api = (window as unknown as { api: { chat: Record<string, ReturnType<typeof vi.fn>> } })
+      .api
+    api.chat.setPlugin = vi
+      .fn()
+      .mockResolvedValueOnce(['fabric-iq'])
+      .mockRejectedValueOnce(new Error('Project not found.'))
+    const onOptionsChanged = vi.fn()
+    render(
+      <ChatPanel
+        project={makeProject('p1')}
+        messages={[]}
+        onChange={() => {}}
+        onOptionsChanged={onOptionsChanged}
+      />
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Plugins' }))
+    fireEvent.click(screen.getByRole('menuitemcheckbox', { name: /Fabric IQ/ }))
+    expect(api.chat.setPlugin).toHaveBeenLastCalledWith('p1', 'fabric-iq', true)
+    await waitFor(() => expect(onOptionsChanged).toHaveBeenCalledOnce())
+    expect(screen.getByRole('button', { name: 'Plugins: Fabric IQ' })).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('menuitemcheckbox', { name: /Fabric IQ/ }))
+    expect(api.chat.setPlugin).toHaveBeenLastCalledWith('p1', 'fabric-iq', false)
+    expect(
+      screen.getByRole('menuitemcheckbox', { name: /Fabric IQ/ }).getAttribute('aria-checked')
+    ).toBe('false')
+    await waitFor(() =>
+      expect(
+        screen.getByRole('menuitemcheckbox', { name: /Fabric IQ/ }).getAttribute('aria-checked')
+      ).toBe('true')
+    )
+    expect(onOptionsChanged).toHaveBeenCalledOnce()
   })
 })
 
@@ -1149,6 +1222,50 @@ describe('ChatPanel Fabric data', () => {
     return <ChatPanel project={makeProject('p1')} messages={messages} onChange={(update) => setMessages(update)} draft="" />
   }
 
+  /** The chat API, plus what Add Fabric data reads: two workspaces with nothing in them. */
+  function installDataApi(): ReturnType<typeof installApi> {
+    const api = installApi()
+    const all = api as unknown as Record<string, unknown> & { projects: Record<string, unknown> }
+    Object.assign(all, {
+      deploy: { list: vi.fn(async () => []) },
+      fabric: {
+        listWorkspaces: vi.fn(async () => ({
+          ok: true,
+          workspaces: [
+            { id: 'ws-fin', displayName: 'Finance', capacityKind: 'fabric', eligible: true },
+            { id: 'ws-ops', displayName: 'Ops', capacityKind: 'fabric', eligible: true }
+          ]
+        })),
+        listWorkspaceData: vi.fn(async () => ({ ok: true, items: [] })),
+        projectSemanticModels: vi.fn(async () => [])
+      }
+    })
+    all.projects.files = {
+      ...(all.projects.files as object),
+      read: vi.fn(async () => ({ error: 'not found' }))
+    }
+    return api
+  }
+
+  it('opens Add Fabric data when asked from outside the chat, and sends nothing', async () => {
+    const api = installDataApi()
+    const onOutboundConsumed = vi.fn()
+    render(
+      <ChatPanel
+        project={makeProject('p1')}
+        messages={[]}
+        onChange={vi.fn()}
+        draft=""
+        outbound={{ id: 'connect-1', display: '', prompt: '', connectData: true }}
+        onOutboundConsumed={onOutboundConsumed}
+      />
+    )
+    expect(await screen.findByRole('dialog', { name: 'Add Fabric data' })).toBeTruthy()
+    expect(onOutboundConsumed).toHaveBeenCalledOnce()
+    expect(api.chat.send).not.toHaveBeenCalled()
+    expect((screen.getByPlaceholderText(PLACEHOLDER) as HTMLTextAreaElement).value).toBe('')
+  })
+
   it('shows picked data as chips and tells only Copilot how to connect it', async () => {
     const api = installApi()
     setPendingData('p1', [
@@ -1212,22 +1329,7 @@ describe('ChatPanel Fabric data', () => {
   })
 
   it('reopens Add Fabric data from a chip with what is picked, and Update changes the chips', async () => {
-    const api = installApi() as unknown as Record<string, unknown> & { projects: Record<string, unknown> }
-    Object.assign(api, {
-      deploy: { list: vi.fn(async () => []) },
-      fabric: {
-        listWorkspaces: vi.fn(async () => ({
-          ok: true,
-          workspaces: [
-            { id: 'ws-fin', displayName: 'Finance', capacityKind: 'fabric', eligible: true },
-            { id: 'ws-ops', displayName: 'Ops', capacityKind: 'fabric', eligible: true }
-          ]
-        })),
-        listWorkspaceData: vi.fn(async () => ({ ok: true, items: [] })),
-        projectSemanticModels: vi.fn(async () => [])
-      }
-    })
-    api.projects.files = { ...(api.projects.files as object), read: vi.fn(async () => ({ error: 'not found' })) }
+    installDataApi()
     setPendingData('p1', [
       { workspaceId: 'ws-fin', workspaceName: 'Finance', item: { id: 'm1', name: 'Sales', type: 'SemanticModel' } },
       { workspaceId: 'ws-ops', workspaceName: 'Ops', item: { id: 'l1', name: 'orders', type: 'Lakehouse' } }
@@ -1244,6 +1346,254 @@ describe('ChatPanel Fabric data', () => {
     expect(screen.queryByRole('dialog', { name: 'Add Fabric data' })).toBeNull()
     expect(screen.queryByRole('list', { name: 'Fabric data to connect' })).toBeNull()
     expect(screen.getByPlaceholderText(PLACEHOLDER)).toBeTruthy()
+  })
+})
+
+describe('ChatPanel @ references outside the project', () => {
+  /** Two levels of folders beside the project, one of them with a space in its name. */
+  function installFolders(): ReturnType<typeof vi.fn> {
+    installApi()
+    const listDir = vi.fn(async (_id: string, dir: string) => {
+      const folders: Record<
+        string,
+        { dir: string; entries: Array<{ name: string; dir: boolean }> }
+      > = {
+        '../': {
+          dir: 'C:\\code',
+          entries: [
+            { name: '.git', dir: true },
+            { name: 'shared', dir: true },
+            { name: 'Team notes', dir: true },
+            { name: 'todo.md', dir: false }
+          ]
+        },
+        '../shared/': { dir: 'C:\\code\\shared', entries: [{ name: 'brand.css', dir: false }] },
+        '../Team notes/': {
+          dir: 'C:\\code\\Team notes',
+          entries: [{ name: 'plan.md', dir: false }]
+        }
+      }
+      return folders[dir] ?? { dir, entries: [], error: 'There’s no folder here.' }
+    })
+    ;(window.api.projects.files as unknown as Record<string, unknown>).listDir = listDir
+    return listDir
+  }
+
+  const names = async (): Promise<string[]> => {
+    const menu = await screen.findByRole('listbox', { name: 'Files and folders' })
+    return within(menu)
+      .getAllByRole('option')
+      .map((o) => o.querySelector('.mention-name')?.textContent ?? '')
+  }
+  const pick = (name: string): void => {
+    const option = screen
+      .getAllByRole('option')
+      .find((o) => o.querySelector('.mention-name')?.textContent === name)
+    fireEvent.mouseDown(option!)
+  }
+
+  it('browses into folders, and references a file or the folder itself', async () => {
+    const listDir = installFolders()
+    render(<ChatPanel project={makeProject('p1')} messages={[]} onChange={vi.fn()} draft="" />)
+    const composer = screen.getByPlaceholderText(PLACEHOLDER) as HTMLTextAreaElement
+
+    fireEvent.change(composer, { target: { value: 'match @../' } })
+    await waitFor(async () =>
+      expect(await names()).toEqual(['This folder', 'shared', 'Team notes', 'todo.md'])
+    )
+    expect(listDir).toHaveBeenLastCalledWith('p1', '../')
+    expect(screen.getByText('C:\\code')).toBeTruthy()
+
+    pick('shared')
+    expect(composer.value).toBe('match @../shared/')
+    await waitFor(async () => expect(await names()).toEqual(['This folder', 'brand.css']))
+    pick('brand.css')
+    expect(composer.value).toBe('match @../shared/brand.css ')
+    expect(screen.queryByRole('listbox')).toBeNull()
+
+    fireEvent.change(composer, { target: { value: 'match @../' } })
+    await waitFor(async () => expect(await names()).toContain('This folder'))
+    pick('This folder')
+    expect(composer.value).toBe('match @../ ')
+  })
+
+  it('quotes a path with spaces, and says when a folder can’t be listed', async () => {
+    installFolders()
+    render(<ChatPanel project={makeProject('p1')} messages={[]} onChange={vi.fn()} draft="" />)
+    const composer = screen.getByPlaceholderText(PLACEHOLDER) as HTMLTextAreaElement
+
+    fireEvent.change(composer, { target: { value: '@../Te' } })
+    await waitFor(async () => expect(await names()).toEqual(['Team notes']))
+    pick('Team notes')
+    expect(composer.value).toBe('@"../Team notes/')
+    await waitFor(async () => expect(await names()).toEqual(['This folder', 'plan.md']))
+    pick('plan.md')
+    expect(composer.value).toBe('@"../Team notes/plan.md" ')
+
+    fireEvent.change(composer, { target: { value: '@../missing/' } })
+    expect(await screen.findByText('There’s no folder here.')).toBeTruthy()
+  })
+
+  it('points to ../ when nothing in the project matches', async () => {
+    installApi()
+    render(<ChatPanel project={makeProject('p1')} messages={[]} onChange={vi.fn()} draft="" />)
+    fireEvent.change(screen.getByPlaceholderText(PLACEHOLDER), { target: { value: '@zzz' } })
+    expect(
+      await screen.findByText(
+        'To reference something outside the project, type ../ or a full path.'
+      )
+    ).toBeTruthy()
+  })
+
+  it('keeps the option the arrow keys reach in view, and leaves the list be on hover', async () => {
+    installApi()
+    const entries = Array.from({ length: 30 }, (_, i) => ({
+      name: `note-${String(i).padStart(2, '0')}.md`,
+      dir: false
+    }))
+    ;(window.api.projects.files as unknown as Record<string, unknown>).listDir = vi.fn(
+      async () => ({ dir: 'C:\\code', entries })
+    )
+    const shown: string[] = []
+    const proto = Element.prototype as unknown as { scrollIntoView?: unknown }
+    const had = proto.scrollIntoView
+    proto.scrollIntoView = function (this: Element) {
+      shown.push(this.querySelector('.mention-name')?.textContent ?? '')
+    }
+    try {
+      render(<ChatPanel project={makeProject('p1')} messages={[]} onChange={vi.fn()} draft="" />)
+      const composer = screen.getByPlaceholderText(PLACEHOLDER)
+      fireEvent.change(composer, { target: { value: '@../' } })
+      await waitFor(async () => expect(await names()).toHaveLength(31))
+
+      fireEvent.keyDown(composer, { key: 'ArrowDown' })
+      fireEvent.keyDown(composer, { key: 'ArrowDown' })
+      expect(shown).toEqual(['note-00.md', 'note-01.md'])
+      fireEvent.mouseEnter(screen.getAllByRole('option')[20])
+      expect(shown, 'hovering doesn’t scroll').toHaveLength(2)
+      fireEvent.keyDown(composer, { key: 'ArrowUp' })
+      expect(shown[shown.length - 1]).toBe('note-18.md')
+    } finally {
+      proto.scrollIntoView = had
+    }
+  })
+})
+
+describe('ChatPanel files and folders from this computer', () => {
+  /** The composer, with the window's drops and the system's file dialog faked. */
+  function installComputer(picked: string[] = []) {
+    const api = installApi() as unknown as {
+      chat: Record<string, ReturnType<typeof vi.fn>>
+      screenshot: Record<string, ReturnType<typeof vi.fn>>
+      onFileDrop?: unknown
+    }
+    let listener: ((event: FileDropEvent) => void) | undefined
+    api.onFileDrop = vi.fn((cb: (event: FileDropEvent) => void) => {
+      listener = cb
+      return () => {
+        listener = undefined
+      }
+    })
+    api.chat.pickPaths = vi.fn(async () => picked)
+    api.chat.inspectPaths = vi.fn(async (paths: string[]) =>
+      paths.map((path) => ({ path, dir: !/\.\w+$/.test(path) }))
+    )
+    api.screenshot.read = vi.fn(async () => 'data:image/png;base64,QUJD')
+    const drag = (event: FileDropEvent): void => act(() => listener?.(event))
+    return { api, drag }
+  }
+
+  /** What's under the pointer: the composer left of x = 100, the page elsewhere. */
+  function pointAtComposer(): void {
+    Object.defineProperty(document, 'elementFromPoint', {
+      configurable: true,
+      value: (x: number) => (x < 100 ? screen.getByPlaceholderText(PLACEHOLDER) : document.body)
+    })
+  }
+  afterEach(() => {
+    delete (document as unknown as { elementFromPoint?: unknown }).elementFromPoint
+    setPendingFiles('p1', [])
+  })
+
+  it('adds the files and folders dropped on the composer as chips, and attaches images', async () => {
+    const { api, drag } = installComputer()
+    const onAddAttachment = vi.fn()
+    render(
+      <ChatPanel
+        project={makeProject('p1')}
+        messages={[]}
+        onChange={vi.fn()}
+        draft="Use"
+        onAddAttachment={onAddAttachment}
+      />
+    )
+    pointAtComposer()
+    const composer = screen.getByPlaceholderText(PLACEHOLDER) as HTMLTextAreaElement
+    const paths = [
+      'C:\\Users\\me\\Design docs',
+      'C:\\Users\\me\\brief.md',
+      'C:\\Users\\me\\mockup.png'
+    ]
+
+    drag({ type: 'enter', paths, point: { x: 10, y: 10 } })
+    expect(screen.getByText('Drop to attach')).toBeTruthy()
+    drag({ type: 'over', paths: [], point: { x: 500, y: 10 } })
+    expect(screen.queryByText('Drop to attach')).toBeNull()
+    drag({ type: 'drop', paths, point: { x: 500, y: 10 } })
+    expect(api.chat.inspectPaths, 'dropped elsewhere').not.toHaveBeenCalled()
+
+    drag({ type: 'drop', paths, point: { x: 10, y: 10 } })
+    const tray = await screen.findByRole('list', { name: 'Files and folders to send' })
+    expect(
+      within(tray)
+        .getAllByRole('listitem')
+        .map((chip) => chip.title)
+    ).toEqual(['C:\\Users\\me\\Design docs', 'C:\\Users\\me\\brief.md'])
+    expect(composer.value, 'no @ references in the message').toBe('Use')
+    await waitFor(() =>
+      expect(onAddAttachment).toHaveBeenCalledWith({
+        path: 'C:/tmp/shot.png',
+        thumb: 'data:image/png;base64,QUJD#thumb'
+      })
+    )
+    expect(api.screenshot.read).toHaveBeenCalledWith('C:\\Users\\me\\mockup.png')
+    expect(screen.queryByText('Drop to attach')).toBeNull()
+  })
+
+  it('sends files and folders picked in one system dialog as chips, and gives Copilot a reference to each', async () => {
+    const { api } = installComputer(['C:\\Users\\me\\Team notes', 'C:/projects/p1/src/data'])
+    function Harness(): JSX.Element {
+      const [messages, setMessages] = useState<UIChatMessage[]>([])
+      return (
+        <ChatPanel
+          project={makeProject('p1')}
+          messages={messages}
+          onChange={(update) => setMessages(update)}
+          draft="Read these first"
+        />
+      )
+    }
+    render(<Harness />)
+    fireEvent.click(screen.getByRole('button', { name: 'Add images, files or data' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Files and folders…' }))
+    const tray = await screen.findByRole('list', { name: 'Files and folders to send' })
+    expect(api.chat.pickPaths).toHaveBeenCalledWith()
+    expect(tray.textContent).toBe('Team notesdata')
+    const composer = screen.getByPlaceholderText(/Say what to do with these/) as HTMLTextAreaElement
+    expect(composer.value).toBe('Read these first')
+
+    await act(async () => {
+      fireEvent.keyDown(composer, { key: 'Enter' })
+    })
+    await waitFor(() => expect(api.chat.send).toHaveBeenCalledOnce())
+    const [, , prompt] = api.chat.send.mock.calls[0] as unknown as [string, string, string]
+    expect(prompt).toBe('Read these first\n\n@"C:\\Users\\me\\Team notes\\" @./src/data/')
+    // The transcript shows the message and its chips, not the references.
+    const sent = await screen.findByRole('list', { name: 'Files and folders' })
+    expect(sent.textContent).toBe('Team notesdata')
+    expect(screen.getByText('Read these first')).toBeTruthy()
+    expect(screen.queryByText(/@/)).toBeNull()
+    expect(screen.queryByRole('list', { name: 'Files and folders to send' })).toBeNull()
   })
 })
 
@@ -1460,9 +1810,11 @@ describe('ChatPanel Advisor fixes', () => {
     const rows = card.querySelectorAll('.adv-fix-row')
     expect(rows).toHaveLength(2)
     expect(rows[0].textContent).toContain('Text field has no maximum length×2')
-    expect(rows[0].textContent).toContain('Data model·rayfin/data/Todo.ts:7')
+    // The place is the file's name and line; its full path is the tooltip.
+    expect(rows[0].textContent).toContain('Data model·Todo.ts:7')
+    expect(within(rows[0] as HTMLElement).getByTitle('rayfin/data/Todo.ts:7')).toBeTruthy()
     expect(within(rows[0] as HTMLElement).getByRole('img', { name: 'High severity' })).toBeTruthy()
-    expect(rows[1].textContent).toContain('Accessibility·src/App.tsx:12')
+    expect(rows[1].textContent).toContain('Accessibility·App.tsx:12')
     // The card replaces the bubble; the full prompt sits behind a disclosure.
     expect(document.querySelector('.user-bubble')).toBeNull()
     expect(card.querySelector('details pre')?.textContent).toBe(PROMPT)
@@ -1479,8 +1831,12 @@ describe('ChatPanel Advisor fixes', () => {
     const { rerender } = render(<AdvisorHarness initial={sent()} links={links} />)
     const card = screen.getByRole('group', { name: 'Advisor issues to fix (2)' })
     expect(within(card).getByText('1 of 2 fixed')).toBeTruthy()
-    expect(within(card).getByText('Fixed')).toBeTruthy()
-    expect(within(card).getByText('Still detected')).toBeTruthy()
+    // A fixed issue's severity dot turns into a check; the others say where they stand.
+    const [maxRow, labelRow] = Array.from(card.querySelectorAll<HTMLElement>('.adv-fix-row'))
+    expect(within(maxRow).getByRole('img', { name: 'Fixed' })).toBeTruthy()
+    expect(within(maxRow).queryByRole('img', { name: 'High severity' })).toBeNull()
+    expect(within(labelRow).getByText('Still detected')).toBeTruthy()
+    expect(within(labelRow).getByRole('img', { name: 'Medium severity' })).toBeTruthy()
 
     fireEvent.click(within(card).getByRole('button', { name: /Form control has no label/ }))
     expect(show).toHaveBeenCalledWith(LABEL.id)
@@ -1488,7 +1844,8 @@ describe('ChatPanel Advisor fixes', () => {
     outcomes[LABEL.id] = 'fixed'
     rerender(<AdvisorHarness initial={sent()} links={{ ...links }} />)
     expect(within(card).getByText('All 2 fixed')).toBeTruthy()
-    expect(within(card).getAllByText('Fixed')).toHaveLength(2)
+    expect(within(card).getAllByRole('img', { name: 'Fixed' })).toHaveLength(2)
+    expect(within(card).queryByText('Still detected')).toBeNull()
   })
 
   it('folds a long list behind “Show more”', async () => {

@@ -191,40 +191,110 @@ describe('SettingsModal report migration experiment', () => {
   })
 })
 
-describe('SettingsModal retired controls', () => {
-  it.each([false, true])('does not show retired controls with legacy flags set to %s', async (enabled) => {
-    installApi()
-    const legacySettings = {
-      ...settings,
-      experiments: {
-        compatibilityRendering: enabled,
-        chatModeSelector: enabled,
-        localDevPreview: enabled,
-        manualDeploy: enabled,
-        byok: enabled,
-        teamWorkspaces: true
-      }
-    }
-    await renderModal({ settings: legacySettings })
-    fireEvent.click(screen.getByRole('button', { name: /Experiments/ }))
+describe('SettingsModal Work IQ experiment', () => {
+  function checkbox(label: string): HTMLInputElement {
+    const row = screen.getByText(label).closest('label')
+    if (!row) throw new Error(`${label} label not found`)
+    return row.querySelector('input[type="checkbox"]') as HTMLInputElement
+  }
 
-    for (const label of [
-      'Compatibility rendering',
-      'Chat mode selector',
-      'Live local preview',
-      'Deploy manually',
-      'Your own API keys',
-      'Performance',
-      'Ray',
-      'Check for updates'
-    ]) {
-      expect(screen.queryByText(label)).toBeNull()
+  it('is off by default and turns on through its own flag', async () => {
+    installApi()
+    const { onChange } = await renderModal()
+    fireEvent.click(screen.getByRole('button', { name: /Experiments/ }))
+    expect(checkbox('Work IQ').checked).toBe(false)
+    fireEvent.click(checkbox('Work IQ'))
+    expect(onChange).toHaveBeenCalledWith({ experiments: { workIq: true } })
+  })
+
+  it('reflects the persisted flag', async () => {
+    installApi()
+    await renderModal({ settings: { theme: 'system', experiments: { workIq: true } } })
+    fireEvent.click(screen.getByRole('button', { name: /Experiments/ }))
+    expect(checkbox('Work IQ').checked).toBe(true)
+  })
+})
+
+describe('SettingsModal retired controls', () => {
+  it.each([false, true])(
+    'does not show retired controls with legacy flags set to %s',
+    async (enabled) => {
+      installApi()
+      const legacySettings = {
+        ...settings,
+        experiments: {
+          compatibilityRendering: enabled,
+          chatModeSelector: enabled,
+          localDevPreview: enabled,
+          manualDeploy: enabled,
+          byok: enabled,
+          localDevelopment: enabled,
+          fabricIq: enabled,
+          appGallery: enabled,
+          teamWorkspaces: true
+        }
+      }
+      await renderModal({ settings: legacySettings })
+      fireEvent.click(screen.getByRole('button', { name: /Experiments/ }))
+
+      for (const label of [
+        'Compatibility rendering',
+        'Chat mode selector',
+        'Live local preview',
+        'Deploy manually',
+        'Your own API keys',
+        'Local development',
+        'Fabric IQ',
+        'App gallery',
+        'Performance',
+        'Ray',
+        'Check for updates'
+      ]) {
+        expect(screen.queryByText(label)).toBeNull()
+      }
+      expect(screen.queryByRole('dialog', { name: 'Restart required' })).toBeNull()
+      expect(screen.getAllByRole('checkbox')).toHaveLength(7)
+      expect(screen.getByText('Team workspaces')).toBeTruthy()
+      expect(screen.getByText('Migrate Power BI reports')).toBeTruthy()
+      expect(screen.getByText('Work IQ')).toBeTruthy()
+      expect(screen.getByText('MCP servers')).toBeTruthy()
+      expect(screen.getByText('Export as an app')).toBeTruthy()
+      expect(screen.getByText('Full diagnostics')).toBeTruthy()
+      expect(screen.getByText('Goals')).toBeTruthy()
     }
-    expect(screen.queryByRole('dialog', { name: 'Restart required' })).toBeNull()
-    expect(screen.getAllByRole('checkbox')).toHaveLength(3)
-    expect(screen.getByText('Team workspaces')).toBeTruthy()
-    expect(screen.getByText('Migrate Power BI reports')).toBeTruthy()
-    expect(screen.getByText('Full diagnostics')).toBeTruthy()
+  )
+})
+
+describe('SettingsModal Export as an app experiment', () => {
+  it('is off by default and turns on through its own flag', async () => {
+    installApi()
+    const { onChange } = await renderModal()
+    fireEvent.click(screen.getByRole('button', { name: /Experiments/ }))
+    const checkbox = screen.getByRole('checkbox', { name: /Export as an app/ }) as HTMLInputElement
+    expect(checkbox.checked).toBe(false)
+    fireEvent.click(checkbox)
+    expect(onChange).toHaveBeenCalledWith({ experiments: { appExport: true } })
+  })
+
+  it('reflects the persisted flag', async () => {
+    installApi()
+    await renderModal({ settings: { theme: 'system', experiments: { appExport: true } } })
+    fireEvent.click(screen.getByRole('button', { name: /Experiments/ }))
+    expect(
+      (screen.getByRole('checkbox', { name: /Export as an app/ }) as HTMLInputElement).checked
+    ).toBe(true)
+  })
+})
+
+describe('SettingsModal Goals experiment', () => {
+  it('turns on through its own flag', async () => {
+    installApi()
+    const { onChange } = await renderModal()
+    fireEvent.click(screen.getByRole('button', { name: /Experiments/ }))
+    const checkbox = screen.getByRole('checkbox', { name: /Goals/ }) as HTMLInputElement
+    expect(checkbox.checked).toBe(false)
+    fireEvent.click(checkbox)
+    expect(onChange).toHaveBeenCalledWith({ experiments: { goals: true } })
   })
 })
 
@@ -235,6 +305,36 @@ describe('SettingsModal API keys', () => {
     await renderModal({ onManageKeys })
     fireEvent.click(screen.getByRole('button', { name: 'Manage API keys' }))
     expect(onManageKeys).toHaveBeenCalledOnce()
+  })
+})
+
+describe('SettingsModal chat defaults', () => {
+  it('opens Chat defaults', async () => {
+    installApi()
+    const onManageChatDefaults = vi.fn()
+    await renderModal({ onManageChatDefaults })
+    expect(screen.getByText('The model and plugins a new project’s chat starts with.')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Manage chat defaults' }))
+    expect(onManageChatDefaults).toHaveBeenCalledOnce()
+  })
+})
+
+describe('SettingsModal MCP servers', () => {
+  it('turns the experiment on, and offers managing servers only while it’s on', async () => {
+    installApi()
+    const onChange = vi.fn()
+    await renderModal({ onChange })
+    expect(screen.queryByRole('button', { name: 'Manage MCP servers' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: /Experiments/ }))
+    fireEvent.click(screen.getByRole('checkbox', { name: /MCP servers/ }))
+    expect(onChange).toHaveBeenLastCalledWith({ experiments: { mcpServers: true } })
+
+    cleanup()
+    installApi()
+    const onManageMcpServers = vi.fn()
+    await renderModal({ onManageMcpServers })
+    fireEvent.click(screen.getByRole('button', { name: 'Manage MCP servers' }))
+    expect(onManageMcpServers).toHaveBeenCalledOnce()
   })
 })
 

@@ -1,24 +1,26 @@
 //! Project scaffolding/registration (ported from `src/main/services/projects.ts`).
 //! Handles listing templates, creating a project via `npm create
 //! @microsoft/rayfin` (the official scaffolder, streaming live output on the
-//! `create:project` proc channel), opening an existing project, renaming, and
-//! removing.
+//! `create:project` proc channel) on the Rayfin release the local backend runs,
+//! opening an existing project, renaming, and removing.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use once_cell::sync::Lazy;
 use regex::Regex;
 use tauri::{AppHandle, Emitter};
 
-use crate::commands::util::{is_rayfin_project, normalize, same_path, with_missing};
-use crate::services::exec::{run, OnData, RunOptions, Stream};
-use crate::services::{emit, git, history, store};
+use crate::commands::util::{annotate_project, is_rayfin_project, normalize, same_path};
+use crate::services::exec::{run, OnData, RunOptions, RunResult, Stream};
+use crate::services::rayfin_sdk::{self, Pinning};
+use crate::services::{emit, git, history, store, version_history};
 use crate::state::AppState;
 use crate::types::{
-  CommunityGallery, CommunityGalleryResult, CommunityTemplate, CreateProjectInput,
-  DeleteProgressEvent, ProjectActionResult, ProjectNameCheck, ProjectsState, StudioProject,
+  CommunityGallery, CommunityGalleryResult, CommunityTemplate, CreateProjectInput, DeleteProgressEvent,
+  ProjectActionResult, ProjectLocationCheck, ProjectNameCheck, ProjectsState, StudioProject,
 };
 
 const CREATE_CHANNEL: &str = "create:project";
@@ -204,6 +206,8 @@ pub(crate) fn register_project(dir: &Path, display_name: Option<&str>) -> Studio
     .map(|s| s.trim().to_string())
     .filter(|s| !s.is_empty())
     .unwrap_or_else(|| read_project_name(&abs));
+  // Its chat starts with the chat defaults (Settings → Chat defaults).
+  let (chat, plugins) = crate::commands::chat::new_project_chat(&store::get_settings());
   let project = StudioProject {
     id: uuid::Uuid::new_v4().to_string(),
     name,
@@ -215,15 +219,20 @@ pub(crate) fn register_project(dir: &Path, display_name: Option<&str>) -> Studio
     workspace: None,
     workspace_name: None,
     deployment_names: None,
-    awaiting_first_deploy: None,
-    model: None,
-    effort: None,
-    auto_tier: None,
-    context_tier: None,
+    model: chat.model,
+    effort: chat.effort,
+    auto_tier: chat.auto_tier,
+    context_tier: chat.context_tier,
+    plugins,
     preview_mode: None,
     fabric_preview_defaulted: None,
+    needs_fabric_portal: None,
     team: None,
     missing: None,
+    rayfin_version: None,
+    last_opened_at: None,
+    pinned: false,
+    thumbnail_at: None,
   };
   store::upsert_project(project.clone());
   project
@@ -319,7 +328,7 @@ pub(crate) fn project_name_problem(name: &str) -> Option<&'static str> {
 
 /// Whether a new local project named `name` can be created under `root`: its
 /// folder (the same slug [`create_project`] uses) must not exist yet.
-pub(crate) fn check_local_name_in(root: &Path, name: &str) -> ProjectNameCheck {
+pub(crate) fn check_local_name_in(root: &Path, name: &str, place: &str) -> ProjectNameCheck {
   if let Some(problem) = project_name_problem(name) {
     return ProjectNameCheck { ok: false, message: Some(problem.into()) };
   }
@@ -330,16 +339,62 @@ pub(crate) fn check_local_name_in(root: &Path, name: &str) -> ProjectNameCheck {
   if root.join(&slug).exists() {
     return ProjectNameCheck {
       ok: false,
-      message: Some(format!("A folder named “{slug}” is already in your projects folder. Choose another name.")),
+      message: Some(format!("A folder named “{slug}” is already in {place}. Choose another name.")),
     };
   }
   ProjectNameCheck { ok: true, message: None }
 }
 
-/// [`check_local_name_in`] for the workspace root new projects are saved in.
-pub fn check_local_name(name: &str) -> ProjectNameCheck {
-  let root = store::get_state().workspace_root;
-  check_local_name_in(Path::new(&root), name)
+/// [`check_local_name_in`] for where a new project is saved: the folder the
+/// user chose, or the projects folder.
+pub fn check_local_name(name: &str, location: Option<&str>) -> ProjectNameCheck {
+  match chosen_location(location) {
+    Some(folder) => check_local_name_in(&folder, name, "that folder"),
+    None => check_local_name_in(Path::new(&store::get_state().workspace_root), name, "your projects folder"),
+  }
+}
+
+/// The folder the user chose for a new project, when it isn't the projects folder.
+fn chosen_location(location: Option<&str>) -> Option<PathBuf> {
+  let projects_folder = store::get_state().workspace_root;
+  location
+    .map(str::trim)
+    .filter(|l| !l.is_empty())
+    .map(|l| normalize(Path::new(l)))
+    .filter(|l| !same_path(&l.to_string_lossy(), &projects_folder))
+}
+
+/// Whether `path` can take a new project: a folder that exists, given in full.
+/// Blank is the projects folder, which is always fine.
+pub fn check_location(path: &str) -> ProjectLocationCheck {
+  let path = path.trim();
+  let problem = |message: &str| ProjectLocationCheck { ok: false, missing: false, message: Some(message.into()) };
+  if path.is_empty() {
+    return ProjectLocationCheck { ok: true, ..Default::default() };
+  }
+  let folder = Path::new(path);
+  if !folder.is_absolute() {
+    return problem("Enter the folder’s full path, or choose it with Browse.");
+  }
+  if folder.is_dir() {
+    return ProjectLocationCheck { ok: true, ..Default::default() };
+  }
+  if folder.exists() {
+    return problem("That’s a file, not a folder.");
+  }
+  ProjectLocationCheck { ok: false, missing: true, message: Some("This folder doesn’t exist yet.".into()) }
+}
+
+/// Create a missing folder for a new project to go in.
+pub fn create_location(path: &str) -> ProjectLocationCheck {
+  let check = check_location(path);
+  if !check.missing {
+    return check;
+  }
+  match std::fs::create_dir_all(path.trim()) {
+    Ok(()) => check_location(path),
+    Err(e) => ProjectLocationCheck { message: Some(format!("Couldn’t create the folder: {e}")), ..check },
+  }
 }
 
 /// Validate a New Project request (name, template) into a [`ScaffoldRequest`].
@@ -374,18 +429,20 @@ pub(crate) fn scaffold_request(input: &CreateProjectInput) -> Result<ScaffoldReq
 
 /// The `npm` arguments that scaffold `request` into `<cwd>/<folder>`:
 ///
-/// `npm create @microsoft/rayfin@latest -- <folder> -t <template>
-///   [--template-name <name>] --project-name "<name>"`
+/// `npm create @microsoft/rayfin@<release> -- <folder> -t <template>
+///   [--template-name <name>] --project-name "<name>" [--skip-install]`
 ///
-/// `<template>` is a template built into the Rayfin CLI (resolved against the
-/// CLI's own set) or a community template URL, which may also name one entry of
-/// a multi-template gallery. The positional `<folder>` is the target directory;
-/// `--project-name` carries the human identity (rayfin.yml id/name + package
-/// name).
-fn create_args(folder: &str, request: &ScaffoldRequest) -> Vec<String> {
+/// `<release>` is a version. `<template>` is a template
+/// built into the Rayfin CLI (resolved against the CLI's own set) or a community
+/// template URL, which may also name one entry of a multi-template gallery. The
+/// positional `<folder>` is the target directory; `--project-name` carries the
+/// human identity (rayfin.yml id/name + package name). `--skip-install`, a
+/// hidden `rayfin init` flag, leaves installing the packages to Fabricator, which
+/// pins their Rayfin versions first.
+fn create_args(folder: &str, request: &ScaffoldRequest, release: &str, skip_install: bool) -> Vec<String> {
   let mut args: Vec<String> = vec![
     "create".into(),
-    "@microsoft/rayfin@latest".into(),
+    format!("@microsoft/rayfin@{release}"),
     "--".into(),
     folder.to_string(),
     "-t".into(),
@@ -399,23 +456,30 @@ fn create_args(folder: &str, request: &ScaffoldRequest) -> Vec<String> {
   }
   args.push("--project-name".into());
   args.push(request.name.clone());
+  if skip_install {
+    args.push("--skip-install".into());
+  }
   args
 }
 
-/// Run the Rayfin scaffolder into `<root>/<folder>` and add Fabricator's agent
-/// instructions. Doesn't touch git. Returns the project dir.
-pub(crate) async fn scaffold_project(
+/// Whether the scaffolder refused `--skip-install`, which a Rayfin CLI without
+/// the hidden flag reports as an unknown option before creating anything.
+fn rejects_skip_install(result: &RunResult) -> bool {
+  static REFUSED: Lazy<Regex> = Lazy::new(|| Regex::new(r#"unknown option ['"`]?--skip-install\b"#).unwrap());
+  !result.ok && !result.not_found && (REFUSED.is_match(&result.stderr) || REFUSED.is_match(&result.stdout))
+}
+
+async fn run_scaffolder(
   root: &Path,
   folder: &str,
   request: &ScaffoldRequest,
+  release: &str,
+  skip_install: bool,
   on: &OnData,
-) -> Result<PathBuf, String> {
-  let dir = root.join(folder);
-  say(on, &format!("Creating \"{folder}\" from the {}…\n", request.label()));
-
-  let create_args = create_args(folder, request);
+) -> RunResult {
+  let create_args = create_args(folder, request, release, skip_install);
   let arg_refs: Vec<&str> = create_args.iter().map(String::as_str).collect();
-  let init = run(
+  run(
     "npm",
     &arg_refs,
     RunOptions {
@@ -426,65 +490,227 @@ pub(crate) async fn scaffold_project(
       ..Default::default()
     },
   )
-  .await;
+  .await
+}
 
+/// Why the scaffolder didn't create a Rayfin project in `dir`, if it didn't.
+fn scaffold_failure(init: &RunResult, dir: &Path, request: &ScaffoldRequest) -> Option<String> {
   if init.not_found {
-    return Err("npm was not found on PATH. Install Node.js (which includes npm) to create projects.".into());
+    return Some("npm was not found on PATH. Install Node.js (which includes npm) to create projects.".into());
   }
-  if !init.ok || !is_rayfin_project(&dir.to_string_lossy()) {
-    let code = init.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "unknown".into());
-    return Err(if request.is_url {
-      format!("Creating the project from the template URL failed (exit code {code}). Check the URL is a valid Rayfin template.")
-    } else {
-      format!("Project creation failed (exit code {code}).")
-    });
+  if init.ok && is_rayfin_project(&dir.to_string_lossy()) {
+    return None;
+  }
+  let code = init.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "unknown".into());
+  Some(if request.is_url {
+    format!("Creating the project from the template URL failed (exit code {code}). Check the URL is a valid Rayfin template.")
+  } else {
+    format!("Project creation failed (exit code {code}).")
+  })
+}
+
+/// Run the Rayfin scaffolder into `<root>/<folder>` on the release the local
+/// backend runs, pin the project's Rayfin packages to it, install them, and add
+/// Fabricator's agent instructions. Doesn't touch git. Returns the project dir.
+/// Every new project gets this, personal or team.
+pub(crate) async fn scaffold_project(
+  root: &Path,
+  folder: &str,
+  request: &ScaffoldRequest,
+  on: &OnData,
+) -> Result<PathBuf, String> {
+  let dir = root.join(folder);
+  let sdk = rayfin_sdk::new_project_sdk(root).await;
+  let release = sdk.version.to_string();
+  say(on, &format!("Creating \"{folder}\" from the {} with Rayfin {release}…\n", request.label()));
+
+  let mut skipped_install = true;
+  let mut init = run_scaffolder(root, folder, request, &release, true, on).await;
+  if rejects_skip_install(&init) {
+    say(on, "\nThis Rayfin release doesn't take --skip-install, so it installs the packages itself.\n");
+    if dir.exists() {
+      let _ = std::fs::remove_dir_all(&dir);
+    }
+    skipped_install = false;
+    init = run_scaffolder(root, folder, request, &release, false, on).await;
+  }
+  if let Some(error) = scaffold_failure(&init, &dir, request) {
+    return Err(error);
+  }
+
+  // A community template that asks for Rayfin releases the local backend can't
+  // run keeps them; the built-in templates always take the pin.
+  let pinned = match rayfin_sdk::pin_project(&dir, &sdk, request.is_url) {
+    Ok(Pinning::Pinned { range, files }) => {
+      if files > 0 {
+        say(on, &format!("\nPinned the Rayfin packages to {range}.\n"));
+      }
+      files > 0
+    }
+    Ok(Pinning::Kept { name, spec }) => {
+      say(
+        on,
+        &format!(
+          "\nThe template asks for {name} {spec}, outside the Rayfin releases Fabricator runs locally ({}), so it keeps its versions.\n",
+          rayfin_sdk::supported_range()
+        ),
+      );
+      false
+    }
+    Err(e) => {
+      say(on, &format!("\n⚠️ {e}\n"));
+      false
+    }
+  };
+  // Without --skip-install the scaffolder already installed, before the pin.
+  if skipped_install || pinned {
+    install_new_project(&dir, &release, !request.is_url, on).await;
   }
 
   crate::commands::skills::ensure_project_skills(dir.to_string_lossy().as_ref());
   Ok(dir)
 }
 
-/// Scaffold a new Rayfin project, git-init it, and make it active.
+/// `npm install` in `dir`, streaming its output.
+async fn npm_install(dir: &Path, on: Option<OnData>) -> RunResult {
+  crate::services::exec::npm_install(
+    &["install", "--no-audit", "--no-fund"],
+    RunOptions {
+      cwd: Some(dir.to_path_buf()),
+      env: crate::services::npm_env::fresh_registry_env(),
+      on_data: on,
+      timeout_ms: Some(600_000),
+      ..Default::default()
+    },
+  )
+  .await
+}
+
+/// Why an `npm install` in `folder` failed, in npm's own words.
+fn install_failure(folder: &str, result: &RunResult) -> String {
+  if result.not_found {
+    return "npm was not found on PATH. Install Node.js (which includes npm), then retry.".into();
+  }
+  crate::services::exec::npm_install_failure(result, Some(folder))
+}
+
+/// Install a new project's packages: the root's, with its workspaces, from
+/// what earlier new projects on Rayfin `release` installed when it can (with a
+/// spare set aside for the next one when `built_in`, see
+/// [`crate::services::new_project_cache`]), then the functions folder's when it
+/// has its own. A failure doesn't stop the project being created: the
+/// dependency check installs again when it opens.
+async fn install_new_project(dir: &Path, release: &str, built_in: bool, on: &OnData) {
+  let from_registry = || npm_install(dir, Some(on.clone()));
+  let result = crate::services::new_project_cache::install(dir, release, built_in, on, from_registry).await;
+  let outcome = if result.ok {
+    ensure_functions_dependencies(dir, Some(on.clone())).await
+  } else {
+    Err(install_failure("the project", &result))
+  };
+  if let Err(e) = outcome {
+    say(on, &format!("\n⚠️ {e}\nFabricator tries again when the app opens.\n"));
+  }
+}
+
+/// One install at a time per functions folder.
+static FUNCTIONS_INSTALL_LOCKS: Lazy<tokio::sync::Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> =
+  Lazy::new(|| tokio::sync::Mutex::new(HashMap::new()));
+
+/// Install the functions folder's packages when it has its own package.json,
+/// outside the root's npm workspaces, and nothing is installed there yet. The
+/// root install doesn't cover it, and the local backend builds the functions
+/// with them.
+pub(crate) async fn ensure_functions_dependencies(project: &Path, on: Option<OnData>) -> Result<(), String> {
+  let Some(functions) = rayfin_sdk::separate_functions_dir(project) else {
+    return Ok(());
+  };
+  if functions.join("node_modules").is_dir() {
+    return Ok(());
+  }
+  let lock = FUNCTIONS_INSTALL_LOCKS.lock().await.entry(functions.clone()).or_default().clone();
+  let _guard = lock.lock().await;
+  // Another request may have installed them while this one waited.
+  if functions.join("node_modules").is_dir() {
+    return Ok(());
+  }
+  let folder = functions.strip_prefix(project).unwrap_or(&functions).to_string_lossy().replace('\\', "/");
+  if let Some(on) = &on {
+    say(on, &format!("\nInstalling the dependencies in {folder} with npm…\n"));
+  }
+  let result = npm_install(&functions, on).await;
+  if result.ok {
+    Ok(())
+  } else {
+    Err(install_failure(&folder, &result))
+  }
+}
+
+/// Scaffold a new Rayfin project, start its history, and make it active.
 pub async fn create_project(app: &AppHandle, input: CreateProjectInput) -> ProjectActionResult {
   let request = match scaffold_request(&input) {
     Ok(r) => r,
     Err(e) => return err(e),
   };
 
-  let root = store::get_state().workspace_root;
-  if !Path::new(&root).exists() {
-    if let Err(e) = std::fs::create_dir_all(&root) {
-      return err(format!("Could not create workspace folder: {e}"));
+  // The folder the user chose, which New project has them create when it's
+  // missing; or else the projects folder, created here when it's missing.
+  let chosen = chosen_location(input.location.as_deref());
+  let root = match &chosen {
+    Some(folder) => {
+      let check = check_location(&folder.to_string_lossy());
+      if !check.ok {
+        return err(check.message.unwrap_or_else(|| "Choose another folder for the project.".into()));
+      }
+      folder.clone()
     }
-  }
-  let dir = Path::new(&root).join(&request.slug);
+    None => {
+      let root = PathBuf::from(store::get_state().workspace_root);
+      if !root.exists() {
+        if let Err(e) = std::fs::create_dir_all(&root) {
+          return err(format!("Could not create workspace folder: {e}"));
+        }
+      }
+      root
+    }
+  };
+  let dir = root.join(&request.slug);
   if dir.exists() {
-    return err(format!("A folder named \"{}\" already exists in your workspace.", request.slug));
+    let place = if chosen.is_some() { "that folder" } else { "your workspace" };
+    return err(format!("A folder named \"{}\" already exists in {place}.", request.slug));
   }
 
   let on = emit::proc_streamer(app, CREATE_CHANNEL);
-  let dir = match scaffold_project(Path::new(&root), &request.slug, &request, &on).await {
+  let dir = match scaffold_project(&root, &request.slug, &request, &on).await {
     Ok(dir) => dir,
     Err(e) => return err(e),
   };
-  init_git_repo(&dir, &format!("Initial commit ({})", request.label()), &on).await;
+  let summary = format!("Initial commit ({})", request.label());
+  // In a folder git already tracks, such as a repository's apps folder, the app
+  // joins that repository: a second one nested in it would hide the app's
+  // files from it. Its first version is saved there, of its own folder only.
+  if version_history::is_tracked(&root) {
+    say(&on, "Saving the first version in the folder's git repository…\n");
+    if let Err(e) = version_history::save_version(&dir, &summary).await {
+      say(&on, &format!("⚠️ {e}\n"));
+    }
+  } else {
+    init_git_repo(&dir, &summary, &on).await;
+  }
+  if let Some(folder) = &chosen {
+    store::remember_location(&folder.to_string_lossy());
+  }
 
+  // The app runs on this computer from the start. The preview mode is left at
+  // its default (direct view); a project that later connects a semantic model
+  // is switched to the embedded Fabric view on its next publish.
   let project = register_project(&dir, Some(&request.name));
-  // Mark this project as awaiting its first deployment so the workbench guides the
-  // user to deploy before chatting (cleared on the first successful deploy). This
-  // is set only on create — projects opened from disk are never gated. The preview
-  // mode is left at its default (direct view); a project that later connects a
-  // semantic model is switched to the embedded Fabric view on its next deploy.
-  store::mutate_project(&project.id, |p| {
-    p.awaiting_first_deploy = Some(true);
-  });
-  let project = store::find_project(&project.id).unwrap_or(project);
   store::set_active(Some(project.id.clone()));
   say(&on, "\n✅ Project ready.\n");
   ProjectActionResult {
     ok: true,
     error: None,
-    project: Some(with_missing(project)),
+    project: Some(annotate_project(project)),
   }
 }
 
@@ -499,17 +725,24 @@ pub async fn open_project(path: String) -> ProjectActionResult {
     return err("That folder is not a Rayfin project (no rayfin/rayfin.yml).");
   }
   crate::commands::skills::ensure_project_skills(&abs_str);
+  let known = store::get_state().projects.iter().any(|p| same_path(&p.path, &abs_str));
   let project = register_project(&abs, None);
+  // A folder unpacked from an export brings its record the first time it opens.
+  if !known {
+    crate::commands::export::adopt(&abs, &project.id);
+  }
   store::set_active(Some(project.id.clone()));
   ProjectActionResult {
     ok: true,
     error: None,
-    project: Some(with_missing(project)),
+    project: Some(annotate_project(project)),
   }
 }
 
 /// Ensure an opened project's local Rayfin CLI is available before the renderer
-/// mounts tools that depend on it (Fabric workspaces, deploy, and model browsing).
+/// mounts tools that depend on it (Fabric workspaces, deploy, and model browsing),
+/// along with the functions folder's own packages, which the root install doesn't
+/// cover.
 pub async fn prepare_project_dependencies(id: String) -> ProjectActionResult {
   let Some(project) = store::find_project(&id) else {
     return err("Project not found.");
@@ -521,6 +754,9 @@ pub async fn prepare_project_dependencies(id: String) -> ProjectActionResult {
   if let Err(error) = crate::services::exec::ensure_project_dependencies(dir, None).await {
     return err(error);
   }
+  if let Err(error) = ensure_functions_dependencies(dir, None).await {
+    return err(error);
+  }
   // A folder opened from disk may not have a repository yet. Start the version
   // history that History, Restore and the after-turn redeploy rely on. A failure
   // doesn't block the app; it's noted in the activity journal.
@@ -528,7 +764,7 @@ pub async fn prepare_project_dependencies(id: String) -> ProjectActionResult {
   ProjectActionResult {
     ok: true,
     error: None,
-    project: Some(with_missing(project)),
+    project: Some(annotate_project(project)),
   }
 }
 
@@ -547,21 +783,24 @@ pub async fn rename_project(id: String, name: String) -> ProjectActionResult {
   ProjectActionResult {
     ok: true,
     error: None,
-    project: Some(with_missing(updated)),
+    project: Some(annotate_project(updated)),
   }
 }
 
 /// Remove a project. Forgets it by default; trashes the folder when `delete_files`.
+/// A folder that can't be trashed (a program has one of its files open) keeps the
+/// project and its chat, and the error says why.
 pub async fn remove_project(
   app: &AppHandle,
   state: &AppState,
   id: String,
   delete_files: bool,
-) -> ProjectsState {
-  // Stop any in-flight chat and drop the transcript *before* the project folder
-  // goes away.
+) -> Result<ProjectsState, String> {
+  // Stop any in-flight chat before the project folder goes away.
   state.cancel_chat(&id);
-  history::clear_history(&id);
+  // Its local backend holds files in the folder (the database, the logs), so it
+  // stops first, and doesn't outlive a project that's only forgotten either.
+  crate::services::local_backend::state(app).forget(&id).await;
 
   if delete_files {
     if let Some(project) = store::find_project(&id) {
@@ -572,19 +811,38 @@ pub async fn remove_project(
         // file count (delete:progress) so the delete never looks hung.
         let app = app.clone();
         let id = id.clone();
-        let _ =
-          tokio::task::spawn_blocking(move || count_and_trash(&app, &id, Path::new(&path))).await;
+        tokio::task::spawn_blocking(move || count_and_trash(&app, &id, Path::new(&path)))
+          .await
+          .map_err(|error| format!("Couldn't move the folder to trash: {error}"))??;
       }
     }
   }
-  crate::commands::util::annotate_state(store::remove_project(&id))
+  history::clear_history(&id);
+  Ok(crate::commands::util::annotate_state(store::remove_project(&id)))
+}
+
+/// Why a folder couldn't be moved to trash, in words: the crate's own message is
+/// its debug dump.
+fn trash_failure(error: &trash::Error) -> String {
+  let reason = match error {
+    trash::Error::Os { description, .. } | trash::Error::Unknown { description } => {
+      description.trim().trim_end_matches('.')
+    }
+    _ => "",
+  };
+  let hint = "Close any program using its files, such as an editor, a terminal or a dev server, and try again.";
+  if reason.is_empty() {
+    format!("Couldn't move the folder to trash. {hint}")
+  } else {
+    format!("Couldn't move the folder to trash: {reason}. {hint}")
+  }
 }
 
 /// Walk `root` streaming a throttled `delete:progress` file count, then move the
 /// whole tree to the system trash. The folder is trashed atomically (one
 /// `trash::delete`) so the user can still restore it; the up-front scan is purely
 /// to report a count (the OS move itself exposes no per-file progress).
-fn count_and_trash(app: &AppHandle, id: &str, root: &Path) {
+fn count_and_trash(app: &AppHandle, id: &str, root: &Path) -> Result<(), String> {
   emit_delete_progress(app, id, "scanning", 0, None);
 
   let mut files: u64 = 0;
@@ -612,7 +870,7 @@ fn count_and_trash(app: &AppHandle, id: &str, root: &Path) {
   }
 
   emit_delete_progress(app, id, "trashing", files, Some(files));
-  let _ = trash::delete(root);
+  trash::delete(root).map_err(|error| trash_failure(&error))
 }
 
 /// Emit one `delete:progress` event (file-count progress for a project delete).
@@ -702,25 +960,28 @@ entries:
       name: "Trip Logger".into(),
       template: template.into(),
       template_name: template_name.map(String::from),
+      location: None,
     };
-    let args = |request: &ScaffoldRequest| create_args(&request.slug, request).join(" ");
+    let args = |request: &ScaffoldRequest| create_args(&request.slug, request, "1.36.2", true).join(" ");
 
-    // A blank template means the CLI's built-in Universal App, by name.
+    // A blank template means the CLI's built-in Universal App, by name, on the
+    // pinned release, leaving the install to Fabricator.
     let blank = scaffold_request(&input("", None)).unwrap();
     assert_eq!(blank.template, STARTER_TEMPLATE);
     assert!(!blank.is_url);
     assert_eq!(
       args(&blank),
-      "create @microsoft/rayfin@latest -- trip-logger -t universal-app --project-name Trip Logger"
+      "create @microsoft/rayfin@1.36.2 -- trip-logger -t universal-app --project-name Trip Logger --skip-install"
     );
+    assert!(!create_args(&blank.slug, &blank, "1.36.2", false).contains(&"--skip-install".to_string()));
 
     // A community gallery is passed by URL, with the chosen entry's name.
     let example = scaffold_request(&input("https://github.com/microsoft/awesome-rayfin", Some(" Todo App "))).unwrap();
     assert!(example.is_url);
     assert_eq!(
       args(&example),
-      "create @microsoft/rayfin@latest -- trip-logger -t https://github.com/microsoft/awesome-rayfin \
-       --template-name Todo App --project-name Trip Logger"
+      "create @microsoft/rayfin@1.36.2 -- trip-logger -t https://github.com/microsoft/awesome-rayfin \
+       --template-name Todo App --project-name Trip Logger --skip-install"
     );
 
     // Only URL sources take a template name.
@@ -729,15 +990,49 @@ entries:
   }
 
   #[test]
+  fn a_scaffolder_without_skip_install_is_detected() {
+    let result = |ok: bool, stderr: &str| RunResult {
+      ok,
+      exit_code: Some(if ok { 0 } else { 1 }),
+      stdout: String::new(),
+      stderr: stderr.into(),
+      not_found: false,
+    };
+    // npm echoes the whole command, flag included, whatever went wrong.
+    let echo = "npm error command C:\\WINDOWS\\system32\\cmd.exe /d /s /c create-rayfin app -t universal-app --skip-install";
+    assert!(rejects_skip_install(&result(false, &format!("error: unknown option '--skip-install'\n{echo}"))));
+    assert!(!rejects_skip_install(&result(false, &format!("npm error code ETARGET\n{echo}"))));
+    assert!(!rejects_skip_install(&result(false, &format!("error: unknown option '--template-name'\n{echo}"))));
+    assert!(!rejects_skip_install(&result(true, "")));
+  }
+
+  #[test]
   fn local_names_must_not_reuse_an_existing_folder() {
     let root = std::env::temp_dir().join(format!("fab-name-check-{}", std::process::id()));
     std::fs::create_dir_all(root.join("trip-logger")).unwrap();
-    let taken = check_local_name_in(&root, "Trip Logger");
+    let taken = check_local_name_in(&root, "Trip Logger", "your projects folder");
     assert!(!taken.ok);
-    assert!(taken.message.as_deref().unwrap_or_default().contains("“trip-logger”"));
-    assert_eq!(check_local_name_in(&root, "Trip Planner"), ProjectNameCheck { ok: true, message: None });
-    assert!(!check_local_name_in(&root, "!!!").ok);
+    assert!(taken.message.as_deref().unwrap_or_default().contains("“trip-logger” is already in your projects folder"));
+    assert_eq!(check_local_name_in(&root, "Trip Planner", "that folder"), ProjectNameCheck { ok: true, message: None });
+    assert!(!check_local_name_in(&root, "!!!", "that folder").ok);
     let _ = std::fs::remove_dir_all(&root);
+  }
+
+  #[test]
+  fn a_new_projects_folder_is_given_in_full_and_offered_for_creating_when_missing() {
+    let base = std::env::temp_dir().join(format!("fab-location-{}", uuid::Uuid::new_v4()));
+    let missing = base.join("apps").join("new");
+    let check = check_location(&missing.to_string_lossy());
+    assert_eq!((check.ok, check.missing), (false, true));
+    assert_eq!(create_location(&missing.to_string_lossy()), ProjectLocationCheck { ok: true, ..Default::default() });
+    assert!(missing.is_dir());
+    std::fs::write(base.join("notes.txt"), "x").unwrap();
+    let file = check_location(&base.join("notes.txt").to_string_lossy());
+    assert!(!file.ok && !file.missing, "{file:?}");
+    assert_eq!(create_location(&base.join("notes.txt").to_string_lossy()), file, "a file isn't replaced");
+    assert!(!check_location("relative/apps").ok);
+    assert!(check_location("  ").ok, "blank is the projects folder");
+    let _ = std::fs::remove_dir_all(&base);
   }
 
   #[test]
@@ -753,6 +1048,7 @@ entries:
       name: "SalesBenchmark (migrated)".into(),
       template: String::new(),
       template_name: None,
+      location: None,
     };
     assert_eq!(
       scaffold_request(&input).err().as_deref(),

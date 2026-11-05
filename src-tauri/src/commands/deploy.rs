@@ -21,12 +21,15 @@ use crate::commands::util::{annotate_state, now_iso};
 use crate::services::exec::{self, OnData, RunOptions, RunResult, Stream};
 use crate::services::{crashlog, emit, fabric_auth, git, journal, store, telemetry, version_history};
 use crate::types::{
-  DeployInfo, DeployResult, DeployStatus, FabricDeployment, PendingChanges, ProjectsState, StudioProject,
+  DeployInfo, DeployRemoveResult, DeployResult, DeployStatus, FabricDeployment, PendingChanges, ProjectsState,
+  StudioProject, UnsupportedWorkspace,
 };
 
 const DEPLOY_TIMEOUT_MS: u64 = 20 * 60_000;
 const SETTINGS_PUSH_TIMEOUT_MS: u64 = 10 * 60_000;
 const DEPLOY_CHANNEL: &str = "deploy:run";
+/// The first Rayfin CLI whose `rayfin up` publishes to an app you name (`--item-name`).
+const ITEM_NAME_SINCE: semver::Version = semver::Version::new(1, 36, 0);
 
 static GUID_RE: Lazy<Regex> =
   Lazy::new(|| Regex::new(r"(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$").unwrap());
@@ -42,6 +45,11 @@ static ERROR_LINE_RE: Lazy<Regex> =
   Lazy::new(|| Regex::new(r"(?i)\berror(?:\s+(?:[a-z]+\d+|\[[^\]]+\]))?\s*:|\b[a-z_]+error\b|\b(?:failed|exception)\s*:|\bAADSTS\d+\b|could not acquire|not able to acquire lock").unwrap());
 static GENERIC_FAILURE_RE: Lazy<Regex> =
   Lazy::new(|| Regex::new(r"(?i)^[^a-z0-9]*(?:deploy(?:ment)? failed|error)\s*[:.!]?\s*$").unwrap());
+static ITEM_CREATE_FAILED_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bfailed to create rayfin item\b").unwrap());
+static FEATURE_UNAVAILABLE_RE: Lazy<Regex> =
+  Lazy::new(|| Regex::new(r"(?i)\bthe feature is not available\b|\bFeatureNotAvailable\b").unwrap());
+/// How long a refused publish waits to learn the workspace's name and region.
+const WORKSPACE_LOOKUP_TIMEOUT_MS: u64 = 15_000;
 
 /* ------------------------------ helpers ----------------------------------- */
 
@@ -71,6 +79,31 @@ fn settings_push_args(workspace: Option<&str>) -> Vec<String> {
     ["up", "-y", "--force", "--exclude-services", "staticHosting"].into_iter().map(String::from).collect();
   args.extend(workspace_args(workspace));
   args
+}
+
+/// `rayfin up` arguments for a publish into `workspace` (else the active
+/// deployment's), and into the existing app named `item_name` when given.
+/// Always forced, so destructive datamodel/schema changes are applied: a deploy
+/// must never leave the published datamodel stale.
+fn up_args(workspace: Option<&str>, item_name: Option<&str>) -> Vec<String> {
+  let mut args: Vec<String> = ["up", "-y", "--force"].into_iter().map(String::from).collect();
+  args.extend(workspace_args(workspace));
+  if let Some(name) = item_name.map(str::trim).filter(|name| !name.is_empty()) {
+    args.extend(["--item-name".to_string(), name.to_string()]);
+  }
+  args
+}
+
+/// The version of a project's own Rayfin CLI, the one Fabricator runs.
+fn installed_cli_version(dir: &Path) -> Option<semver::Version> {
+  let text = std::fs::read_to_string(dir.join("node_modules/@microsoft/rayfin-cli/package.json")).ok()?;
+  let package: serde_json::Value = serde_json::from_str(&text).ok()?;
+  semver::Version::parse(package.get("version")?.as_str()?.trim()).ok()
+}
+
+/// Whether a project's Rayfin CLI can publish into an existing app by name.
+pub(crate) fn names_its_app(dir: &Path) -> bool {
+  installed_cli_version(dir).is_some_and(|version| version >= ITEM_NAME_SINCE)
 }
 
 /// Best URL to load in the preview, in priority order.
@@ -122,6 +155,35 @@ fn failure_outcome(error: &str) -> &'static str {
   } else {
     "error"
   }
+}
+
+/// Fabric turned down creating the app in the target workspace: `rayfin up`
+/// says "Failed to create Rayfin item" with Fabric's 403 "The feature is not
+/// available". Fabric apps aren't in every region, and which regions have them
+/// changes, so what Fabric answers is the test, not a list of regions.
+fn apps_unavailable(output: &str) -> bool {
+  let output = crate::commands::chat_tools::strip_ansi(output);
+  ITEM_CREATE_FAILED_RE.is_match(&output) && FEATURE_UNAVAILABLE_RE.is_match(&output)
+}
+
+/// What a publish Fabric turned down says: where Fabric apps aren't available,
+/// as far as Fabric said, and what to do about it. The region is the usual
+/// reason; an admin who hasn't turned Fabric Apps on is the other.
+fn unsupported_message(workspace: &UnsupportedWorkspace) -> String {
+  let name = workspace.name.as_deref().map(str::trim).filter(|n| !n.is_empty());
+  let region = workspace.region.as_deref().map(str::trim).filter(|r| !r.is_empty());
+  let headline = match (name, region) {
+    (Some(name), Some(region)) => {
+      format!("Fabric apps aren’t available in “{name}”, a workspace on a capacity in {region}.")
+    }
+    (None, Some(region)) => format!("Fabric apps aren’t available in this workspace, on a capacity in {region}."),
+    (Some(name), None) => format!("Fabric apps aren’t available in “{name}”."),
+    (None, None) => "Fabric apps aren’t available in this workspace.".to_string(),
+  };
+  format!(
+    "{headline} They aren’t in every region yet, so publish to a workspace on a capacity in another region. \
+     If none works, ask your Fabric admin to turn on Fabric Apps."
+  )
 }
 
 #[derive(Deserialize)]
@@ -282,20 +344,27 @@ fn registry_deployments(dir: &Path, names: &std::collections::HashMap<String, St
   )
 }
 
+/// The deployments a project's registry records, from the file alone (never the
+/// CLI): empty when there's none. The app gallery matches Fabric apps to the
+/// projects on this computer with them.
+pub(crate) fn recorded_deployments(dir: &Path) -> Vec<FabricDeployment> {
+  registry_deployments(dir, &Default::default()).unwrap_or_default()
+}
+
 /// Where the active deployment lives.
-struct ActiveDeployment {
-  workspace_id: Option<String>,
-  workspace_name: String,
-  hosting: Option<String>,
-  api: Option<String>,
-  portal: Option<String>,
+pub(crate) struct ActiveDeployment {
+  pub(crate) workspace_id: Option<String>,
+  pub(crate) workspace_name: String,
+  pub(crate) hosting: Option<String>,
+  pub(crate) api: Option<String>,
+  pub(crate) portal: Option<String>,
 }
 
 /// The active deployment as the registry records it: the addresses
 /// `rayfin up status --json` reports, without its network checks (about 6 s).
 /// `Some(None)` when the registry has no active deployment; `None` when there's
 /// no registry to read.
-fn registry_active(dir: &Path) -> Option<Option<ActiveDeployment>> {
+pub(crate) fn registry_active(dir: &Path) -> Option<Option<ActiveDeployment>> {
   let list = read_registry(dir)?;
   Some(list.into_iter().find(|r| r.active).map(|r| ActiveDeployment {
     workspace_id: r.entry.fabric_workspace_id,
@@ -315,6 +384,55 @@ fn patch_deploy(project_id: &str, f: impl FnOnce(&mut DeployInfo)) {
   });
 }
 
+/// The name a publish gives the app's thumbnail among its hosted files, where
+/// the app gallery looks for it (`<hosting URL>/fabricator-thumbnail.webp`).
+pub(crate) const PUBLISHED_THUMBNAIL: &str = "fabricator-thumbnail.webp";
+
+/// A thumbnail put in the frontend's `public/` folder for one publish.
+struct StagedThumbnail {
+  file: PathBuf,
+  /// The `public/` folder was made for it, so it goes too.
+  made_folder: Option<PathBuf>,
+}
+
+impl StagedThumbnail {
+  fn remove(self) {
+    let _ = std::fs::remove_file(&self.file);
+    if let Some(folder) = self.made_folder {
+      // Only when nothing else arrived in it meanwhile.
+      let _ = std::fs::remove_dir(folder);
+    }
+  }
+}
+
+/// Put the project's thumbnail (drawn from its preview) in its frontend's
+/// `public/` folder, which the build copies into the files `rayfin up` hosts.
+/// `None` when it has none, or it can't be put there.
+fn stage_thumbnail(project: &StudioProject) -> Option<StagedThumbnail> {
+  stage_thumbnail_in(
+    &crate::services::dev_server::frontend_dir(Path::new(&project.path)),
+    &crate::services::paths::thumbnail_file(&project.id),
+  )
+}
+
+fn stage_thumbnail_in(frontend: &Path, thumbnail: &Path) -> Option<StagedThumbnail> {
+  let image = std::fs::read(thumbnail).ok()?;
+  let public = frontend.join("public");
+  let made_folder = if public.is_dir() {
+    None
+  } else {
+    std::fs::create_dir(&public).ok()?;
+    Some(public.clone())
+  };
+  let file = public.join(PUBLISHED_THUMBNAIL);
+  let staged = StagedThumbnail { file, made_folder };
+  if std::fs::write(&staged.file, image).is_err() {
+    staged.remove();
+    return None;
+  }
+  Some(staged)
+}
+
 fn git_opts(dir: &str, ms: u64) -> RunOptions {
   RunOptions {
     cwd: Some(PathBuf::from(dir)),
@@ -323,14 +441,15 @@ fn git_opts(dir: &str, ms: u64) -> RunOptions {
   }
 }
 
-/// Commit the current working tree as a deploy checkpoint (best-effort).
+/// Commit the app's folder as a deploy checkpoint (best-effort). Changes
+/// elsewhere in a repository the app shares with other apps stay as they are.
 async fn commit_checkpoint(dir: &str, message: &str) {
-  let status = git::run(&["status", "--porcelain"], git_opts(dir, 30_000)).await;
+  let status = git::run(&["status", "--porcelain", "--", "."], git_opts(dir, 30_000)).await;
   if !status.ok || status.stdout.trim().is_empty() {
     return;
   }
-  let _ = git::run(&["add", "-A"], git_opts(dir, 30_000)).await;
-  let _ = git::run(&["commit", "-m", message], git_opts(dir, 30_000)).await;
+  let _ = git::run(&["add", "-A", "--", "."], git_opts(dir, 30_000)).await;
+  let _ = git::run(&["commit", "-m", message, "--", "."], git_opts(dir, 30_000)).await;
 }
 
 /// Resolve the project's current HEAD commit sha (None when unavailable).
@@ -348,15 +467,17 @@ async fn head_sha(dir: &str) -> Option<String> {
   }
 }
 
+/// Whether the app's folder differs from the deployed version. Only the folder
+/// counts (git runs there): an app can share its repository with other apps.
 async fn has_changes_since_deploy(dir: &str, deployed_commit: Option<&str>) -> Result<bool, String> {
   let status = git::run(
-    &["status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none"],
+    &["status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none", "--", "."],
     git_opts(dir, 30_000),
   )
   .await;
   if !status.ok {
     return Err(format!(
-      "Could not check for undeployed changes. {}",
+      "Could not check for unpublished changes. {}",
       error_text(&status, &status.stdout, "git status failed.")
     ));
   }
@@ -365,12 +486,12 @@ async fn has_changes_since_deploy(dir: &str, deployed_commit: Option<&str>) -> R
   }
 
   // A clean working tree can still contain committed edits that were never
-  // deployed. Without a recorded baseline, deploy once to establish one.
+  // published. Without a recorded baseline, publish once to establish one.
   let Some(commit) = deployed_commit.map(str::trim).filter(|s| !s.is_empty()) else {
     return Ok(true);
   };
   let diff = git::run(
-    &["diff", "--quiet", "--no-ext-diff", "--ignore-submodules=none", commit, "HEAD", "--"],
+    &["diff", "--quiet", "--no-ext-diff", "--ignore-submodules=none", commit, "HEAD", "--", "."],
     git_opts(dir, 30_000),
   )
   .await;
@@ -378,7 +499,7 @@ async fn has_changes_since_deploy(dir: &str, deployed_commit: Option<&str>) -> R
     Some(0) if diff.ok => Ok(false),
     Some(1) if !diff.not_found => Ok(true),
     _ => Err(format!(
-      "Could not compare the project with its last deployment. {}",
+      "Could not compare the project with its last published version. {}",
       error_text(&diff, &diff.stdout, "git diff failed.")
     )),
   }
@@ -403,20 +524,21 @@ fn porcelain_paths(stdout: &str) -> Vec<String> {
   paths
 }
 
-/// What a deploy would ship: every file that differs from the deployed version,
-/// edited, staged, new or removed, committed or not. Without a known deployed
-/// version something always would (as [`has_changes_since_deploy`] says), but
-/// how much isn't known. Both listings are NUL-separated, so a path is spelled
-/// the same in each (porcelain output quotes unusual names otherwise).
+/// What a deploy would ship: every file in the app's folder that differs from
+/// the deployed version, edited, staged, new or removed, committed or not.
+/// Without a known deployed version something always would (as
+/// [`has_changes_since_deploy`] says), but how much isn't known. Both listings
+/// are NUL-separated, so a path is spelled the same in each (porcelain output
+/// quotes unusual names otherwise).
 async fn pending_since_deploy(dir: &str, deployed_commit: Option<&str>) -> Result<PendingChanges, String> {
   let status = git::run(
-    &["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none"],
+    &["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none", "--", "."],
     git_opts(dir, 30_000),
   )
   .await;
   if !status.ok {
     return Err(format!(
-      "Could not check for undeployed changes. {}",
+      "Could not check for unpublished changes. {}",
       error_text(&status, &status.stdout, "git status failed.")
     ));
   }
@@ -425,13 +547,13 @@ async fn pending_since_deploy(dir: &str, deployed_commit: Option<&str>) -> Resul
     return Ok(PendingChanges { changed: true, files: None });
   };
   let diff = git::run(
-    &["diff", "--name-only", "-z", "--no-ext-diff", "--ignore-submodules=none", commit, "HEAD", "--"],
+    &["diff", "--name-only", "-z", "--no-ext-diff", "--ignore-submodules=none", commit, "HEAD", "--", "."],
     git_opts(dir, 30_000),
   )
   .await;
   if !diff.ok {
     return Err(format!(
-      "Could not compare the project with its last deployment. {}",
+      "Could not compare the project with its last published version. {}",
       error_text(&diff, &diff.stdout, "git diff failed.")
     ));
   }
@@ -441,7 +563,12 @@ async fn pending_since_deploy(dir: &str, deployed_commit: Option<&str>) -> Resul
 
 /// Read the persisted deployment status for a project directory.
 async fn status_for(path: &str) -> DeployStatus {
-  let res = exec::run_project_rayfin(Path::new(path), &["up", "status", "--json"], RunOptions::timeout(60_000)).await;
+  let res = fabric_auth::one_at_a_time(exec::run_project_rayfin(
+    Path::new(path),
+    &["up", "status", "--json"],
+    RunOptions::timeout(60_000),
+  ))
+  .await;
   let Some(parsed) = parse_status_json(&res.stdout) else {
     return DeployStatus { deployed: false, url: None, api_url: None, portal_url: None };
   };
@@ -458,20 +585,21 @@ async fn status_for(path: &str) -> DeployStatus {
   }
 }
 
-/// One-time Fabric-preview default applied after a successful deploy. Semantic-model
-/// apps only render correctly inside the Fabric portal shell, so the first deploy that
-/// carries a `fabric.yaml` semantic-model connection switches the preview to the
-/// embedded Fabric view — but only if the user hasn't already picked a view, and only
-/// once, so a later manual switch back to the direct view (persisted as `None`) is
-/// never re-overridden on subsequent (often after-turn) auto-deploys. Returns
-/// `Some(new_preview_mode)` to persist (marking the project defaulted), or `None` to
-/// leave the project untouched.
+/// One-time Fabric-preview default applied after a successful deploy. An app that works only inside
+/// the Fabric portal shell — its `fabric.yaml` declares semantic models (the classic Fabric
+/// embed), or its `rayfin.yml` hosts it embedded only — doesn't render as a direct page, so the
+/// first deploy of one switches the preview to the embedded Fabric view — but only if the user
+/// hasn't already picked a view, and only once, so a later manual switch back to the direct view
+/// (persisted as `None`) is never re-overridden on subsequent (often after-turn) auto-deploys.
+/// Semantic model connectors query through the app's backend and need no Fabric view. Returns
+/// `Some(new_preview_mode)` to persist (marking the project defaulted), or `None` to leave the
+/// project untouched.
 fn fabric_preview_after_deploy(
   preview_mode: Option<&str>,
   already_defaulted: bool,
-  has_semantic_models: bool,
+  needs_fabric_portal: bool,
 ) -> Option<Option<String>> {
-  if already_defaulted || !has_semantic_models {
+  if already_defaulted || !needs_fabric_portal {
     return None;
   }
   // Adopt the Fabric view when the user hasn't chosen one; otherwise keep their
@@ -489,12 +617,13 @@ pub async fn deploy_run(
   app: AppHandle,
   project_id: String,
   workspace: Option<String>,
+  item_name: Option<String>,
 ) -> DeployResult {
   // Keep ownership attached to actual process completion, not to the invoking
   // renderer's lifetime.
-  match tokio::spawn(async move { run_deploy(app, project_id, workspace).await }).await {
+  match tokio::spawn(async move { run_deploy(app, project_id, workspace, item_name).await }).await {
     Ok(result) => result,
-    Err(error) => deployment_error(format!("Deployment task failed: {error}")),
+    Err(error) => deployment_error(format!("The publish task failed: {error}")),
   }
 }
 
@@ -507,6 +636,7 @@ pub(crate) async fn run_deploy(
   app: AppHandle,
   project_id: String,
   workspace: Option<String>,
+  item_name: Option<String>,
 ) -> DeployResult {
   // Team projects are deployed by their workspace's pipeline, never from here
   // (enforced whether or not the experiment is on).
@@ -519,7 +649,7 @@ pub(crate) async fn run_deploy(
     Err(error) => return deployment_error(error),
   };
   let mut detail = None;
-  let result = run_deploy_inner(app.clone(), project_id.clone(), workspace, &mut detail).await;
+  let result = run_deploy_inner(app.clone(), project_id.clone(), workspace, item_name, &mut detail).await;
   record_deploy(&project_id, &result, detail);
   result
 }
@@ -533,7 +663,7 @@ const FAILURE_DETAIL_LINES: usize = 16;
 /// The error the UI shows is one line, and often only the headline — "Runtime
 /// settings sync failed: 400 Bad Request" — while the line that explains it
 /// ("Details: The PostgreSQLDatabase feature is not enabled.") comes after.
-/// Help reads the journal to answer "why did my deploy fail?", so it needs both.
+/// Help reads the journal to answer "why couldn't my app publish?", so it needs both.
 fn failure_detail(output: &str) -> Option<String> {
   let clean = crate::commands::chat_tools::strip_ansi(output);
   let lines: Vec<&str> = clean.lines().map(str::trim_end).filter(|line| !line.trim().is_empty()).collect();
@@ -543,20 +673,20 @@ fn failure_detail(output: &str) -> Option<String> {
   Some(lines[lines.len().saturating_sub(FAILURE_DETAIL_LINES)..].join("\n"))
 }
 
-/// Note the outcome of a deploy in the activity journal.
+/// Note the outcome of a publish in the activity journal.
 ///
-/// Both outcomes are recorded. "Did my deploy work?" is one of the most common
+/// Both outcomes are recorded. "Did my app publish?" is one of the most common
 /// questions the Help assistant is asked, and a journal that only ever noted
-/// failures would answer a successful deploy with the last one that went wrong.
+/// failures would answer a successful publish with the last one that went wrong.
 fn record_deploy(project_id: &str, result: &DeployResult, detail: Option<String>) {
   use journal::{Area, Level};
   let message = if result.ok {
     match result.url.as_deref() {
-      Some(url) => format!("Deployed successfully. The app is live at {url}"),
-      None => "Deployed successfully.".to_string(),
+      Some(url) => format!("Published successfully. The app is live at {url}"),
+      None => "Published successfully.".to_string(),
     }
   } else {
-    result.error.clone().unwrap_or_else(|| "The deploy failed.".to_string())
+    result.error.clone().unwrap_or_else(|| "Couldn't publish the app.".to_string())
   };
   let mut entry = journal::entry(
     if result.ok { Level::Info } else { Level::Error },
@@ -573,7 +703,53 @@ fn record_deploy(project_id: &str, result: &DeployResult, detail: Option<String>
 }
 
 fn deployment_error(error: String) -> DeployResult {
-  DeployResult { ok: false, outcome: "error".into(), url: None, api_url: None, portal_url: None, error: Some(error) }
+  DeployResult { ok: false, outcome: "error".into(), url: None, api_url: None, portal_url: None, error: Some(error), unsupported: None }
+}
+
+/// A publish Fabric turned down because Fabric apps aren't available in the
+/// target workspace (see [`apps_unavailable`]). Says where, as far as Fabric
+/// tells us, and points the project back at what it published to before.
+/// Fabric created nothing in the refused workspace, so neither Try again nor
+/// publishing after a chat turn should go there again, and it isn't one of the
+/// workspaces this app uses.
+async fn refused_publish(project: &StudioProject, target: Option<&str>, renderer: &OnData) -> DeployResult {
+  let mut unsupported = UnsupportedWorkspace { id: target.unwrap_or_default().to_string(), ..Default::default() };
+  if let Some(id) = target.filter(|t| GUID_RE.is_match(t)) {
+    match crate::commands::fabric::workspace_details(Path::new(&project.path), id, WORKSPACE_LOOKUP_TIMEOUT_MS).await {
+      Ok(details) => {
+        unsupported.name = details.name;
+        unsupported.region = details.region;
+        unsupported.capacity_id = details.capacity_id;
+      }
+      Err(error) => crashlog::log_error("deploy", &format!("Could not look up the refused workspace: {error}")),
+    }
+  }
+  let error = unsupported_message(&unsupported);
+  let previous = project.workspace.clone();
+  let retargeted = target.map(str::to_string) != previous;
+  let previous_commit = project.last_deploy.as_ref().and_then(|d| d.commit.clone());
+  if retargeted {
+    store::mutate_project(&project.id, move |p| p.workspace = previous);
+  }
+  patch_deploy(&project.id, |d| {
+    if retargeted {
+      d.commit = previous_commit;
+    }
+    d.status = Some("error".into());
+    d.outcome = Some("workspace-unsupported".into());
+    d.error = Some(error.clone());
+    d.at = Some(now_iso());
+  });
+  crashlog::log_error("deploy", &format!("outcome=workspace-unsupported: {error}"));
+  telemetry::track_deploy(get_cached_identity().as_ref(), false);
+  renderer(Stream::System, &format!("\nCouldn't publish: {error}\n"));
+  DeployResult {
+    ok: false,
+    outcome: "workspace-unsupported".into(),
+    error: Some(error),
+    unsupported: Some(unsupported),
+    ..Default::default()
+  }
 }
 
 /// Push rayfin.yml's runtime settings to the project's Fabric backend without
@@ -601,7 +777,7 @@ pub(crate) async fn push_runtime_settings(project: &StudioProject, on_data: OnDa
   let workspace = project.workspace.as_deref().map(str::trim).filter(|w| !w.is_empty());
   let args = settings_push_args(workspace);
   let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-  let result = exec::run_project_rayfin(
+  let result = fabric_auth::one_at_a_time(exec::run_project_rayfin(
     dir,
     &arg_refs,
     RunOptions {
@@ -610,22 +786,23 @@ pub(crate) async fn push_runtime_settings(project: &StudioProject, on_data: OnDa
       timeout_ms: Some(SETTINGS_PUSH_TIMEOUT_MS),
       ..Default::default()
     },
-  )
+  ))
   .await;
   if result.ok {
-    return DeployResult { ok: true, outcome: "success".into(), url: None, api_url: None, portal_url: None, error: None };
+    return DeployResult { ok: true, outcome: "success".into(), url: None, api_url: None, portal_url: None, error: None, unsupported: None };
   }
   let captured_text = captured.lock().unwrap().clone();
   let error = error_text(&result, &captured_text, "rayfin up couldn't push the sign-in settings. Check the log above.");
   let outcome = if result.not_found { "not-found" } else { failure_outcome(&error) };
   crashlog::log_error("settings-push", &format!("exit={:?} outcome={outcome}: {error}", result.exit_code));
-  DeployResult { ok: false, outcome: outcome.into(), url: None, api_url: None, portal_url: None, error: Some(error) }
+  DeployResult { ok: false, outcome: outcome.into(), url: None, api_url: None, portal_url: None, error: Some(error), unsupported: None }
 }
 
 async fn run_deploy_inner(
   app: AppHandle,
   project_id: String,
   workspace: Option<String>,
+  item_name: Option<String>,
   detail: &mut Option<String>,
 ) -> DeployResult {
   let Some(project) = store::find_project(&project_id) else {
@@ -636,6 +813,7 @@ async fn run_deploy_inner(
       api_url: None,
       portal_url: None,
       error: Some("Project not found.".into()),
+      unsupported: None,
     };
   };
 
@@ -658,7 +836,7 @@ async fn run_deploy_inner(
   });
 
   let renderer = emit::proc_streamer(&app, DEPLOY_CHANNEL);
-  renderer(Stream::System, &format!("Deploying {} to Fabric…\n", project.name));
+  renderer(Stream::System, &format!("Publishing {} to Fabric…\n", project.name));
 
   let captured = Arc::new(Mutex::new(String::new()));
   let on_data: OnData = {
@@ -681,7 +859,7 @@ async fn run_deploy_inner(
       d.at = Some(now_iso());
     });
     telemetry::track_deploy(get_cached_identity().as_ref(), false);
-    renderer(Stream::System, &format!("\nDeploy failed: {error}\n"));
+    renderer(Stream::System, &format!("\nCouldn't publish: {error}\n"));
     return DeployResult {
       ok: false,
       outcome: "error".into(),
@@ -689,6 +867,7 @@ async fn run_deploy_inner(
       api_url: None,
       portal_url: None,
       error: Some(error),
+      unsupported: None,
     };
   }
   // The dependency-recovery output is useful in the live log, but must not be
@@ -696,13 +875,12 @@ async fn run_deploy_inner(
   captured.lock().unwrap().clear();
   let _auth_guard = crate::commands::auth::rayfin_auth_read().await;
 
-  // Always force so destructive datamodel/schema changes are applied — a deploy
-  // must never leave the published datamodel stale.
-  let mut up_args: Vec<String> = vec!["up".into(), "-y".into(), "--force".into()];
-  up_args.extend(workspace_args(workspace_target.as_deref()));
+  let up_args = up_args(workspace_target.as_deref(), item_name.as_deref());
   let arg_refs: Vec<&str> = up_args.iter().map(|s| s.as_str()).collect();
 
-  let result = exec::run_project_rayfin(
+  // The app's thumbnail goes out with its files, so galleries elsewhere can show it.
+  let staged = stage_thumbnail(&project);
+  let result = fabric_auth::one_at_a_time(exec::run_project_rayfin(
     Path::new(&project.path),
     &arg_refs,
     RunOptions {
@@ -711,8 +889,12 @@ async fn run_deploy_inner(
       timeout_ms: Some(DEPLOY_TIMEOUT_MS),
       ..Default::default()
     },
-  )
+  ))
   .await;
+  // Gone before anything commits the folder: it was never the app's.
+  if let Some(staged) = staged {
+    staged.remove();
+  }
 
   let captured_text = captured.lock().unwrap().clone();
   if !result.ok {
@@ -727,7 +909,7 @@ async fn run_deploy_inner(
       d.error = Some(error.clone());
       d.at = Some(now_iso());
     });
-    renderer(Stream::System, &format!("\nDeploy failed: {error}\n"));
+    renderer(Stream::System, &format!("\nCouldn't publish: {error}\n"));
     crashlog::log_error("deploy", &error);
     return DeployResult {
       ok: false,
@@ -736,12 +918,17 @@ async fn run_deploy_inner(
       api_url: None,
       portal_url: None,
       error: Some(error),
+      unsupported: None,
     };
+  }
+
+  if !result.ok && apps_unavailable(&captured_text) {
+    return refused_publish(&project, workspace_target.as_deref(), &renderer).await;
   }
 
   if !result.ok {
     let fallback = format!(
-      "rayfin up exited with code {} without a detailed failure reason. View the deploy logs. If Fabric sign-in looks successful but deploys keep failing, use Refresh Fabric authentication and update the project's Rayfin CLI and SDK to 1.35.1 or newer.",
+      "rayfin up exited with code {} without a detailed failure reason. View the publish log. If Fabric sign-in looks successful but publishing keeps failing, use Refresh Fabric authentication and update the project's Rayfin CLI and SDK to 1.35.1 or newer.",
       result.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "unknown".into())
     );
     let detail = error_text(&result, &captured_text, &fallback);
@@ -760,8 +947,8 @@ async fn run_deploy_inner(
     crashlog::log_error("deploy", &format!("exit={:?} outcome={outcome}: {error}", result.exit_code));
     telemetry::track_deploy(get_cached_identity().as_ref(), false);
     let sys = match outcome {
-      "needs-workspace" => "\nThis project has no Fabric workspace yet — choose one to deploy into.\n".to_string(),
-      _ => format!("\nDeploy failed: {error}\n"),
+      "needs-workspace" => "\nThis project has no Fabric workspace yet — choose one to publish to.\n".to_string(),
+      _ => format!("\nCouldn't publish: {error}\n"),
     };
     renderer(Stream::System, &sys);
     return DeployResult {
@@ -771,6 +958,7 @@ async fn run_deploy_inner(
       api_url: None,
       portal_url: None,
       error: Some(error),
+      unsupported: None,
     };
   }
 
@@ -807,20 +995,16 @@ async fn run_deploy_inner(
     });
   }
 
-  // First successful deploy clears the onboarding "deploy first" gate.
-  store::mutate_project(&project_id, |p| p.awaiting_first_deploy = None);
-
-  // Semantic-model apps render correctly only inside the Fabric portal shell, so the
-  // first successful deploy that carries a `fabric.yaml` semantic-model connection
-  // defaults the preview to the embedded Fabric view (a one-time default; see
+  // An app that works only inside the Fabric portal shell (`fabric.yaml` semantic models, or
+  // hosted embedded only) doesn't render as a direct page, so the first successful deploy of
+  // one defaults the preview to the embedded Fabric view (a one-time default; see
   // `fabric_preview_after_deploy`).
-  let has_semantic_models =
-    !crate::commands::fabric::read_project_semantic_models(Path::new(&project.path)).is_empty();
+  let needs_fabric_portal = crate::commands::fabric::needs_fabric_portal(Path::new(&project.path));
   store::mutate_project(&project_id, |p| {
     if let Some(mode) = fabric_preview_after_deploy(
       p.preview_mode.as_deref(),
       p.fabric_preview_defaulted == Some(true),
-      has_semantic_models,
+      needs_fabric_portal,
     ) {
       p.preview_mode = mode;
       p.fabric_preview_defaulted = Some(true);
@@ -828,14 +1012,14 @@ async fn run_deploy_inner(
   });
 
   // An app opened from disk may not have a repository yet; start its history so
-  // this deploy can record which version is live.
+  // this publish can record which version is live.
   let _ = version_history::ensure_project_tracked(&project).await;
-  commit_checkpoint(&project.path, &format!("Deploy {} ({})", project.name, now_iso())).await;
+  commit_checkpoint(&project.path, &format!("Publish {} ({})", project.name, now_iso())).await;
   let commit = head_sha(&project.path).await;
   patch_deploy(&project_id, move |d| d.commit = commit);
   telemetry::track_deploy(get_cached_identity().as_ref(), true);
   let live = url.as_deref().map(|u| format!("Live at {u}")).unwrap_or_default();
-  renderer(Stream::System, &format!("\n✅ Deployed. {live}\n"));
+  renderer(Stream::System, &format!("\n✅ Published. {live}\n"));
 
   DeployResult {
     ok: true,
@@ -844,6 +1028,7 @@ async fn run_deploy_inner(
     api_url: api,
     portal_url: portal,
     error: None,
+    unsupported: None,
   }
 }
 
@@ -920,12 +1105,12 @@ fn checked_deploy_list(
 ) -> Result<Vec<FabricDeployment>, String> {
   if !res.ok || res.not_found {
     return Err(format!(
-      "Could not read recorded Fabric deployments. {}",
+      "Could not read this project's published apps. {}",
       crate::services::fabric_auth::failure_message(res)
     ));
   }
   parse_deploy_list_opt(&res.stdout, names)
-    .ok_or_else(|| "Could not read recorded Fabric deployments: invalid CLI response. Nothing was deleted.".into())
+    .ok_or_else(|| "Could not read this project's published apps: invalid CLI response. Nothing was deleted.".into())
 }
 
 /// Reconcile the Studio store's recorded deployment with on-disk reality
@@ -1008,8 +1193,6 @@ pub async fn deploy_reconcile(project_id: String) -> ProjectsState {
         p.last_deploy = Some(deploy);
         p.workspace = workspace;
         p.workspace_name = ws_name;
-        // A recorded deployment exists — lift the onboarding gate.
-        p.awaiting_first_deploy = None;
       });
     }
     None => {
@@ -1047,6 +1230,7 @@ pub async fn deploy_switch(app: AppHandle, project_id: String, workspace: String
       api_url: None,
       portal_url: None,
       error: Some("Project not found.".into()),
+      unsupported: None,
     };
   };
 
@@ -1075,6 +1259,7 @@ pub async fn deploy_switch(app: AppHandle, project_id: String, workspace: String
       api_url: None,
       portal_url: None,
       error: Some("The rayfin CLI was not found on PATH.".into()),
+      unsupported: None,
     };
   }
   if !res.ok {
@@ -1086,6 +1271,7 @@ pub async fn deploy_switch(app: AppHandle, project_id: String, workspace: String
       api_url: None,
       portal_url: None,
       error: Some(error),
+      unsupported: None,
     };
   }
 
@@ -1102,11 +1288,7 @@ pub async fn deploy_switch(app: AppHandle, project_id: String, workspace: String
 
   {
     let w = workspace.clone();
-    store::mutate_project(&project_id, move |p| {
-      p.workspace = Some(w);
-      // Switching to an existing deployment proves one exists — lift the gate.
-      p.awaiting_first_deploy = None;
-    });
+    store::mutate_project(&project_id, move |p| p.workspace = Some(w));
   }
   {
     let (url, api, portal) = (url.clone(), api.clone(), portal.clone());
@@ -1129,6 +1311,7 @@ pub async fn deploy_switch(app: AppHandle, project_id: String, workspace: String
     api_url: api,
     portal_url: portal,
     error: None,
+    unsupported: None,
   }
 }
 
@@ -1147,9 +1330,164 @@ pub fn deploy_set_name(project_id: String, workspace_key: String, name: String) 
   annotate_state(state)
 }
 
+/// Whether `recorded` is the deployment the deployments panel names `key`: by its
+/// workspace id, or the (sanitized) workspace name it's recorded under.
+fn is_deployment(recorded: &Recorded, key: &str) -> bool {
+  let key = key.trim();
+  recorded.workspace == key || recorded.entry.fabric_workspace_id.as_deref().is_some_and(|id| id.eq_ignore_ascii_case(key))
+}
+
+/// The deployment that takes over from a forgotten active one.
+#[derive(Debug, PartialEq)]
+struct NextActive {
+  key: String,
+  workspace_id: String,
+}
+
+/// Remove the deployment recorded under `key` from a project's registry. When
+/// it was the active one, the most recently published of the rest takes over,
+/// and is returned; with none left, none is active. The rest of the file,
+/// including what Fabricator doesn't read, stays as it was.
+fn forget_deployment(dir: &Path, key: &str) -> Result<Option<NextActive>, String> {
+  let path = dir.join("rayfin").join(".deployments.json");
+  let unreadable = |e: String| format!("Couldn't read {}: {e}", path.display());
+  let text = std::fs::read_to_string(&path).map_err(|e| unreadable(e.to_string()))?;
+  let mut registry: serde_json::Value = serde_json::from_str(&text).map_err(|e| unreadable(e.to_string()))?;
+  let was_active = registry.get("active").and_then(serde_json::Value::as_str) == Some(key);
+  let latest = {
+    let Some(deployments) = registry.get_mut("deployments").and_then(serde_json::Value::as_object_mut) else {
+      return Err(unreadable("it has no deployments".into()));
+    };
+    deployments.shift_remove(key);
+    deployments
+      .iter()
+      .filter_map(|(key, value)| {
+        let entry = serde_json::from_value::<RegistryEntry>(value.clone()).ok()?;
+        filled(entry.fabric_item_id)?;
+        let workspace_id = filled(entry.fabric_workspace_id)?;
+        Some((entry.deployed_at.unwrap_or_default(), NextActive { key: key.clone(), workspace_id }))
+      })
+      .max_by(|a, b| a.0.cmp(&b.0))
+      .map(|(_, next)| next)
+  };
+  let next = if was_active { latest } else { None };
+  if let (true, Some(object)) = (was_active, registry.as_object_mut()) {
+    match &next {
+      Some(next) => {
+        object.insert("active".into(), serde_json::Value::String(next.key.clone()));
+      }
+      None => {
+        object.shift_remove("active");
+      }
+    }
+  }
+  let body = serde_json::to_string_pretty(&registry).map_err(|e| e.to_string())? + "\n";
+  let staged = path.with_extension("json.tmp");
+  std::fs::write(&staged, body)
+    .and_then(|()| std::fs::rename(&staged, &path))
+    .map_err(|e| format!("Couldn't update {}: {e}", path.display()))?;
+  Ok(next)
+}
+
+fn removal_failed(error: impl Into<String>) -> DeployRemoveResult {
+  DeployRemoveResult { ok: false, needs_login: None, error: Some(error.into()) }
+}
+
+/// Delete one of a project's published apps: the app in Fabric, with its data,
+/// then its record, so the project no longer lists or publishes to it. When the
+/// project published to it, the most recently published of the others takes
+/// over, as Switch would make it; with none left, the project isn't published.
+/// `workspace` names it as the deployments panel does (see [`is_deployment`]).
+#[tauri::command]
+pub async fn deploy_remove(app: AppHandle, project_id: String, workspace: String) -> DeployRemoveResult {
+  // Once started, it finishes, whatever the renderer does meanwhile.
+  match tokio::spawn(async move { remove_deployment(app, project_id, workspace).await }).await {
+    Ok(result) => result,
+    Err(error) => removal_failed(format!("Deleting the published app failed: {error}")),
+  }
+}
+
+async fn remove_deployment(app: AppHandle, project_id: String, workspace: String) -> DeployRemoveResult {
+  if crate::services::team::is_team_project_id(&project_id) {
+    return removal_failed(crate::services::team::NO_LOCAL_DEPLOY);
+  }
+  let state = app.state::<crate::state::AppState>();
+  let _lease = match state.mutations.deploy(&project_id) {
+    Ok(lease) => lease,
+    Err(error) => return removal_failed(error),
+  };
+  let Some(project) = store::find_project(&project_id) else {
+    return removal_failed("Project not found.");
+  };
+  let dir = PathBuf::from(&project.path);
+  let Some(target) = read_registry(&dir).and_then(|list| list.into_iter().find(|r| is_deployment(r, &workspace))) else {
+    return removal_failed("That published app isn't recorded in this project anymore.");
+  };
+  // Recorded deployments always have both (see `read_registry`).
+  let workspace_id = target.entry.fabric_workspace_id.clone().unwrap_or_default();
+  let item_id = target.entry.fabric_item_id.clone().unwrap_or_default();
+  {
+    let _auth = crate::commands::auth::rayfin_auth_read().await;
+    let item = crate::commands::fabric::DeleteItem { workspace_id: workspace_id.clone(), item_id, name: target.workspace.clone() };
+    let deleted = crate::commands::fabric::delete_items(Some(&dir), &[item]).await;
+    if !deleted.ok {
+      let error = deleted.error.or_else(|| deleted.failures.first().map(|f| f.error.clone()));
+      return DeployRemoveResult {
+        ok: false,
+        needs_login: deleted.needs_login,
+        error: Some(error.unwrap_or_else(|| "Fabric didn't delete the app.".into())),
+      };
+    }
+  }
+  let next = match forget_deployment(&dir, &target.workspace) {
+    Ok(next) => next,
+    Err(error) => return removal_failed(format!("Fabric deleted the app, but this project still records it. {error}")),
+  };
+  // The app that takes over gets its settings in rayfin/.env, as Switch gives it.
+  if let Some(next) = next {
+    let res = exec::run_project_rayfin(&dir, &["up", "switch", "--workspace-id", &next.workspace_id], RunOptions::timeout(120_000)).await;
+    if !res.ok {
+      let error = error_text(&res, &res.stdout, "rayfin up switch failed.");
+      crashlog::log_error("deploy-remove", &format!("Couldn't switch to {}: {error}", next.key));
+    }
+  }
+  let key = target.workspace;
+  store::mutate_project(&project_id, move |p| {
+    if let Some(names) = p.deployment_names.as_mut() {
+      names.retain(|k, _| *k != key && !k.eq_ignore_ascii_case(&workspace_id));
+    }
+  });
+  deploy_reconcile(project_id).await;
+  DeployRemoveResult { ok: true, ..Default::default() }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn a_publish_takes_the_thumbnail_and_leaves_the_folder_as_it_was() {
+    let root = std::env::temp_dir().join(format!("fab-stage-{}", uuid::Uuid::new_v4()));
+    let thumbnail = root.join("thumb.webp");
+    let frontend = root.join("app");
+    std::fs::create_dir_all(&frontend).unwrap();
+    assert!(stage_thumbnail_in(&frontend, &thumbnail).is_none(), "no thumbnail yet");
+    std::fs::write(&thumbnail, b"RIFF....WEBP").unwrap();
+
+    // Without a public/ folder, one is made for the publish and goes with it.
+    let staged = stage_thumbnail_in(&frontend, &thumbnail).unwrap();
+    assert_eq!(std::fs::read(frontend.join("public").join(PUBLISHED_THUMBNAIL)).unwrap(), b"RIFF....WEBP");
+    staged.remove();
+    assert!(!frontend.join("public").exists());
+
+    // The app's own public/ folder keeps everything else in it.
+    std::fs::create_dir_all(frontend.join("public")).unwrap();
+    std::fs::write(frontend.join("public").join("logo.svg"), "<svg/>").unwrap();
+    stage_thumbnail_in(&frontend, &thumbnail).unwrap().remove();
+    assert!(frontend.join("public").join("logo.svg").is_file());
+    assert!(!frontend.join("public").join(PUBLISHED_THUMBNAIL).exists());
+    let _ = std::fs::remove_dir_all(&root);
+  }
 
   fn failed_run(stdout: &str, stderr: &str) -> RunResult {
     RunResult {
@@ -1185,7 +1523,7 @@ mod tests {
   #[test]
   fn a_failure_keeps_the_lines_that_explain_it_for_help() {
     // The one-line error is only the headline; the cause is on the lines after it.
-    let output = "Deploying Contoso Expenses to Fabric…\n\
+    let output = "Publishing Contoso Expenses to Fabric…\n\
       [rayfin] settings: Applying runtime settings\n\n\
       \x1b[31m❌ Deployment failed: Runtime settings sync failed: 400 Bad Request\x1b[0m\n\
       \x20  Details: The PostgreSQLDatabase feature is not enabled.\n\
@@ -1234,6 +1572,44 @@ mod tests {
     }
   }
 
+  #[test]
+  fn fabric_turning_down_the_app_in_a_workspace_is_told_apart_from_other_failures() {
+    // `rayfin up` in a workspace whose capacity's region has no Fabric apps.
+    let refused = "🚀 Deploying item \"notes\" to Fabric...\n\n\
+      Error making Fabric API request: Fabric API error: 403 Forbidden\n\
+      \x20  Details: The feature is not available\n\
+      \x20  RootActivityId: 22caf904-2901-4034-97ce-4df612790a88\n\
+      \x1b[31m✖ Failed to create Rayfin item: Fabric API error: 403 Forbidden\x1b[0m\n\
+      \x20  Details: The feature is not available\n\n\
+      ❌ Deployment failed:\n\x20  Error: Fabric API error: 403 Forbidden\n";
+    assert!(apps_unavailable(refused));
+
+    // Creating the app failed for another reason.
+    assert!(!apps_unavailable(
+      "✖ Failed to create Rayfin item: Fabric API error: 403 Forbidden\n   Details: Insufficient workspace permissions"
+    ));
+    // A later step turned down once the app existed isn't about the workspace.
+    assert!(!apps_unavailable(
+      "✔ Rayfin item ready (ID: 1)\n❌ Deployment failed: Functions deploy failed: 403 Forbidden\n   Details: The feature is not available"
+    ));
+  }
+
+  #[test]
+  fn a_turned_down_publish_names_what_fabric_said_and_nothing_it_did_not() {
+    let known = UnsupportedWorkspace {
+      id: "w1".into(),
+      name: Some("Sales".into()),
+      region: Some("UK South".into()),
+      capacity_id: Some("c1".into()),
+    };
+    let message = unsupported_message(&known);
+    assert!(message.starts_with("Fabric apps aren’t available in “Sales”, a workspace on a capacity in UK South. "));
+    assert!(message.contains("another region") && message.contains("ask your Fabric admin"));
+
+    let unknown = UnsupportedWorkspace { id: "w1".into(), name: Some("  ".into()), ..Default::default() };
+    assert!(unsupported_message(&unknown).starts_with("Fabric apps aren’t available in this workspace. "));
+  }
+
   struct TestRepo(PathBuf);
 
   impl TestRepo {
@@ -1268,7 +1644,9 @@ mod tests {
     }
 
     fn write(&self, name: &str, content: &str) {
-      std::fs::write(self.0.join(name), content).unwrap();
+      let path = self.0.join(name);
+      std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+      std::fs::write(path, content).unwrap();
     }
 
     fn commit(&self) -> String {
@@ -1340,6 +1718,41 @@ mod tests {
     assert!(has_changes_since_deploy(repo.dir(), Some(" ")).await.unwrap());
   }
 
+  /// An app can share its repository with other apps (a monorepo). What it
+  /// publishes, counts and checkpoints is its own folder only.
+  #[tokio::test]
+  async fn changes_elsewhere_in_a_shared_repository_are_not_the_apps() {
+    let repo = TestRepo::new();
+    repo.git(&["config", "user.name", "Fabricator Tests"]);
+    repo.git(&["config", "user.email", "tests@rayfin.local"]);
+    repo.git(&["config", "commit.gpgsign", "false"]);
+    repo.write("apps/explorer/app.ts", "export const version = 1;\n");
+    repo.write("apps/other/app.ts", "export const version = 1;\n");
+    let deployed = repo.commit();
+    let app = repo.0.join("apps").join("explorer");
+    let app = app.to_str().unwrap();
+
+    // Another app's committed, edited and new files, and the repository's own.
+    repo.write("apps/other/app.ts", "export const version = 2;\n");
+    repo.commit();
+    repo.write("apps/other/app.ts", "export const version = 3;\n");
+    repo.write("apps/other/new.ts", "export {};\n");
+    repo.write("README.md", "# Apps\n");
+    assert_eq!(pending_since_deploy(app, Some(&deployed)).await.unwrap(), PendingChanges { changed: false, files: Some(0) });
+    assert!(!has_changes_since_deploy(app, Some(&deployed)).await.unwrap());
+
+    repo.write("apps/explorer/app.ts", "export const version = 2;\n");
+    assert_eq!(pending_since_deploy(app, Some(&deployed)).await.unwrap(), PendingChanges { changed: true, files: Some(1) });
+    assert!(has_changes_since_deploy(app, Some(&deployed)).await.unwrap());
+
+    // The publish checkpoint saves the app's folder and leaves the rest as it was.
+    commit_checkpoint(app, "Publish explorer").await;
+    assert_eq!(repo.git(&["show", "--name-only", "--format=", "HEAD"]), "apps/explorer/app.ts");
+    assert_eq!(repo.git(&["status", "--porcelain", "--untracked-files=all", "--", "apps/other", "README.md"]).lines().count(), 3);
+    let published = repo.git(&["rev-parse", "HEAD"]);
+    assert!(!has_changes_since_deploy(app, Some(&published)).await.unwrap());
+  }
+
   /// A folder opened from disk with no repository (issue #37): the check used
   /// to fail with "not a git repository" after every turn.
   #[tokio::test]
@@ -1368,11 +1781,11 @@ mod tests {
     let repo = TestRepo::new();
     repo.commit();
     let error = has_changes_since_deploy(repo.dir(), Some("missing-deployed-commit")).await.unwrap_err();
-    assert!(error.contains("Could not compare the project with its last deployment"));
+    assert!(error.contains("Could not compare the project with its last published version"));
 
     let outside = repo.0.join("..").join(format!("fabricator-missing-{}", uuid::Uuid::new_v4()));
     let error = has_changes_since_deploy(outside.to_str().unwrap(), None).await.unwrap_err();
-    assert!(error.contains("Could not check for undeployed changes"));
+    assert!(error.contains("Could not check for unpublished changes"));
   }
 
   #[test]
@@ -1409,6 +1822,68 @@ mod tests {
       vec!["--workspace-id".to_string(), "3fa85f64-5717-4562-b3fc-2c963f66afa6".to_string()]
     );
     assert_eq!(workspace_args(Some("My Workspace")), vec!["-w".to_string(), "My Workspace".to_string()]);
+  }
+
+  #[test]
+  fn a_publish_into_an_existing_app_names_it() {
+    let ws = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
+    assert_eq!(up_args(Some(ws), None), ["up", "-y", "--force", "--workspace-id", ws]);
+    assert_eq!(up_args(Some(ws), Some("  ")), ["up", "-y", "--force", "--workspace-id", ws]);
+    assert_eq!(
+      up_args(Some(ws), Some(" Sales & Ops ")),
+      ["up", "-y", "--force", "--workspace-id", ws, "--item-name", "Sales & Ops"]
+    );
+  }
+
+  #[test]
+  fn only_a_rayfin_cli_from_1_36_publishes_into_an_app_by_name() {
+    for (version, names) in [
+      ("1.36.0", true),
+      ("1.37.0-alpha.2159", true),
+      ("1.36.0-alpha.1620", false),
+      ("1.35.1", false),
+      ("not a version", false),
+    ] {
+      let dir = RegistryDir::new(None);
+      let cli = dir.0.join("node_modules/@microsoft/rayfin-cli");
+      std::fs::create_dir_all(&cli).unwrap();
+      std::fs::write(cli.join("package.json"), format!(r#"{{"version":"{version}"}}"#)).unwrap();
+      assert_eq!(names_its_app(&dir.0), names, "{version}");
+    }
+    assert!(!names_its_app(&RegistryDir::new(None).0), "no CLI installed");
+  }
+
+  #[test]
+  fn forgetting_the_active_deployment_hands_over_to_the_latest_of_the_rest() {
+    let dir = RegistryDir::new(Some(
+      r#"{"active":"prod","deployments":{"prod":{"fabricItemId":"i1","fabricWorkspaceId":"W1","deployedAt":"2026-11-03T10:00:00Z"},"old":{"fabricItemId":"i2","fabricWorkspaceId":"W2","deployedAt":"2026-01-01T00:00:00Z"},"dev":{"fabricItemId":"i3","fabricWorkspaceId":"W3","deployedAt":"2026-11-01T00:00:00Z","futureField":true},"draft":{"fabricItemId":"","fabricWorkspaceId":"W4","deployedAt":"2027-01-01T00:00:00Z"}},"version":2}"#,
+    ));
+    let next = forget_deployment(&dir.0, "prod").unwrap();
+    assert_eq!(next, Some(NextActive { key: "dev".into(), workspace_id: "W3".into() }), "never an unpublished placeholder");
+    let text = std::fs::read_to_string(dir.0.join("rayfin/.deployments.json")).unwrap();
+    let registry: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(registry["active"], "dev");
+    let keys: Vec<&String> = registry["deployments"].as_object().unwrap().keys().collect();
+    assert_eq!(keys, ["old", "dev", "draft"], "the rest keep their order");
+    assert_eq!(registry["deployments"]["dev"]["futureField"], true);
+    assert_eq!(registry["version"], 2);
+    assert!(text.ends_with("}\n"));
+  }
+
+  #[test]
+  fn forgetting_another_deployment_leaves_the_active_one_and_the_last_leaves_none() {
+    let dir = RegistryDir::new(Some(
+      r#"{"active":"prod","deployments":{"prod":{"fabricItemId":"i1","fabricWorkspaceId":"W1"},"dev":{"fabricItemId":"i2","fabricWorkspaceId":"W2"}}}"#,
+    ));
+    assert_eq!(forget_deployment(&dir.0, "dev").unwrap(), None);
+    let registry = || -> serde_json::Value {
+      serde_json::from_str(&std::fs::read_to_string(dir.0.join("rayfin/.deployments.json")).unwrap()).unwrap()
+    };
+    assert_eq!(registry()["active"], "prod");
+    assert_eq!(forget_deployment(&dir.0, "prod").unwrap(), None);
+    assert!(registry().get("active").is_none());
+    assert!(registry()["deployments"].as_object().unwrap().is_empty());
+    assert!(forget_deployment(&RegistryDir::new(None).0, "prod").is_err(), "no registry to change");
   }
 
   #[test]
@@ -1606,11 +2081,11 @@ mod tests {
   }
 
   #[test]
-  fn fabric_preview_after_deploy_switches_once_for_semantic_apps() {
-    // No semantic models → never touch the project's preview mode.
+  fn fabric_preview_after_deploy_switches_once_for_fabric_portal_apps() {
+    // An app that works outside the Fabric portal → never touch the project's preview mode.
     assert_eq!(fabric_preview_after_deploy(None, false, false), None);
     assert_eq!(fabric_preview_after_deploy(Some("fabric"), false, false), None);
-    // First deploy with a connected model and no explicit view → adopt Fabric.
+    // First deploy of an app that needs the portal, with no explicit view → adopt Fabric.
     assert_eq!(fabric_preview_after_deploy(None, false, true), Some(Some("fabric".to_string())));
     // Already defaulted once → never override again, even though a later manual
     // switch to the direct view is persisted as `None` (indistinguishable from unset).

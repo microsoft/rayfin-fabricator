@@ -18,6 +18,10 @@ interface Props {
   onManageAccounts?: () => void
   /** Open the Accounts dialog at Model providers (your own API keys). */
   onManageKeys?: () => void
+  /** Open the MCP servers dialog, while the MCP servers experiment is on. */
+  onManageMcpServers?: () => void
+  /** Open Chat defaults: the model and plugins a new project's chat starts with. */
+  onManageChatDefaults?: () => void
   /** Leave for the setup screen to re-check tools and sign-ins. */
   onReviewSetup?: () => void
 }
@@ -29,7 +33,7 @@ const THEMES: Array<{ value: ThemePreference; label: string }> = [
 ]
 
 /** A group of settings: a quiet heading over a card of rows. */
-function Section({ title, children }: { title: string; children: ReactNode }): JSX.Element {
+export function Section({ title, children }: { title: string; children: ReactNode }): JSX.Element {
   const id = useId()
   return (
     <section className="set-section" aria-labelledby={id}>
@@ -42,7 +46,7 @@ function Section({ title, children }: { title: string; children: ReactNode }): J
 }
 
 /** One setting: its name and what it does, with its control at the end. */
-function Item({
+export function Item({
   title,
   desc,
   extra,
@@ -66,7 +70,7 @@ function Item({
   )
 }
 
-function ToggleRow({
+export function ToggleRow({
   label,
   hint,
   checked,
@@ -160,6 +164,8 @@ export default function SettingsModal({
   onClose,
   onManageAccounts,
   onManageKeys,
+  onManageMcpServers,
+  onManageChatDefaults,
   onReviewSetup
 }: Props): JSX.Element {
   useSuppressPreview()
@@ -256,6 +262,26 @@ export default function SettingsModal({
                 >
                   <button type="button" className="btn btn--sm" onClick={onManageKeys}>
                     Manage API keys
+                  </button>
+                </Item>
+              )}
+              {onManageMcpServers && (
+                <Item
+                  title="MCP servers"
+                  desc="Add the MCP servers chat can turn on in its Plugins, such as a command that runs on this computer or a server’s URL."
+                >
+                  <button type="button" className="btn btn--sm" onClick={onManageMcpServers}>
+                    Manage MCP servers
+                  </button>
+                </Item>
+              )}
+              {onManageChatDefaults && (
+                <Item
+                  title="Chat defaults"
+                  desc="The model and plugins a new project’s chat starts with."
+                >
+                  <button type="button" className="btn btn--sm" onClick={onManageChatDefaults}>
+                    Manage chat defaults
                   </button>
                 </Item>
               )}
@@ -387,6 +413,30 @@ export default function SettingsModal({
                       hint="Turn a Power BI report into a new app from Home. The app reads the report's semantic model live, and Copilot rebuilds the report's pages, visuals and filters one page at a time. Needs the Azure CLI."
                       checked={Boolean(settings.experiments?.reportMigration)}
                       onChange={(v) => onChange({ experiments: { reportMigration: v } })}
+                    />
+                    <ToggleRow
+                      label="Work IQ"
+                      hint="Add Work IQ to chat's plugins. Turned on in a chat, it lets chat look up your Microsoft 365 email, meetings, files, Teams messages and people, with Microsoft's Work IQ, and use what it finds while it builds. Read-only. You sign in with your work account in your browser. Needs a Microsoft 365 Copilot license and your organization's approval."
+                      checked={Boolean(settings.experiments?.workIq)}
+                      onChange={(v) => onChange({ experiments: { workIq: v } })}
+                    />
+                    <ToggleRow
+                      label="MCP servers"
+                      hint="Add MCP servers to chat's plugins: a command that runs on this computer, or a server's URL, such as one that draws charts or reads your issue tracker. Turned on in a chat, chat can use the server's tools while it builds. A server runs with your access, so add only servers you trust."
+                      checked={Boolean(settings.experiments?.mcpServers)}
+                      onChange={(v) => onChange({ experiments: { mcpServers: v } })}
+                    />
+                    <ToggleRow
+                      label="Export as an app"
+                      hint="Export project also offers App: a .rayfin file someone opens to install your app and use it in a window of its own, with its data on their computer. Anyone with Fabricator can open .rayfin files, whether this is on or off."
+                      checked={Boolean(settings.experiments?.appExport)}
+                      onChange={(v) => onChange({ experiments: { appExport: v } })}
+                    />
+                    <ToggleRow
+                      label="Goals"
+                      hint="Add a Goals tab to each personal app: say what the app is for and what it must keep doing, in plain words. Before you publish, Copilot checks a fresh copy of the app against them, and in chat it tells you when a change would break one."
+                      checked={Boolean(settings.experiments?.goals)}
+                      onChange={(v) => onChange({ experiments: { goals: v } })}
                     />
                   </div>
                 )}

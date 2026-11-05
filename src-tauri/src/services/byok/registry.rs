@@ -27,6 +27,10 @@ const MAX_OUTPUT_TOKENS: u32 = 32_768;
 pub struct ByokRegistry {
   pub providers: Vec<NamedProviderConfig>,
   pub models: Vec<ProviderModelConfig>,
+  /// The effort each chosen model runs at when none is chosen, by selection
+  /// id: for a model that offers efforts but names no default of its own (see
+  /// [`crate::services::copilot::fallback_effort`]).
+  pub fallback_efforts: HashMap<String, String>,
   /// Changes whenever anything a session would see changes, keys included.
   pub revision: String,
 }
@@ -71,6 +75,18 @@ pub fn find_model<'a>(settings: &'a ByokSettings, selection: &str) -> Option<(&'
   Some((spec, info))
 }
 
+/// What sessions call a model on the user's own key, e.g. "Claude Opus 5.5
+/// (your Anthropic key)". The runtime reports it back with the model's usage.
+pub fn session_name(model: &str, provider: &str) -> String {
+  format!("{model} (your {provider} key)")
+}
+
+/// The model's and the provider's names in a [`session_name`].
+pub fn split_session_name(name: &str) -> Option<(&str, &str)> {
+  let (model, provider) = name.strip_suffix(" key)")?.rsplit_once(" (your ")?;
+  (!model.is_empty() && !provider.is_empty()).then_some((model, provider))
+}
+
 /// Split a context window into prompt and output budgets. The runtime compacts
 /// the conversation before a request would exceed the prompt budget.
 pub fn token_limits(m: &ByokModelInfo) -> (u32, u32, u32) {
@@ -105,7 +121,7 @@ fn model_config(spec: &ProviderSpec, m: &ByokModelInfo) -> ProviderModelConfig {
   let (context, prompt, output) = token_limits(m);
   let mut config = ProviderModelConfig::new(registry_model_id(&m.id), spec.id)
     .with_wire_model(m.id.clone())
-    .with_name(format!("{} (your {} key)", m.name, spec.name))
+    .with_name(session_name(&m.name, spec.name))
     .with_max_context_window_tokens(i64::from(context))
     .with_max_prompt_tokens(i64::from(prompt))
     .with_max_output_tokens(i64::from(output))
@@ -145,6 +161,7 @@ pub fn build_routed(
 ) -> ByokRegistry {
   let mut providers = Vec::new();
   let mut models = Vec::new();
+  let mut fallback_efforts = HashMap::new();
   for spec in catalog::PROVIDERS.iter() {
     let (Some(key), Some(saved)) = (keys.get(spec.id), settings.providers.get(spec.id)) else {
       continue;
@@ -154,12 +171,17 @@ pub fn build_routed(
       continue;
     };
     providers.push(provider_config(spec, base_url, key));
+    for m in chosen.iter().filter(|m| m.default_effort.as_deref().is_none_or(|e| e.trim().is_empty())) {
+      if let Some(effort) = crate::services::copilot::fallback_effort(&m.efforts) {
+        fallback_efforts.insert(selection_id(spec.id, &m.id), effort);
+      }
+    }
     models.extend(chosen.into_iter().map(|m| model_config(spec, m)));
   }
   let mut hasher = Sha256::new();
   hasher.update(serde_json::to_vec(&(&providers, &models)).unwrap_or_default());
   let revision = hex::encode(&hasher.finalize()[..8]);
-  ByokRegistry { providers, models, revision }
+  ByokRegistry { providers, models, fallback_efforts, revision }
 }
 
 #[cfg(test)]
@@ -224,6 +246,9 @@ mod tests {
     assert_eq!(models.len(), 2, "only the chosen Google model: {models:?}");
     let opus = &models[0];
     assert_eq!((opus["id"].as_str(), opus["modelId"].as_str()), (Some("claude-opus-5-5"), Some("claude-opus-5.5")));
+    assert_eq!(opus["name"], "Claude Opus 5.5 (your Anthropic key)");
+    assert_eq!(split_session_name("Claude Opus 5.5 (your Anthropic key)"), Some(("Claude Opus 5.5", "Anthropic")));
+    assert_eq!(split_session_name("Claude Opus 5.5"), None);
     assert_eq!(opus["maxContextWindowTokens"], 1_000_000);
     assert_eq!(opus["maxOutputTokens"], 32_768);
     assert_eq!(opus["maxPromptTokens"], 1_000_000 - 32_768);

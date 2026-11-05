@@ -11,7 +11,8 @@ use serde_json::Value;
 
 use super::paths;
 use crate::types::{
-  AppSettings, ByokProviderSettings, ByokSettings, ExperimentFlags, ProjectsState, StudioProject, TeamWorkspace,
+  AppSettings, ByokProviderSettings, ByokSettings, ChatDefaults, ExperimentFlags, McpServerEntry, ProjectsState,
+  StudioProject, TeamWorkspace,
 };
 
 struct Cache {
@@ -30,6 +31,7 @@ fn default_state() -> ProjectsState {
     active_project_id: None,
     projects: vec![],
     team_workspaces: vec![],
+    recent_locations: vec![],
   }
 }
 
@@ -37,6 +39,10 @@ fn default_flags() -> ExperimentFlags {
   ExperimentFlags {
     team_workspaces: Some(false),
     report_migration: Some(false),
+    work_iq: Some(false),
+    mcp_servers: Some(false),
+    app_export: Some(false),
+    goals: Some(false),
   }
 }
 
@@ -48,6 +54,8 @@ fn default_settings() -> AppSettings {
     full_diagnostics: Some(false),
     deploy_mode: None,
     byok: None,
+    mcp_servers: Vec::new(),
+    chat_defaults: None,
   }
 }
 
@@ -56,64 +64,45 @@ fn default_settings() -> AppSettings {
 struct RawStore {
   workspace_root: Option<String>,
   #[serde(default)]
-  active_project_id: Option<String>,
-  #[serde(default)]
   projects: Vec<StudioProject>,
   #[serde(default)]
   team_workspaces: Vec<TeamWorkspace>,
-  /// Read as JSON first, so settings from older versions can be carried over
-  /// (see [`migrate_settings`]) before they're typed.
+  #[serde(default)]
+  recent_locations: Vec<String>,
+  /// Read as JSON first, so settings that can't be read fall back to the
+  /// defaults without losing the projects (see [`settings_from`]).
   #[serde(default)]
   settings: Option<Value>,
 }
 
-/// Carry settings saved by an older version over to this one. Deploying after
-/// each chat turn used to be the only mode unless the Deploy manually experiment
-/// was on, and that experiment started in Manual. It's now the deployment
-/// panel's switch, Auto unless the user turned it off, so its retired flag is
-/// read once: with it on, the user keeps the Manual they chose; with it off, a
-/// leftover "manual" from it goes back to Auto. Without the flag (settings from
-/// this version), nothing changes. Retired flags are then dropped as unknown.
-fn migrate_settings(mut settings: Value) -> Value {
-  let Some(experiment_on) = settings.pointer("/experiments/manualDeploy").and_then(Value::as_bool) else {
-    return settings;
-  };
-  if let Some(map) = settings.as_object_mut() {
-    match (experiment_on, map.get("deployMode").and_then(Value::as_str)) {
-      (true, None) => {
-        map.insert("deployMode".into(), "manual".into());
-      }
-      (false, Some("manual")) => {
-        map.remove("deployMode");
-      }
-      _ => {}
-    }
-  }
-  settings
-}
-
-/// The saved settings, carried over from an older version when need be. Settings
-/// that can't be read fall back to the defaults without losing the projects.
+/// The saved settings. Settings that can't be read fall back to the defaults
+/// without losing the projects; retired experiment flags are dropped as unknown.
 fn settings_from(saved: Option<Value>) -> AppSettings {
   saved
-    .map(migrate_settings)
     .and_then(|settings| serde_json::from_value(settings).ok())
     .unwrap_or_else(default_settings)
+}
+
+/// The projects a saved store holds. The project that was open when
+/// Fabricator closed isn't opened again (the store still records it): a
+/// launch opens on Home.
+fn state_from(parsed: RawStore) -> ProjectsState {
+  let mut state = default_state();
+  if let Some(root) = parsed.workspace_root {
+    state.workspace_root = root;
+  }
+  state.projects = parsed.projects;
+  state.team_workspaces = parsed.team_workspaces;
+  state.recent_locations = parsed.recent_locations;
+  state
 }
 
 fn load() -> Cache {
   match std::fs::read_to_string(paths::store_file()) {
     Ok(raw) => match serde_json::from_str::<RawStore>(&raw) {
-      Ok(parsed) => {
-        let mut state = default_state();
-        if let Some(root) = parsed.workspace_root {
-          state.workspace_root = root;
-        }
-        state.active_project_id = parsed.active_project_id;
-        state.projects = parsed.projects;
-        state.team_workspaces = parsed.team_workspaces;
-        let settings = settings_from(parsed.settings);
-        Cache { state, settings }
+      Ok(mut parsed) => {
+        let settings = settings_from(parsed.settings.take());
+        Cache { state: state_from(parsed), settings }
       }
       Err(_) => Cache {
         state: default_state(),
@@ -198,6 +187,15 @@ fn merge_experiments(experiments: &mut Option<ExperimentFlags>, patch: Experimen
   let current = experiments.get_or_insert_with(default_flags);
   if let Some(v) = patch.team_workspaces { current.team_workspaces = Some(v); }
   if let Some(v) = patch.report_migration { current.report_migration = Some(v); }
+  if let Some(v) = patch.work_iq { current.work_iq = Some(v); }
+  if let Some(v) = patch.mcp_servers { current.mcp_servers = Some(v); }
+  if let Some(v) = patch.app_export { current.app_export = Some(v); }
+  if let Some(v) = patch.goals { current.goals = Some(v); }
+}
+
+/// The Goals experiment is on.
+pub fn goals_enabled() -> bool {
+  with_cache(|c| c.settings.experiments.as_ref().and_then(|f| f.goals).unwrap_or(false))
 }
 
 /// Each provider's models and the ones shown in the model pickers.
@@ -243,13 +241,61 @@ pub fn report_migration_enabled() -> bool {
   })
 }
 
-/// True when chat turns don't deploy: the user turned off the deployment
-/// panel's "Deploy after each chat turn". Auto is the default.
-fn is_manual_deploy(settings: &AppSettings) -> bool {
-  settings.deploy_mode.as_deref() == Some("manual")
+/// The MCP servers the user added, in the order they were added.
+pub fn mcp_servers() -> Vec<McpServerEntry> {
+  with_cache(|c| c.settings.mcp_servers.clone())
 }
 
-/// True when chat turns don't deploy (see [`is_manual_deploy`]).
+/// Add an MCP server, or replace the one with its id, and return them all.
+pub fn upsert_mcp_server(server: McpServerEntry) -> Vec<McpServerEntry> {
+  with_cache(|c| {
+    match c.settings.mcp_servers.iter_mut().find(|s| s.id == server.id) {
+      Some(saved) => *saved = server,
+      None => c.settings.mcp_servers.push(server),
+    }
+    persist(c);
+    c.settings.mcp_servers.clone()
+  })
+}
+
+/// Forget an MCP server, and turn it off in every chat that has it on, and in
+/// the chat defaults. Returns the servers left.
+pub fn remove_mcp_server(id: &str) -> Vec<McpServerEntry> {
+  let plugin = format!("mcp:{id}");
+  with_cache(|c| {
+    c.settings.mcp_servers.retain(|s| s.id != id);
+    for project in &mut c.state.projects {
+      project.plugins.retain(|p| *p != plugin);
+    }
+    if let Some(defaults) = c.settings.chat_defaults.as_mut() {
+      defaults.plugins.retain(|p| *p != plugin);
+    }
+    persist(c);
+    c.settings.mcp_servers.clone()
+  })
+}
+
+/// Save what a new project's chat starts with (already checked: see
+/// `commands::chat::chat_defaults`), and return the settings.
+pub fn set_chat_defaults(defaults: ChatDefaults) -> AppSettings {
+  with_cache(|c| {
+    c.settings.chat_defaults = Some(defaults);
+    persist(c);
+    c.settings.clone()
+  })
+}
+
+/// True when chat turns don't publish personal apps: the changes stay on this
+/// computer until the user publishes them. The published apps panel's "Publish
+/// after each chat turn" saves the user's choice ("auto" or "manual"), which
+/// always wins. Without one, turns don't publish: the app runs on this computer,
+/// and publishing is the user's choice.
+fn is_manual_deploy(settings: &AppSettings) -> bool {
+  settings.deploy_mode.as_deref() != Some("auto")
+}
+
+/// True when chat turns don't publish (see [`is_manual_deploy`]). Every decision
+/// the backend makes about publishing after a turn goes through this.
 pub fn manual_deploy_enabled() -> bool {
   with_cache(|c| is_manual_deploy(&c.settings))
 }
@@ -316,13 +362,35 @@ pub fn set_workspace_root(path: String) -> ProjectsState {
   })
 }
 
+/// How many folders New project remembers.
+const RECENT_LOCATIONS: usize = 5;
+
+/// `recent` with `path` first, without another spelling of it, keeping the
+/// most recent [`RECENT_LOCATIONS`].
+fn with_recent(mut recent: Vec<String>, path: &str) -> Vec<String> {
+  recent.retain(|known| !crate::commands::util::same_path(known, path));
+  recent.insert(0, path.to_string());
+  recent.truncate(RECENT_LOCATIONS);
+  recent
+}
+
+/// Remember a folder, other than the projects folder, that a new project went in.
+pub fn remember_location(path: &str) -> ProjectsState {
+  with_cache(|c| {
+    c.state.recent_locations = with_recent(std::mem::take(&mut c.state.recent_locations), path);
+    persist(c);
+    c.state.clone()
+  })
+}
+
 pub fn set_active(id: Option<String>) -> ProjectsState {
   with_cache(|c| {
     if let Some(ref want) = id {
       // Bump the selected project to the front so Home shows true
       // most-recently-used order (matches how upsert_project front-loads
-      // newly created / opened projects).
+      // newly created / opened projects), and note when it was opened.
       if let Some(pos) = c.state.projects.iter().position(|p| &p.id == want) {
+        c.state.projects[pos].last_opened_at = Some(crate::commands::util::now_iso());
         if pos != 0 {
           let p = c.state.projects.remove(pos);
           c.state.projects.insert(0, p);
@@ -337,6 +405,11 @@ pub fn set_active(id: Option<String>) -> ProjectsState {
   })
 }
 
+/// Pin a project to the top of Home's recent projects, or unpin it.
+pub fn set_pinned(id: &str, pinned: bool) -> ProjectsState {
+  mutate_project(id, |p| p.pinned = pinned)
+}
+
 /// Insert or update a project (matched by id), keeping it at the front.
 pub fn upsert_project(project: StudioProject) -> ProjectsState {
   with_cache(|c| {
@@ -348,14 +421,16 @@ pub fn upsert_project(project: StudioProject) -> ProjectsState {
 }
 
 pub fn remove_project(id: &str) -> ProjectsState {
-  with_cache(|c| {
+  let state = with_cache(|c| {
     c.state.projects.retain(|p| p.id != id);
     if c.state.active_project_id.as_deref() == Some(id) {
       c.state.active_project_id = None;
     }
     persist(c);
     c.state.clone()
-  })
+  });
+  crate::services::thumbnails::forget(id);
+  state
 }
 
 /// Mutate a tracked project in place (id preserved) and persist.
@@ -387,6 +462,20 @@ pub fn active_project() -> Option<StudioProject> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn new_project_locations_are_remembered_newest_first_once_each() {
+    let recent = (1..=5).fold(vec![], |list, n| with_recent(list, &format!("/work/apps/{n}")));
+    assert_eq!(recent[0], "/work/apps/5");
+    // Used again, under another spelling, it moves to the front rather than repeating.
+    let recent = with_recent(recent, "/Work/Apps/2/");
+    assert_eq!(recent[..2], ["/Work/Apps/2/", "/work/apps/5"]);
+    assert_eq!(recent.len(), 5);
+    // A new one pushes the oldest out.
+    let recent = with_recent(recent, "/other");
+    assert_eq!((recent.len(), recent[0].as_str()), (5, "/other"));
+    assert!(!recent.contains(&"/work/apps/1".to_string()));
+  }
 
   #[test]
   fn experiment_patch_preserves_unmentioned_flags() {
@@ -424,37 +513,86 @@ mod tests {
   }
 
   #[test]
-  fn chat_turns_deploy_unless_the_user_chose_manual() {
-    let settings = |value: serde_json::Value| -> AppSettings { serde_json::from_value(value).unwrap() };
-    assert!(!is_manual_deploy(&default_settings()));
-    assert!(!is_manual_deploy(&settings(serde_json::json!({}))));
-    assert!(!is_manual_deploy(&settings(serde_json::json!({"deployMode":"auto"}))));
-    assert!(is_manual_deploy(&settings(serde_json::json!({"deployMode":"manual"}))));
+  fn work_iq_flag_merges_and_defaults_off() {
+    assert_eq!(default_settings().experiments.unwrap().work_iq, Some(false));
+    let mut flags: Option<ExperimentFlags> =
+      Some(serde_json::from_value(serde_json::json!({"reportMigration":true})).unwrap());
+    merge_experiments(&mut flags, serde_json::from_value(serde_json::json!({"workIq":true})).unwrap());
+    assert_eq!(
+      serde_json::to_value(flags.unwrap()).unwrap(),
+      serde_json::json!({"reportMigration":true,"workIq":true})
+    );
+  }
+
+  /// The App gallery was an experiment until it shipped to everyone; settings
+  /// saved with its old flag still load, and the flag is gone once they're saved.
+  #[test]
+  fn the_graduated_app_gallery_flag_still_loads_and_is_dropped() {
+    let flags: ExperimentFlags =
+      serde_json::from_value(serde_json::json!({"appGallery":true,"workIq":true})).unwrap();
+    assert_eq!(serde_json::to_value(flags).unwrap(), serde_json::json!({"workIq":true}));
   }
 
   #[test]
-  fn the_retired_deploy_manually_flag_carries_the_users_choice_over() {
-    let mode = |saved: serde_json::Value| settings_from(Some(saved)).deploy_mode;
-    // The experiment was on: Manual stays, including when it was Manual only by
-    // starting that way, unless the user had switched to Auto.
-    assert_eq!(mode(serde_json::json!({"experiments":{"manualDeploy":true}})).as_deref(), Some("manual"));
-    assert_eq!(mode(serde_json::json!({"experiments":{"manualDeploy":true},"deployMode":"manual"})).as_deref(), Some("manual"));
-    assert_eq!(mode(serde_json::json!({"experiments":{"manualDeploy":true},"deployMode":"auto"})).as_deref(), Some("auto"));
-    // It was turned off: the "manual" it started with is left over, not chosen.
-    assert_eq!(mode(serde_json::json!({"experiments":{"manualDeploy":false},"deployMode":"manual"})), None);
-    assert_eq!(mode(serde_json::json!({"experiments":{"manualDeploy":false}})), None);
-    // Settings from this version: Manual is the user's choice.
-    assert_eq!(mode(serde_json::json!({"deployMode":"manual"})).as_deref(), Some("manual"));
-    assert_eq!(mode(serde_json::json!({"experiments":{"teamWorkspaces":true}})), None);
-
-    // The flag is gone once the settings are saved again, so it's read only once.
-    let carried = settings_from(Some(serde_json::json!({
-      "theme":"dark","experiments":{"manualDeploy":true,"teamWorkspaces":true}
-    })));
+  fn mcp_servers_flag_merges_and_defaults_off() {
+    assert_eq!(default_settings().experiments.unwrap().mcp_servers, Some(false));
+    let mut flags: Option<ExperimentFlags> =
+      Some(serde_json::from_value(serde_json::json!({"workIq":true})).unwrap());
+    merge_experiments(&mut flags, serde_json::from_value(serde_json::json!({"mcpServers":true})).unwrap());
     assert_eq!(
-      serde_json::to_value(carried).unwrap(),
-      serde_json::json!({"theme":"dark","experiments":{"teamWorkspaces":true},"deployMode":"manual"})
+      serde_json::to_value(flags.unwrap()).unwrap(),
+      serde_json::json!({"workIq":true,"mcpServers":true})
     );
+  }
+
+  #[test]
+  fn app_export_flag_merges_and_defaults_off() {
+    assert_eq!(default_settings().experiments.unwrap().app_export, Some(false));
+    let mut flags: Option<ExperimentFlags> =
+      Some(serde_json::from_value(serde_json::json!({"mcpServers":true})).unwrap());
+    merge_experiments(&mut flags, serde_json::from_value(serde_json::json!({"appExport":true})).unwrap());
+    assert_eq!(
+      serde_json::to_value(flags.unwrap()).unwrap(),
+      serde_json::json!({"mcpServers":true,"appExport":true})
+    );
+  }
+
+  #[test]
+  fn goals_flag_merges_and_defaults_off() {
+    assert_eq!(default_settings().experiments.unwrap().goals, Some(false));
+    let mut flags: Option<ExperimentFlags> =
+      Some(serde_json::from_value(serde_json::json!({"appExport":true})).unwrap());
+    merge_experiments(&mut flags, serde_json::from_value(serde_json::json!({"goals":true})).unwrap());
+    assert_eq!(serde_json::to_value(flags.unwrap()).unwrap(), serde_json::json!({"appExport":true,"goals":true}));
+  }
+
+  #[test]
+  fn saved_mcp_servers_load_and_settings_without_them_still_do() {
+    let settings = settings_from(Some(serde_json::json!({
+      "theme":"dark",
+      "mcpServers":[{"id":"chart","name":"Chart","transport":"stdio","command":"npx","args":["-y","@antv/mcp-server-chart"],"env":["TOKEN"],"addedAt":"2026-10-31T00:00:00Z"}]
+    })));
+    assert_eq!(settings.mcp_servers.len(), 1);
+    assert_eq!(settings.mcp_servers[0].env, ["TOKEN"]);
+    assert!(!settings.mcp_servers[0].read_only);
+    assert!(settings_from(Some(serde_json::json!({"theme":"dark"}))).mcp_servers.is_empty());
+    // Without any, settings are saved as before.
+    assert!(serde_json::to_value(default_settings()).unwrap().get("mcpServers").is_none());
+  }
+
+  #[test]
+  fn an_explicit_choice_decides_whether_turns_publish_and_unset_keeps_changes_here() {
+    let manual = |saved: serde_json::Value| is_manual_deploy(&settings_from(Some(saved)));
+    assert!(is_manual_deploy(&default_settings()));
+    assert!(manual(serde_json::json!({})));
+    // The retired Local development experiment's flag no longer decides, either way.
+    assert!(manual(serde_json::json!({"experiments":{"localDevelopment":false}})));
+    assert!(manual(serde_json::json!({"experiments":{"localDevelopment":true}})));
+    assert!(manual(serde_json::json!({"deployMode":"manual"})));
+    assert!(!manual(serde_json::json!({"deployMode":"auto"})));
+    assert!(!manual(serde_json::json!({"experiments":{"localDevelopment":false},"deployMode":"auto"})));
+    // A value the switch never saves counts as no choice.
+    assert!(manual(serde_json::json!({"deployMode":"sometimes"})));
   }
 
   #[test]
@@ -475,6 +613,19 @@ mod tests {
   }
 
   #[test]
+  fn a_launch_opens_on_home_not_the_project_open_at_closing() {
+    let raw: RawStore = serde_json::from_value(serde_json::json!({
+      "workspaceRoot": "C:/x", "activeProjectId": "p",
+      "projects": [{"id":"p","name":"App","path":"C:/x/app","addedAt":"2026-01-01T00:00:00.000Z","pinned":true}]
+    })).unwrap();
+    let state = state_from(raw);
+    assert_eq!(state.active_project_id, None);
+    assert_eq!(state.workspace_root, "C:/x");
+    assert_eq!(state.projects.len(), 1);
+    assert!(state.projects[0].pinned, "the projects themselves come back as they were");
+  }
+
+  #[test]
   fn retired_experiment_flags_are_ignored_on_load() {
     for enabled in [false, true] {
       let settings: AppSettings = serde_json::from_value(serde_json::json!({
@@ -488,6 +639,8 @@ mod tests {
           "designStudio":enabled,
           "manualDeploy":enabled,
           "byok":enabled,
+          "localDevelopment":enabled,
+          "fabricIq":enabled,
           "teamWorkspaces":true
         }
       })).unwrap();

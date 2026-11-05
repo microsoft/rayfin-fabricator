@@ -327,7 +327,7 @@ describe('buildArchitecture', () => {
     expect(byTitle['Azure AI Foundry'].functions).toEqual(['summarizeReport'])
     expect(byTitle['Fabric SQL & Azure SQL'].functions).toEqual(['syncBudgets'])
 
-    // The Fabric data view gets each model once, and the SQL connector's tables.
+    // The Fabric connections view gets each model once, and the SQL connector's tables.
     expect(arch.semanticModels.map((m) => m.alias)).toEqual(['spend', 'budgets'])
     expect(arch.sqlConnectors.map((c) => c.name)).toEqual(['finance-warehouse'])
     expect(byTitle['Finance warehouse'].tablesKey).toBe('sql:finance-warehouse')
@@ -437,7 +437,7 @@ udf.func('openai', async () => fetch('https://api.openai.com/v1/responses'), [])
     const secrets = arch.services.find((s) => s.kind === 'secrets')!
     expect(secrets).toMatchObject({ summary: '2 secrets, stored with the app', tone: 'danger' })
     expect(secrets.issues.map((i) => i.text)).toEqual([
-      '`REDDIT_SECRET` is read as `ctx.Secrets` but not declared in rayfin.yml, which is a TypeScript error. Declare it with `rayfin secret set`.'
+      '`REDDIT_SECRET` is read as `ctx.Secrets` but not declared in rayfin.yml, which is a TypeScript error. Add it in Code → Secrets, which declares it in rayfin.yml.'
     ])
   })
 

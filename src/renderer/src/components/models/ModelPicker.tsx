@@ -9,7 +9,13 @@ import {
 } from 'react'
 import { createPortal } from 'react-dom'
 import type { ContextTier, ContextTierOption, CopilotModel, ReasoningEffort } from '@shared/ipc'
-import { isFastModel, useAutoTiers, useCopilotModels } from '@renderer/copilotModels'
+import {
+  defaultEffort,
+  isFastModel,
+  startingEffort,
+  useAutoTiers,
+  useCopilotModels
+} from '@renderer/copilotModels'
 import { moveMenuFocus } from '@renderer/menuFocus'
 import { menuLayout, type MenuLayout } from '@renderer/menuLayout'
 import { AUTO_SELECTION, type ModelSelection } from '@renderer/modelSelection'
@@ -45,8 +51,9 @@ const FEATURED = 8
 const MAIN_WIDTH = 268
 const FLY_WIDTH = 300
 const GAP = 6
+const FUSION_DOCS = 'https://docs.github.com/en/copilot/concepts/models/copilot-fusion'
 
-type Flyout = 'model' | 'effort' | 'context'
+type Flyout = 'model' | 'effort' | 'context' | 'tier'
 
 /** A saved model the list no longer has, by its id (without a provider prefix). */
 function missingName(id: string): string {
@@ -54,11 +61,12 @@ function missingName(id: string): string {
 }
 
 /**
- * The model picker, after GitHub Copilot's: a small menu with an Auto switch
- * (and, on Auto, what it optimizes for) or the chosen model's Model, Effort and
- * Context window, each opening a list beside the menu. The model list has a
- * search, Copilot's first models, the user's own-key models and the rest of
- * Copilot's under More models. Loads the models when it needs them.
+ * The model picker, after GitHub Copilot's: a small menu with an Auto switch,
+ * named Copilot Fusion on an account that has it, then, on Auto, Copilot
+ * Fusion's Effort (or what Auto optimizes for), or else the chosen model's
+ * Model, Effort and Context window, each a row opening a list beside the menu.
+ * The model list has a search, Copilot's first models, the user's own-key models
+ * and the rest of Copilot's under More models. Loads the models when it needs them.
  */
 export function ModelPicker({
   value,
@@ -66,6 +74,7 @@ export function ModelPicker({
   onChange,
   tiers = false,
   placement = 'up',
+  overDialog = false,
   onManageKeys,
   autoHint,
   label = 'Model'
@@ -73,10 +82,12 @@ export function ModelPicker({
   value: ModelSelection
   disabled: boolean
   onChange: (next: ModelSelection) => void
-  /** Offer what Auto optimizes for, and context windows. */
+  /** Offer Auto's tiers (Copilot Fusion's effort levels), and context windows. */
   tiers?: boolean
   /** Open above the trigger (the composer) or below it (a toolbar). */
   placement?: 'up' | 'down'
+  /** In a dialog: the menu opens over it. */
+  overDialog?: boolean
   /** Open Accounts at Model providers; shown while Your own API keys is on. */
   onManageKeys?: () => void
   /** What Auto does here, when it isn't Copilot choosing per request. */
@@ -103,7 +114,8 @@ export function ModelPicker({
 
   const isAuto = !value.model
   const { models, loading } = useCopilotModels(open || !isAuto)
-  const autoTiers = useAutoTiers(tiers && open)
+  // The pill names Copilot Fusion and its level, so they're needed before the menu opens.
+  const autoTiers = useAutoTiers(tiers && (open || isAuto))
   // A flyout reaches past the chat column, over the native preview; a menu
   // opening down from a toolbar covers it too.
   useSuppressPreview(open && (flyout !== null || placement === 'down'))
@@ -118,18 +130,37 @@ export function ModelPicker({
   const efforts = selected
     ? EFFORT_ORDER.filter((e) => selected.supportedReasoningEfforts.includes(e))
     : []
-  const defaultEffort = selected?.defaultReasoningEffort
-  const effort: ReasoningEffort | '' = efforts.length ? value.effort || defaultEffort || '' : ''
+  /** The model's own default effort, which a selection leaves blank. */
+  const ownEffort = selected?.defaultReasoningEffort
+  /** What it runs at unless you choose: its own default, or else Medium. */
+  const usualEffort = selected ? defaultEffort(selected) : undefined
+  const effort: ReasoningEffort | '' = efforts.length ? value.effort || usualEffort || '' : ''
   const windows: ContextTierOption[] = tiers ? (selected?.contextTiers ?? []) : []
   const activeWindow =
     windows.find((w) => w.tier === (value.contextTier || 'default')) ?? windows[0]
-  const activeTier = value.autoTier || autoTiers?.defaultTier || ''
-  const tierName = (id: string): string =>
-    autoTiers?.tiers.find((t) => t.id === id)?.name ?? (id ? id[0].toUpperCase() + id.slice(1) : '')
+  const offered = tiers ? autoTiers : null
+  const activeTier = value.autoTier || offered?.defaultTier || ''
+  // Where Copilot offers Copilot Fusion, it is Auto: Auto's tiers are Fusion's
+  // effort levels, and Copilot's own apps name the switch after it.
+  const fusion = offered?.tiers.some((t) => t.fusion) ?? false
+  const autoName = fusion ? 'Copilot Fusion' : 'Auto'
+  const tiersLabel = fusion ? 'Effort' : 'Optimized for'
+  const chosenTier = value.autoTier
+    ? offered?.tiers.find((t) => t.id === value.autoTier)
+    : undefined
+  /** The tier Auto runs on: the one chosen, or Copilot's default. */
+  const activeTierName =
+    (
+      offered?.tiers.find((t) => t.id === activeTier) ??
+      offered?.tiers.find((t) => t.id === offered.defaultTier)
+    )?.name ?? ''
 
-  // Auto names its tier only when one was chosen; Copilot's default goes unsaid.
+  // Copilot Fusion always names its level, as a model names its effort. Auto
+  // names its tier only when one was chosen; Copilot's default goes unsaid.
   const summary = isAuto
-    ? ['Auto', tiers && value.autoTier ? tierName(value.autoTier) : '']
+    ? fusion
+      ? [autoName, activeTierName]
+      : [autoName, chosenTier?.name ?? '']
     : [
         selected?.name ?? missingName(value.model),
         effort ? EFFORT_LABEL[effort].label : '',
@@ -217,7 +248,7 @@ export function ModelPicker({
       value.contextTier && m.contextTiers?.some((w) => w.tier === value.contextTier)
     commit({
       model: m.id,
-      effort: keepEffort ? value.effort : '',
+      effort: keepEffort ? value.effort : startingEffort(m),
       autoTier: '',
       contextTier: keepWindow ? value.contextTier : ''
     })
@@ -231,7 +262,7 @@ export function ModelPicker({
     }
     const first = copilot[0] ?? keyModels.find((m) => m.byok?.ready)
     if (!first) return
-    onChange({ ...AUTO_SELECTION, model: first.id })
+    onChange({ ...AUTO_SELECTION, model: first.id, effort: startingEffort(first) })
     openFlyout('model')
   }
 
@@ -453,23 +484,10 @@ export function ModelPicker({
     </>
   )
 
+  // No Automatic: a model without a default of its own starts at Medium, as
+  // Copilot would otherwise run it with no reasoning effort at all.
   const effortFlyout = (
     <div className="mp-fly-items">
-      {!defaultEffort && (
-        <button
-          type="button"
-          role="menuitemradio"
-          aria-checked={!value.effort}
-          className="mp-item"
-          onClick={() => commit({ ...value, effort: '' })}
-        >
-          <span className="mp-item-text">
-            <span className="mp-item-label">Automatic</span>
-            <span className="mp-item-desc">The model decides how long to think.</span>
-          </span>
-          <Codicon name="check" className={`mp-check${value.effort ? ' mp-check--off' : ''}`} />
-        </button>
-      )}
       {efforts.map((e) => (
         <button
           key={e}
@@ -477,12 +495,12 @@ export function ModelPicker({
           role="menuitemradio"
           aria-checked={effort === e}
           className="mp-item"
-          onClick={() => commit({ ...value, effort: e === defaultEffort ? '' : e })}
+          onClick={() => commit({ ...value, effort: e === ownEffort ? '' : e })}
         >
           <span className="mp-item-text">
             <span className="mp-item-label">
               {EFFORT_LABEL[e].label}
-              {e === defaultEffort && <span className="mp-badge mp-badge--inline">Default</span>}
+              {e === usualEffort && <span className="mp-badge mp-badge--inline">Default</span>}
             </span>
             <span className="mp-item-desc">{EFFORT_LABEL[e].hint}</span>
           </span>
@@ -512,6 +530,52 @@ export function ModelPicker({
         )
       })}
       <p className="mp-note">A long window keeps more of your app and the conversation in view.</p>
+    </div>
+  )
+
+  const tierFlyout = (
+    <div className="mp-fly-items">
+      {autoTiers?.tiers.map((t) => {
+        const on = activeTier === t.id
+        const desc = t.enabled ? t.description : t.note || t.description
+        return (
+          <button
+            key={t.id}
+            type="button"
+            role="menuitemradio"
+            aria-checked={on}
+            disabled={!t.enabled}
+            className="mp-item"
+            onClick={() => commit({ ...AUTO_SELECTION, autoTier: t.id })}
+          >
+            <span className="mp-item-text">
+              <span className="mp-item-label">{t.name}</span>
+              {desc && <span className="mp-item-desc">{desc}</span>}
+            </span>
+            <Codicon name="check" className={`mp-check${on ? '' : ' mp-check--off'}`} />
+          </button>
+        )
+      })}
+      {fusion && (
+        <>
+          <p className="mp-note">
+            High and Max can use more than one model, such as one to review another’s work, so a
+            request can take longer and cost more.
+          </p>
+          <button
+            type="button"
+            role="menuitem"
+            className="mp-item mp-learn"
+            onClick={() => {
+              closeMenu(false)
+              void window.api.openExternal(FUSION_DOCS)
+            }}
+          >
+            <span className="mp-item-label">Learn more about Copilot Fusion</span>
+            <Codicon name="link-external" className="mp-caret" />
+          </button>
+        </>
+      )}
     </div>
   )
 
@@ -546,7 +610,14 @@ export function ModelPicker({
         {missing && <Codicon name="warning" className="mp-pill-warn" />}
         {/* In a narrow composer the logo (or warning) stands in for the name; Auto keeps its label. */}
         <span className={`composer-pill-label${selected || missing ? ' composer-pill-label--model' : ''}`}>
-          {pillText}
+          {isAuto && fusion ? (
+            <>
+              <span className="mp-pill-brand">Copilot </span>
+              {pillText.replace(/^Copilot /, '')}
+            </>
+          ) : (
+            pillText
+          )}
         </span>
         {selected?.byok && <Codicon name="key" className="mp-pill-key" />}
         <Codicon name="chevron-down" className="composer-pill-caret" />
@@ -555,7 +626,7 @@ export function ModelPicker({
         createPortal(
           <div
             ref={popRef}
-            className={`mp-pop mp-pop--${placement} mp-pop--${layout.side}`}
+            className={`mp-pop mp-pop--${placement} mp-pop--${layout.side}${overDialog ? ' mp-pop--over-dialog' : ''}`}
             style={layout.style}
           >
             <div
@@ -574,9 +645,12 @@ export function ModelPicker({
                 onClick={toggleAuto}
               >
                 <span className="mp-item-text">
-                  <span className="mp-item-label">Auto</span>
+                  <span className="mp-item-label">{autoName}</span>
                   <span className="mp-item-desc">
-                    {autoHint ?? 'Copilot picks the model for each request.'}
+                    {autoHint ??
+                      (fusion
+                        ? 'Copilot picks the models for each request.'
+                        : 'Copilot picks the model for each request.')}
                   </span>
                 </span>
                 <span
@@ -587,32 +661,7 @@ export function ModelPicker({
                 </span>
               </button>
               {isAuto && tiers && autoTiers && (
-                <div className="mp-group" role="group" aria-label="Optimized for">
-                  <div className="mp-heading" aria-hidden="true">
-                    Optimized for
-                  </div>
-                  {autoTiers.tiers.map((t) => {
-                    const on = activeTier === t.id
-                    const desc = t.enabled ? t.description : t.note || t.description
-                    return (
-                      <button
-                        key={t.id}
-                        type="button"
-                        role="menuitemradio"
-                        aria-checked={on}
-                        disabled={!t.enabled}
-                        className="mp-item"
-                        onClick={() => commit({ ...AUTO_SELECTION, autoTier: t.id })}
-                      >
-                        <span className="mp-item-text">
-                          <span className="mp-item-label">{t.name}</span>
-                          {desc && <span className="mp-item-desc">{desc}</span>}
-                        </span>
-                        <Codicon name="check" className={`mp-check${on ? '' : ' mp-check--off'}`} />
-                      </button>
-                    )
-                  })}
-                </div>
+                <div className="mp-group">{subRow('tier', tiersLabel, activeTierName)}</div>
               )}
               {!isAuto && (
                 <div className="mp-group">
@@ -627,7 +676,7 @@ export function ModelPicker({
                     </>
                   )}
                   {efforts.length > 0 &&
-                    subRow('effort', 'Effort', effort ? EFFORT_LABEL[effort].label : 'Automatic')}
+                    subRow('effort', 'Effort', effort ? EFFORT_LABEL[effort].label : 'Default')}
                   {windows.length > 1 &&
                     activeWindow &&
                     subRow('context', 'Context window', formatTokens(activeWindow.tokens))}
@@ -653,7 +702,13 @@ export function ModelPicker({
                 className={`mp-panel mp-fly mp-fly--${flyout}`}
                 role="menu"
                 aria-label={
-                  flyout === 'model' ? 'Models' : flyout === 'effort' ? 'Effort' : 'Context window'
+                  flyout === 'model'
+                    ? 'Models'
+                    : flyout === 'effort'
+                      ? 'Effort'
+                      : flyout === 'tier'
+                        ? tiersLabel
+                        : 'Context window'
                 }
                 ref={flyRef}
                 onKeyDown={onFlyKey}
@@ -662,7 +717,9 @@ export function ModelPicker({
                   ? modelFlyout
                   : flyout === 'effort'
                     ? effortFlyout
-                    : contextFlyout}
+                    : flyout === 'tier'
+                      ? tierFlyout
+                      : contextFlyout}
               </div>
             )}
           </div>,

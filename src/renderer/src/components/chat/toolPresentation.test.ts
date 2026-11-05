@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import type { ChatToolCall } from '@shared/ipc'
-import { describeStep, isHiddenTool, stepLabel, summarizeKinds, toolKind } from './toolPresentation'
+import {
+  describeStep,
+  isHiddenTool,
+  phaseLabel,
+  stepLabel,
+  summarizeKinds,
+  toolKind
+} from './toolPresentation'
 
 const ROOT = 'C:\\Users\\sachi\\RayfinProjects\\df55-app'
 const tool = (name: string, title: string, extra: Partial<ChatToolCall> = {}): ChatToolCall => ({
@@ -38,6 +45,15 @@ describe('toolKind', () => {
       fabricator_navigate: 'navigate',
       fabricator_deploy_and_wait: 'deploy',
       fabricator_console: 'console',
+      fabricator_local_status: 'local-status',
+      fabricator_local_call: 'local-call',
+      fabricator_goals_call: 'local-call',
+      fabricator_local_seed: 'local-seed',
+      // MCP tools are named after their server; these would otherwise read as project searches or web reads.
+      'FabricIQ-ValueSearch': 'fabric-iq',
+      'FabricIQ-ExecuteQuery': 'fabric-iq',
+      'workiq-search_paths': 'work-iq',
+      'workiq-fetch': 'work-iq',
       mystery_tool: 'other'
     }
     for (const [name, kind] of Object.entries(cases))
@@ -114,7 +130,7 @@ describe('describeStep', () => {
       stepLabel(
         describeStep(tool('fabricator_deploy_and_wait', 'fabricator_deploy_and_wait'), ROOT)
       )
-    ).toBe('Deployed the app')
+    ).toBe('Published the app')
     expect(stepLabel(describeStep(tool('mystery_tool', 'mystery_tool'), ROOT))).toBe(
       'Used mystery tool'
     )
@@ -123,6 +139,73 @@ describe('describeStep', () => {
         describeStep(tool('write_powershell', 'write_powershell', { state: 'running' }), ROOT)
       )
     ).toBe('Sending input to a command')
+  })
+
+  it('describes the local backend tools in plain words', () => {
+    expect(
+      stepLabel(describeStep(tool('fabricator_local_status', 'fabricator_local_status'), ROOT))
+    ).toBe('Checked the local backend')
+    expect(
+      stepLabel(
+        describeStep(
+          tool('fabricator_local_status', 'fabricator_local_status', { state: 'running' }),
+          ROOT
+        )
+      )
+    ).toBe('Checking the local backend')
+    expect(
+      stepLabel(describeStep(tool('fabricator_local_call', 'the getBacklog function as you'), ROOT))
+    ).toBe('Called the getBacklog function as you')
+    expect(
+      stepLabel(
+        describeStep(
+          tool('fabricator_local_call', 'the app’s data API while signed out', {
+            state: 'running'
+          }),
+          ROOT
+        )
+      )
+    ).toBe('Calling the app’s data API while signed out')
+    expect(
+      stepLabel(describeStep(tool('fabricator_local_call', 'fabricator_local_call'), ROOT))
+    ).toBe('Called the app')
+    expect(phaseLabel('fabricator_local_status')).toBe('Checking the local backend')
+    expect(phaseLabel('fabricator_local_call')).toBe('Calling the app')
+    // The seed tool's title says whether it checked or loaded the seed data.
+    expect(stepLabel(describeStep(tool('fabricator_local_seed', 'check'), ROOT))).toBe(
+      'Checked the seed data'
+    )
+    expect(
+      stepLabel(describeStep(tool('fabricator_local_seed', 'load', { state: 'running' }), ROOT))
+    ).toBe('Loading the seed data')
+    expect(phaseLabel('fabricator_local_seed')).toBe('Checking the seed data')
+  })
+
+  it('says which service an IQ lookup went to, and what it asked', () => {
+    expect(stepLabel(describeStep(tool('workiq-ask', 'Who owns the billing service?'), ROOT))).toBe(
+      'Looked up in Work IQ “Who owns the billing service?”'
+    )
+    expect(
+      stepLabel(
+        describeStep(tool('FabricIQ-DiscoverArtifacts', 'FabricIQ-DiscoverArtifacts'), ROOT)
+      )
+    ).toBe('Looked up in Fabric IQ')
+    expect(phaseLabel('FabricIQ-ExecuteQuery')).toBe('Looking up Power BI data')
+  })
+
+  it('says which of your MCP servers a tool came from, whatever its name', () => {
+    const chart = tool('chart-generate_bar_chart', 'generate_bar_chart', { server: 'Charts' })
+    const view = describeStep(chart, ROOT)
+    expect(view.kind).toBe('mcp')
+    expect(stepLabel(view)).toBe('Used generate_bar_chart from Charts')
+    expect(stepLabel(describeStep({ ...chart, state: 'running' }, ROOT))).toBe(
+      'Using generate_bar_chart from Charts'
+    )
+    expect(phaseLabel(chart.name, chart.server)).toBe('Using Charts')
+    // A server named like a built-in tool isn't taken for one.
+    const search = tool('search-find_docs', 'find_docs', { server: 'Search' })
+    expect(describeStep(search, ROOT).kind).toBe('mcp')
+    expect(summarizeKinds([search])).toEqual([])
   })
 
   it('reports step durations from renderer timestamps', () => {

@@ -12,8 +12,11 @@ export interface ActionHandlers {
   newProject(): void
   openFolder(): void
   cloneFromGitHub(): void
+  importProject(): void
   migrateReport(): void
+  openGallery(): void
   manageProject(): void
+  exportProject(): void
   openOverview(): void
   deploy(): void
   share(): void
@@ -23,6 +26,8 @@ export interface ActionHandlers {
   openSettings(): void
   openAccounts(): void
   openApiKeys(): void
+  openMcpServers(): void
+  openChatDefaults(): void
   refreshFabricAuth(): void
   signInToFabric(): void
   openSetup(): void
@@ -43,16 +48,22 @@ export interface ActionContext {
   /** Home is showing. */
   onHome: boolean
   view: ProjectView
-  /** The open app has a Fabric deployment. */
+  /** The open app has been published to Fabric. */
   deployed: boolean
   deploying: boolean
-  /** Copilot is working on the open app, so a deploy would have to wait. */
+  /** Copilot is working on the open app, so publishing would have to wait. */
   chatBusy: boolean
-  /** What the open app's next deploy would ship, when known. */
+  /** What the open app's next publish would ship, when known. */
   pending?: { changed: boolean; files?: number }
-  /** Deploy after each chat turn. */
+  /** Publish after each chat turn. */
   autoDeploy: boolean
   migrationEnabled: boolean
+  /** The MCP servers experiment is on. */
+  mcpServersEnabled: boolean
+  /** The open app has the Goals tab (an experiment). */
+  goalsEnabled: boolean
+  /** The App gallery is showing. */
+  inGallery: boolean
   /** The open team app's workspace. */
   teamWorkspaceName?: string
   theme: ThemePreference
@@ -99,6 +110,20 @@ const VIEWS: {
     icon: 'shield',
     detail: (name) => `Check ${name} for problems before you share it`,
     keywords: ['review', 'issues', 'security', 'checks', 'quality']
+  },
+  {
+    view: 'goals',
+    title: 'Goals',
+    icon: 'target',
+    detail: (name) => `Check ${name} still does what it’s for`,
+    keywords: [
+      'purpose',
+      'evals',
+      'acceptance criteria',
+      'requirements',
+      'business goals',
+      'intent'
+    ]
   }
 ]
 
@@ -122,6 +147,7 @@ export function buildActions(ctx: ActionContext): SearchItem[] {
 
   if (project && ctx.toolsReady) {
     for (const v of VIEWS) {
+      if (v.view === 'goals' && !ctx.goalsEnabled) continue
       add({
         id: `action:view-${v.view}`,
         title: v.title,
@@ -163,18 +189,19 @@ export function buildActions(ctx: ActionContext): SearchItem[] {
       const files = ctx.pending?.changed ? ctx.pending.files : undefined
       add({
         id: 'action:deploy',
-        // As the deployment control words it.
+        // As the publish control words it.
         title: ctx.pending?.changed
           ? files
-            ? `Deploy ${plural(files, 'change')}`
-            : 'Deploy changes'
-          : 'Redeploy',
+            ? `Publish ${plural(files, 'change')}`
+            : 'Publish changes'
+          : 'Publish',
         subtitle: files
-          ? `${plural(files, 'file')} changed since ${project.name} was deployed`
+          ? `${plural(files, 'file')} changed since ${project.name} was published`
           : ctx.pending?.changed
             ? `Your latest changes aren’t on ${project.name} yet`
-            : `Deploy ${project.name} again`,
-        keywords: ['deploy', 'publish', 'ship', 'fabric'],
+            : `Publish ${project.name} again`,
+        // People who know it as deploying still find it.
+        keywords: ['deploy', 'redeploy', 'ship', 'fabric'],
         icon: { kind: 'codicon', name: 'rocket' },
         run: run.deploy
       })
@@ -192,12 +219,12 @@ export function buildActions(ctx: ActionContext): SearchItem[] {
     add({
       id: 'action:auto-deploy',
       title: ctx.autoDeploy
-        ? 'Turn off Deploy after each chat turn'
-        : 'Turn on Deploy after each chat turn',
+        ? 'Turn off Publish after each chat turn'
+        : 'Turn on Publish after each chat turn',
       subtitle: ctx.autoDeploy
-        ? 'Keep chat changes on this computer until you deploy them'
-        : 'Deploy what each chat turn changes as it finishes',
-      keywords: ['auto deploy', 'automatic', 'manual deploy'],
+        ? 'Keep chat changes on this computer until you publish them'
+        : 'Publish what each chat turn changes as it finishes',
+      keywords: ['auto publish', 'automatic', 'auto deploy', 'manual deploy'],
       icon: { kind: 'codicon', name: 'sync' },
       run: () => run.setAutoDeploy(!ctx.autoDeploy)
     })
@@ -237,6 +264,14 @@ export function buildActions(ctx: ActionContext): SearchItem[] {
     icon: { kind: 'codicon', name: 'repo-clone' },
     run: run.cloneFromGitHub
   })
+  add({
+    id: 'action:import-project',
+    title: 'Import a project',
+    subtitle: 'Open a .fabricator file someone sent you',
+    keywords: ['fabricator file', 'zip', 'received', 'sent to me'],
+    icon: { kind: 'codicon', name: 'package' },
+    run: run.importProject
+  })
   if (ctx.migrationEnabled) {
     add({
       id: 'action:migrate',
@@ -247,14 +282,34 @@ export function buildActions(ctx: ActionContext): SearchItem[] {
       run: run.migrateReport
     })
   }
+  if (!ctx.inGallery) {
+    add({
+      id: 'action:gallery',
+      title: 'App gallery',
+      subtitle: 'Browse every app you can open in Fabric',
+      keywords: ['fabric apps', 'published apps', 'browse', 'catalog', 'shared with me'],
+      icon: { kind: 'codicon', name: 'library' },
+      run: run.openGallery
+    })
+  }
   if (project) {
     add({
       id: 'action:manage-project',
       title: `Manage ${project.name}`,
-      subtitle: 'Rename it, or remove it from Fabricator',
+      subtitle: 'Rename it, export it, or remove it from Fabricator',
       keywords: ['rename', 'remove', 'delete', 'trash'],
       icon: { kind: 'codicon', name: 'gear' },
       run: run.manageProject
+    })
+  }
+  if (project && !project.team && !project.missing) {
+    add({
+      id: 'action:export-project',
+      title: `Export ${project.name}`,
+      subtitle: 'Save it as a file someone else can import',
+      keywords: ['send', 'share a copy', 'transfer', 'give', 'hand off', 'handoff', 'zip'],
+      icon: { kind: 'codicon', name: 'package' },
+      run: run.exportProject
     })
   }
   if (project?.team) {
@@ -316,6 +371,24 @@ export function buildActions(ctx: ActionContext): SearchItem[] {
     icon: { kind: 'codicon', name: 'key' },
     run: run.openApiKeys
   })
+  if (ctx.mcpServersEnabled) {
+    add({
+      id: 'action:mcp-servers',
+      title: 'Manage MCP servers',
+      subtitle: 'Add the MCP servers chat can turn on in its Plugins',
+      keywords: ['mcp', 'model context protocol', 'plugins', 'tools', 'servers'],
+      icon: { kind: 'codicon', name: 'plug' },
+      run: run.openMcpServers
+    })
+  }
+  add({
+    id: 'action:chat-defaults',
+    title: 'Manage chat defaults',
+    subtitle: 'The model and plugins a new project’s chat starts with',
+    keywords: ['default model', 'models', 'plugins', 'mcp', 'chat', 'new project'],
+    icon: { kind: 'codicon', name: 'comment-discussion' },
+    run: run.openChatDefaults
+  })
   if (ctx.fabricSignedIn && project) {
     add({
       id: 'action:fabric-refresh',
@@ -330,7 +403,7 @@ export function buildActions(ctx: ActionContext): SearchItem[] {
     add({
       id: 'action:fabric-sign-in',
       title: 'Sign in to Fabric',
-      subtitle: 'Microsoft Fabric hosts the apps you deploy',
+      subtitle: 'Microsoft Fabric hosts the apps you publish',
       keywords: ['login', 'microsoft', 'account'],
       icon: { kind: 'codicon', name: 'sign-in' },
       run: run.signInToFabric

@@ -81,6 +81,7 @@ export function ToolKindIcon({
         </svg>
       )
     case 'model':
+    case 'fabric-iq':
       return (
         <svg {...p}>
           <ellipse cx="12" cy="6.5" rx="7" ry="2.8" />
@@ -133,6 +134,48 @@ export function ToolKindIcon({
         <svg {...p}>
           <path d="M4 8.5h3l1.5-2h7L17 8.5h3v10H4z" />
           <circle cx="12" cy="13" r="3" />
+        </svg>
+      )
+    case 'local-status':
+      return (
+        <svg {...p}>
+          <rect x="4" y="4.5" width="16" height="6.5" rx="1.6" />
+          <rect x="4" y="13" width="16" height="6.5" rx="1.6" />
+          <path d="M7.5 7.75h.01M7.5 16.25h.01" />
+          <path d="M11 7.75h5.5M11 16.25h5.5" />
+        </svg>
+      )
+    case 'local-call':
+      return (
+        <svg {...p}>
+          <rect x="12.5" y="4.5" width="8" height="15" rx="1.8" />
+          <path d="M15.5 8.5h2M15.5 12h2" />
+          <path d="M3.5 14h6.5" />
+          <path d="M7.5 11.5 10 14l-2.5 2.5" />
+        </svg>
+      )
+    case 'local-seed':
+      return (
+        <svg {...p}>
+          <ellipse cx="12" cy="6.5" rx="7" ry="2.5" />
+          <path d="M5 6.5v11c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5v-11" />
+          <path d="M5 12c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5" />
+        </svg>
+      )
+    case 'work-iq':
+      return (
+        <svg {...p}>
+          <rect x="3.5" y="7.5" width="17" height="12" rx="2" />
+          <path d="M9 7.5V5.5h6v2" />
+          <path d="M3.5 12.5h17" />
+        </svg>
+      )
+    case 'mcp':
+      return (
+        <svg {...p}>
+          <path d="M9 3.5v4M15 3.5v4" />
+          <path d="M6.5 7.5h11v3a5.5 5.5 0 0 1-11 0z" />
+          <path d="M12 16v4.5" />
         </svg>
       )
     default:

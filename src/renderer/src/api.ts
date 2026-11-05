@@ -10,10 +10,14 @@
  */
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { serializePreviewMutations } from './previewSurface'
+import { isMac } from './platform'
 import {
   IpcChannels,
   type AdvisorModelChoice,
+  type AppIconImage,
+  type AppProgressEvent,
   type AppSettings,
   type AuthProvider,
   type AdvisorEventEnvelope,
@@ -24,10 +28,16 @@ import {
   type ChatMessage,
   type ChatMode,
   type ChatOptions,
+  type ChatPluginId,
   type CreateProjectInput,
   type CustomSkillSaveInput,
   type DevStateEvent,
   type HelpEventEnvelope,
+  type LocalIdentityRequest,
+  type LocalLogEvent,
+  type LocalStartOptions,
+  type LocalStatus,
+  type McpServerInput,
   type MigrationInspectedPage,
   type MigrationPage,
   type MigrationSource,
@@ -38,8 +48,13 @@ import {
   type ProcLogEvent,
   type DeleteProgressEvent,
   type DesignVariationsOptions,
+  type ExportOptions,
+  type FileDropEvent,
+  type GoalsEventEnvelope,
+  type GoalsRunRequest,
   type RayfinStudioApi,
   type ReasoningEffort,
+  type SecurityEventEnvelope,
   type TeamCreateRequest,
   type TeamDiagnoseRequest,
   type TeamDiagnosisEnvelope,
@@ -47,7 +62,8 @@ import {
   type TeamResourceRequest,
   type TeamRunner,
   type ToolId,
-  type UpdateProgress
+  type UpdateProgress,
+  type ZipProgressEvent
 } from '@shared/ipc'
 import type {
   DesignCommand,
@@ -58,6 +74,7 @@ import type {
   DesignRestyleContext,
   DesignVariationEvent
 } from '@shared/design'
+import { toLocalBackendError } from './localBackend'
 
 /** Subscribe to a Tauri event, returning a synchronous unsubscribe function. */
 function subscribe<T>(name: string, cb: (payload: T) => void): () => void {
@@ -74,6 +91,40 @@ function subscribe<T>(name: string, cb: (payload: T) => void): () => void {
   }
 }
 
+/**
+ * Where a drag from the OS is, in the page's coordinates. Windows reports it in
+ * physical pixels; macOS already in points, which the page uses as they are.
+ */
+function dropPoint(position: { x: number; y: number }): { x: number; y: number } {
+  const scale = isMac() ? 1 : window.devicePixelRatio || 1
+  return { x: position.x / scale, y: position.y / scale }
+}
+
+/** Files and folders dragged onto the window from the OS, through the webview's drop handler. */
+function subscribeFileDrop(cb: (event: FileDropEvent) => void): () => void {
+  let unlisten: UnlistenFn | undefined
+  let cancelled = false
+  void getCurrentWebview()
+    .onDragDropEvent(({ payload }) => {
+      if (payload.type === 'leave') cb({ type: 'leave', paths: [], point: null })
+      else
+        cb({
+          type: payload.type,
+          paths: payload.type === 'over' ? [] : payload.paths,
+          point: dropPoint(payload.position)
+        })
+    })
+    .then((fn) => {
+      if (cancelled) fn()
+      else unlisten = fn
+    })
+  return () => {
+    cancelled = true
+    unlisten?.()
+    unlisten = undefined
+  }
+}
+
 /** A one-off Advisor run's model, as command arguments (blank parts left out). */
 function modelChoiceArgs(choice?: AdvisorModelChoice): AdvisorModelChoice {
   return {
@@ -82,6 +133,21 @@ function modelChoiceArgs(choice?: AdvisorModelChoice): AdvisorModelChoice {
     autoTier: choice?.autoTier || undefined,
     contextTier: choice?.contextTier || undefined
   }
+}
+
+/** Invoke a local backend command; a rejection becomes a `LocalBackendError`. */
+function localInvoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  return invoke<T>(command, args).catch((reason: unknown) => {
+    throw toLocalBackendError(reason)
+  })
+}
+
+/** Bytes the core sent as base64, which crosses the IPC much faster than raw bytes. */
+function fromBase64(text: string): ArrayBuffer {
+  const binary = atob(text)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+  return bytes.buffer
 }
 
 export const api: RayfinStudioApi = {
@@ -107,6 +173,7 @@ export const api: RayfinStudioApi = {
   openInEditor: (id: string) => invoke('open_in_editor', { id }),
   relaunch: () => invoke('relaunch'),
   revealWindow: (background?: string) => invoke('window_reveal', { background: background ?? null }),
+  onFileDrop: subscribeFileDrop,
 
   updates: {
     check: () => invoke('update_check'),
@@ -207,26 +274,64 @@ export const api: RayfinStudioApi = {
       subscribe<MigrationStateEvent>(IpcChannels.migrationState, cb)
   },
 
+  gallery: {
+    list: (refresh?: boolean) => invoke('gallery_list', { refresh: refresh ?? null }),
+    status: (apps: Array<{ workspaceId: string; id: string }>) =>
+      invoke('gallery_status', { apps }),
+    describe: (projectId: string, replace?: boolean) =>
+      invoke('gallery_describe', { projectId, replace: replace ?? null }),
+    quickLook: {
+      show: (url: string, bounds: PreviewBounds) => invoke('quicklook_show', { url, bounds }),
+      setBounds: (bounds: PreviewBounds) => invoke('quicklook_set_bounds', { bounds }),
+      close: () => invoke('quicklook_close')
+    }
+  },
+
   projects: {
     state: () => invoke('projects_state'),
     communityTemplates: (repoUrl?: string) => invoke('projects_community_templates', { repoUrl }),
-    checkName: (name: string, teamWorkspaceId?: string) =>
-      invoke('projects_check_name', { name, teamWorkspaceId: teamWorkspaceId ?? null }),
+    checkName: (name: string, teamWorkspaceId?: string, location?: string) =>
+      invoke('projects_check_name', {
+        name,
+        teamWorkspaceId: teamWorkspaceId ?? null,
+        location: location ?? null
+      }),
     pickFolder: () => invoke('projects_pick_folder'),
+    checkLocation: (path: string) => invoke('projects_check_location', { path }),
+    createLocation: (path: string) => invoke('projects_create_location', { path }),
     pickWorkspaceRoot: () => invoke('projects_pick_workspace_root'),
     setWorkspaceRoot: (path: string) => invoke('projects_set_workspace_root', { path }),
     create: (input: CreateProjectInput) => invoke('projects_create', { input }),
     open: (path: string) => invoke('projects_open', { path }),
     ensureDependencies: (id: string) => invoke('projects_prepare_dependencies', { id }),
     setActive: (id: string | null) => invoke('projects_set_active', { id }),
+    setPinned: (id: string, pinned: boolean) => invoke('projects_set_pinned', { id, pinned }),
+    reveal: (id: string) => invoke('projects_reveal', { id }),
+    saveThumbnail: (id: string, image: string) => invoke('projects_thumbnail_save', { id, image }),
+    thumbnails: (ids: string[]) => invoke('projects_thumbnails', { ids }),
     rename: (id: string, name: string) => invoke('projects_rename', { id, name }),
     setWorkspace: (id: string, workspace?: string, workspaceName?: string) =>
       invoke('projects_set_workspace', { id, workspace, workspaceName }),
     setPreviewMode: (id: string, mode: string) => invoke('projects_set_preview_mode', { id, mode }),
     remove: (id: string, deleteFiles?: boolean) => invoke('projects_remove', { id, deleteFiles }),
+    exportPreview: (id: string) => invoke('projects_export_preview', { id }),
+    exportProject: (id: string, options: ExportOptions) =>
+      invoke('projects_export', { id, options }),
+    exportApp: (id: string, icons: AppIconImage[]) => invoke('projects_export_app', { id, icons }),
+    stopExport: (id: string) => invoke('projects_export_stop', { id }),
+    revealExport: (path: string) => invoke('projects_export_reveal', { path }),
+    pickImport: () => invoke('projects_import_pick'),
+    inspectImport: (path: string) => invoke('projects_import_inspect', { path }),
+    importProject: (path: string) => invoke('projects_import', { path }),
+    openedExports: () => invoke('projects_opened_exports'),
+    onExportOpened: (cb: () => void) => subscribe<null>(IpcChannels.exportOpened, () => cb()),
+    onZipProgress: (cb: (event: ZipProgressEvent) => void) =>
+      subscribe<ZipProgressEvent>(IpcChannels.zipProgress, cb),
     git: {
       status: (id: string) => invoke('projects_git_status', { id }),
       commit: (id: string, message: string) => invoke('projects_git_commit', { id, message }),
+      message: (id: string) => invoke('projects_git_message', { id }),
+      saveTurn: (id: string, request: string) => invoke('projects_git_save_turn', { id, request }),
       log: (id: string) => invoke('projects_git_log', { id }),
       changes: (id: string, ref: string) => invoke('projects_git_changes', { id, ref }),
       fileDiff: (id: string, ref: string, path: string, oldPath?: string) =>
@@ -240,16 +345,23 @@ export const api: RayfinStudioApi = {
       remoteStatus: (id: string) => invoke('projects_git_remote_status', { id }),
       divergence: (id: string) => invoke('projects_git_divergence', { id }),
       pull: (id: string) => invoke('projects_git_pull', { id }),
-      push: (id: string) => invoke('projects_git_push', { id })
+      push: (id: string) => invoke('projects_git_push', { id }),
+      branches: (id: string) => invoke('projects_git_branches', { id }),
+      switchBranch: (id: string, branch: string) => invoke('projects_git_switch', { id, branch }),
+      mergeLatest: (id: string) => invoke('projects_git_merge_latest', { id }),
+      finishMerge: (id: string) => invoke('projects_git_finish_merge', { id }),
+      abortMerge: (id: string) => invoke('projects_git_abort_merge', { id })
     },
     files: {
       tree: (id: string) => invoke('projects_files_tree', { id }),
-      read: (id: string, path: string) => invoke('projects_files_read', { id, path })
+      read: (id: string, path: string) => invoke('projects_files_read', { id, path }),
+      listDir: (id: string, path: string) => invoke('projects_files_list_dir', { id, path })
     }
   },
 
   rayfin: {
-    versions: (id: string) => invoke('rayfin_versions', { id })
+    versions: (id: string) => invoke('rayfin_versions', { id }),
+    latest: () => invoke('rayfin_latest')
   },
 
   skills: {
@@ -276,7 +388,9 @@ export const api: RayfinStudioApi = {
     list: (projectId: string) => invoke('secrets_list', { projectId }),
     set: (projectId: string, name: string, value: string, description?: string) =>
       invoke('secrets_set', { projectId, name, value, description }),
-    remove: (projectId: string, name: string) => invoke('secrets_delete', { projectId, name })
+    remove: (projectId: string, name: string) => invoke('secrets_delete', { projectId, name }),
+    declare: (projectId: string, name: string, description?: string) =>
+      invoke('secrets_declare', { projectId, name, description })
   },
 
   advisor: {
@@ -339,23 +453,32 @@ export const api: RayfinStudioApi = {
       invoke('chat_save_history', { projectId, messages }),
     setOptions: (projectId: string, options: ChatOptions) =>
       invoke('chat_set_options', { projectId, options }),
+    setPlugin: (projectId: string, plugin: ChatPluginId, on: boolean) =>
+      invoke('chat_set_plugin', { projectId, plugin, on }),
     listModels: () => invoke('chat_models'),
     autoTiers: () => invoke('chat_auto_tiers'),
+    usage: (projectId: string) => invoke('chat_usage', { projectId }),
+    quota: () => invoke('chat_quota'),
     suggest: (projectId: string) => invoke('chat_suggest', { projectId }),
-    cancelSuggest: (projectId: string) => invoke('chat_suggest_cancel', { projectId })
+    cancelSuggest: (projectId: string) => invoke('chat_suggest_cancel', { projectId }),
+    pickPaths: () => invoke('chat_pick_paths'),
+    inspectPaths: (paths: string[]) => invoke('chat_inspect_paths', { paths })
   },
 
   screenshot: {
     save: (dataUrl: string) => invoke('screenshot_save', { dataUrl }),
+    read: (path: string) => invoke('screenshot_read', { path }),
     cleanup: (paths: string[]) => invoke('screenshot_cleanup', { paths })
   },
 
   deploy: {
-    run: (projectId: string, workspace?: string) =>
-      invoke('deploy_run', { projectId, workspace }),
+    run: (projectId: string, workspace?: string, itemName?: string) =>
+      invoke('deploy_run', { projectId, workspace, itemName }),
     list: (projectId: string) => invoke('deploy_list', { projectId }),
     switch: (projectId: string, workspace: string, byId?: boolean) =>
       invoke('deploy_switch', { projectId, workspace, byId }),
+    remove: (projectId: string, workspace: string) =>
+      invoke('deploy_remove', { projectId, workspace }),
     setName: (projectId: string, workspaceKey: string, name: string) =>
       invoke('deploy_set_name', { projectId, workspaceKey, name }),
     status: (projectId: string) => invoke('deploy_status', { projectId }),
@@ -419,6 +542,13 @@ export const api: RayfinStudioApi = {
     setModels: (provider: string, models: string[]) => invoke('byok_set_models', { provider, models })
   },
 
+  mcp: {
+    list: () => invoke('mcp_list'),
+    save: (server: McpServerInput) => invoke('mcp_save', { server }),
+    remove: (id: string) => invoke('mcp_remove', { id }),
+    check: (id: string) => invoke('mcp_check', { id })
+  },
+
   preview: {
     ...serializePreviewMutations({
       showUrl: (url: string, bounds: PreviewBounds) => invoke('preview_show_url', { url, bounds }),
@@ -432,6 +562,8 @@ export const api: RayfinStudioApi = {
       forward: () => invoke('preview_forward')
     }),
     capture: () => invoke('preview_capture'),
+    still: () => invoke('preview_still'),
+    resetSiteData: () => invoke('preview_reset_site_data'),
     onNavState: (cb: (state: PreviewNavState) => void) =>
       subscribe<PreviewNavState>(IpcChannels.previewNav, cb),
     onAgentPreview: (cb: (event: PreviewAgentEvent) => void) =>
@@ -539,6 +671,128 @@ export const api: RayfinStudioApi = {
       subscribe<TeamDiagnosisEnvelope>(IpcChannels.teamDiagnosis, cb),
     onProgress: (cb: (event: TeamProgressEvent) => void) =>
       subscribe<TeamProgressEvent>(IpcChannels.teamProgress, cb)
+  },
+
+  local: {
+    start: (projectId: string, options?: LocalStartOptions) =>
+      localInvoke('local_start', { projectId, options: options ?? null }),
+    stop: (projectId: string) => localInvoke('local_stop', { projectId }),
+    restart: (projectId: string, options?: LocalStartOptions) =>
+      localInvoke('local_restart', { projectId, options: options ?? null }),
+    status: (projectId: string) => localInvoke('local_status', { projectId }),
+    logs: (projectId: string, limit?: number) =>
+      localInvoke('local_logs', { projectId, limit: limit ?? null }),
+    reload: (projectId: string, forceSchema: boolean) =>
+      localInvoke('local_reload', { projectId, forceSchema }),
+    resetData: (projectId: string) => localInvoke('local_reset_data', { projectId }),
+    users: (projectId: string) => localInvoke('local_users', { projectId }),
+    addUser: (projectId: string, username: string, password?: string) =>
+      localInvoke('local_add_user', { projectId, username, password: password ?? null }),
+    deleteUser: (projectId: string, user: string) =>
+      localInvoke('local_delete_user', { projectId, user }),
+    identity: (projectId: string) => localInvoke('local_identity', { projectId }),
+    setIdentity: (projectId: string, identity: LocalIdentityRequest) =>
+      localInvoke('local_set_identity', { projectId, identity }),
+    entities: (projectId: string) => localInvoke('local_entities', { projectId }),
+    rows: (
+      projectId: string,
+      entity: string,
+      offset: number,
+      limit: number,
+      orderBy?: string,
+      desc?: boolean
+    ) =>
+      localInvoke('local_rows', {
+        projectId,
+        entity,
+        offset,
+        limit,
+        orderBy: orderBy ?? null,
+        desc: desc ?? null
+      }),
+    clearRows: (projectId: string, entity: string) =>
+      localInvoke('local_clear_rows', { projectId, entity }),
+    storage: (projectId: string) => localInvoke('local_storage', { projectId }),
+    files: (projectId: string, folder: string, offset: number, limit: number) =>
+      localInvoke('local_files', { projectId, folder, offset, limit }),
+    file: (projectId: string, folder: string, path: string, maxBytes?: number) =>
+      localInvoke<string>('local_file', {
+        projectId,
+        folder,
+        path,
+        maxBytes: maxBytes ?? null
+      }).then(fromBase64),
+    saveFile: (projectId: string, folder: string, path: string) =>
+      localInvoke('local_save_file', { projectId, folder, path }),
+    deleteFile: (projectId: string, folder: string, path: string) =>
+      localInvoke('local_delete_file', { projectId, folder, path }),
+    clearFiles: (projectId: string, folder: string) =>
+      localInvoke('local_clear_files', { projectId, folder }),
+    seed: (projectId: string) => localInvoke('local_seed', { projectId }),
+    loadSeed: (projectId: string, dryRun?: boolean) =>
+      localInvoke('local_load_seed', { projectId, dryRun: dryRun ?? null }),
+    saveSeed: (projectId: string) => localInvoke('local_save_seed', { projectId }),
+    secrets: (projectId: string) => localInvoke('local_secrets', { projectId }),
+    setSecret: (projectId: string, name: string, value: string) =>
+      localInvoke('local_set_secret', { projectId, name, value }),
+    deleteSecret: (projectId: string, name: string) =>
+      localInvoke('local_delete_secret', { projectId, name }),
+    stopExternal: (projectId: string, pid: number) =>
+      localInvoke('local_stop_external', { projectId, pid }),
+    onState: (cb: (status: LocalStatus) => void) =>
+      subscribe<LocalStatus>(IpcChannels.localState, cb),
+    onLog: (cb: (line: LocalLogEvent) => void) =>
+      subscribe<LocalLogEvent>(IpcChannels.localLog, cb),
+    installPackages: (projectId: string) => localInvoke('local_install_packages', { projectId }),
+    reinstallPackages: (projectId: string) =>
+      localInvoke('local_reinstall_packages', { projectId }),
+    reportFallback: (
+      projectId: string,
+      code: 'sdk-unsupported' | 'connector-unsupported',
+      reason: string
+    ) => localInvoke('local_report_fallback', { projectId, code, reason })
+  },
+
+  apps: {
+    list: () => invoke('apps_list'),
+    open: (key: string) => invoke('apps_open', { key }),
+    remove: (key: string) => invoke('apps_remove', { key }),
+    onChanged: (cb: () => void) => subscribe<null>(IpcChannels.appsChanged, () => cb()),
+    window: () => invoke('apps_window'),
+    install: () => invoke('apps_install'),
+    run: () => invoke('apps_run'),
+    logs: () => invoke('apps_logs'),
+    close: () => invoke('apps_close'),
+    onState: (cb: (status: LocalStatus) => void) =>
+      subscribe<LocalStatus>(IpcChannels.appsState, cb),
+    onLog: (cb: (line: LocalLogEvent) => void) => subscribe<LocalLogEvent>(IpcChannels.appsLog, cb),
+    onProgress: (cb: (event: AppProgressEvent) => void) =>
+      subscribe<AppProgressEvent>(IpcChannels.appsProgress, cb),
+    onWindow: (cb: (label: string) => void) => subscribe<string>(IpcChannels.appsWindow, cb)
+  },
+
+  security: {
+    check: (checkId: string, path: string) => invoke('security_check', { checkId, path }),
+    cancel: (checkId: string) => invoke('security_check_cancel', { checkId }),
+    onEvent: (cb: (envelope: SecurityEventEnvelope) => void) =>
+      subscribe<SecurityEventEnvelope>(IpcChannels.securityEvent, cb)
+  },
+
+  goals: {
+    load: (projectId: string) => invoke('goals_load', { projectId }),
+    save: (projectId: string, purpose: string, checks: string[]) =>
+      invoke('goals_save', { projectId, purpose, checks }),
+    run: (projectId: string, request: GoalsRunRequest) =>
+      invoke('goals_run', {
+        projectId,
+        request: { checkIds: request.checkIds, ...modelChoiceArgs(request) }
+      }),
+    cancel: (projectId: string) => invoke('goals_cancel', { projectId }),
+    draft: (projectId: string, purpose: string, checks: string[], choice?: AdvisorModelChoice) =>
+      invoke('goals_draft', { projectId, purpose, checks, ...modelChoiceArgs(choice) }),
+    draftCancel: (projectId: string) => invoke('goals_draft_cancel', { projectId }),
+    onEvent: (cb: (envelope: GoalsEventEnvelope) => void) =>
+      subscribe<GoalsEventEnvelope>(IpcChannels.goalsEvent, cb)
   }
 }
 

@@ -420,7 +420,8 @@ fn clone_target(input: &str) -> Option<(String, String)> {
 }
 
 /// Clone a repository (`owner/name` or a GitHub URL) into the workspace root,
-/// install its dependencies (`npm install`), then register + open it. Enforces the
+/// install its dependencies (`npm install`, also in the functions folder when it
+/// has its own), then register + open it. Enforces the
 /// Rayfin-project requirement: a clone that isn't a Rayfin project is removed and
 /// reported as an error. A dependency-install failure keeps the clone on disk (so
 /// the user can finish it manually) and is reported. Streams output on the
@@ -477,8 +478,7 @@ pub async fn github_clone(app: AppHandle, input: String) -> ProjectActionResult 
 
   // A fresh clone has no node_modules; install deps now so preview/deploy work.
   say(&on, "\nInstalling dependencies (npm install)…\n");
-  let install = exec::run(
-    "npm",
+  let install = exec::npm_install(
     &["install"],
     RunOptions {
       cwd: Some(dir.clone()),
@@ -499,14 +499,21 @@ pub async fn github_clone(app: AppHandle, input: String) -> ProjectActionResult 
     // Keep the clone: the checkout is valid and re-cloning is wasteful (a dep
     // failure is often a transient registry/policy issue). Point the user at
     // finishing the install manually, then opening the folder.
-    let code = install
-      .exit_code
-      .map(|c| c.to_string())
-      .unwrap_or_else(|| "unknown".into());
+    let why = exec::npm_error_summary(&install)
+      .map(|cause| format!(": {}", cause.trim_end_matches('.')))
+      .unwrap_or_else(|| {
+        let code = install.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "unknown".into());
+        format!(" (npm install exited {code})")
+      });
     return err(format!(
-      "Cloned to {dir_str}, but installing dependencies failed (npm install exited {code}). \
+      "Cloned to {dir_str}, but installing dependencies failed{why}. \
        See details below, then run \"npm install\" in that folder and use Open existing → Browse folder to open it."
     ));
+  }
+  // The functions folder may have its own packages that the root install skips.
+  // Opening the app tries again, so a failure here doesn't stop it.
+  if let Err(e) = crate::commands::projects_impl::ensure_functions_dependencies(&dir, Some(on.clone())).await {
+    say(&on, &format!("\n⚠️ {e}\nFabricator tries again when the app opens.\n"));
   }
 
   say(&on, "\n✅ Cloned and dependencies installed. Opening…\n");

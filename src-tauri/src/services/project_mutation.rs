@@ -11,15 +11,19 @@ enum Owner {
   Deploy,
   Team,
   Secrets,
+  Export,
+  Goals,
 }
 
 impl Owner {
   fn busy_message(self) -> &'static str {
     match self {
       Owner::Chat => "Copilot is still working on this project. Wait for the turn to finish (or stop it), then try again.",
-      Owner::Deploy => "This project is deploying. Wait for the deployment to finish, then try again.",
+      Owner::Deploy => "Fabricator is publishing this project. Wait for it to finish, then try again.",
       Owner::Team => "Fabricator is saving or publishing this project. Wait for it to finish, then try again.",
       Owner::Secrets => "Fabricator is updating this app's secrets. Wait for it to finish, then try again.",
+      Owner::Export => "Fabricator is exporting this project. Wait for it to finish, then try again.",
+      Owner::Goals => "Fabricator is copying this project to run its Goals checks. Wait a moment, then try again.",
     }
   }
 }
@@ -83,6 +87,18 @@ impl ProjectMutations {
     self.acquire(project_id, Owner::Secrets)
   }
 
+  /// Lease the project while its files are written to an export, so the file
+  /// never holds a half-written turn or a half-updated publishing record.
+  pub fn export(&self, project_id: &str) -> Result<MutationGuard, String> {
+    self.acquire(project_id, Owner::Export)
+  }
+
+  /// Lease the project while a Goals run fingerprints and copies it, so the
+  /// copy never holds a half-written turn.
+  pub fn goals(&self, project_id: &str) -> Result<MutationGuard, String> {
+    self.acquire(project_id, Owner::Goals)
+  }
+
   #[cfg(test)]
   pub fn busy(&self, project_id: &str) -> bool {
     self.inner.lock().unwrap().contains_key(project_id)
@@ -101,7 +117,7 @@ mod tests {
     assert!(state.chat("p").is_err());
     drop(chat);
     let deploy = state.deploy("p").unwrap();
-    assert!(state.chat("p").err().unwrap().contains("deploying"));
+    assert!(state.chat("p").err().unwrap().contains("is publishing"));
     drop(deploy);
     assert!(!state.busy("p"));
   }
@@ -138,7 +154,7 @@ mod tests {
     assert!(state.chat("p").err().unwrap().contains("secrets"));
     drop(secrets);
     let deploy = state.deploy("p").unwrap();
-    assert!(state.secrets("p").err().unwrap().contains("deploying"));
+    assert!(state.secrets("p").err().unwrap().contains("is publishing"));
     drop(deploy);
   }
 }

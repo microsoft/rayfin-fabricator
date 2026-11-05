@@ -139,11 +139,43 @@ pub fn tool_title(tool_name: &str, args: Option<&Value>) -> String {
   if let Some(patch) = args.as_str() {
     return patch_files(patch).into_iter().next().unwrap_or_else(|| tool_name.to_string());
   }
+  if matches!(lower(tool_name).as_str(), "fabricator_local_call" | "fabricator_goals_call") {
+    return local_call_title(args);
+  }
+  // What the work log says it did: `load`, else `check`.
+  if lower(tool_name) == "fabricator_local_seed" {
+    let action = args.get("action").and_then(|v| v.as_str()).map(|a| a.trim().to_ascii_lowercase());
+    return if action.as_deref() == Some("load") { "load" } else { "check" }.to_string();
+  }
   let raw = TITLE_KEYS
     .iter()
     .find_map(|key| args.get(*key).and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()))
     .unwrap_or(tool_name);
   truncate(collapse(raw).trim(), 200)
+}
+
+/// What a `fabricator_local_call` called, and as whom, in words the work log
+/// puts after "Called": "the getBacklog function as you".
+fn local_call_title(args: &Value) -> String {
+  let field = |key: &str| args.get(key).and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty());
+  let name = field("name").map(|n| truncate(&collapse(n), 80));
+  let what = match (field("target").map(str::to_ascii_lowercase).as_deref(), name) {
+    (Some("function"), Some(name)) => format!("the {name} function"),
+    (Some("function"), None) => "a function".to_string(),
+    (Some("connector"), Some(name)) => format!("the {name} connector"),
+    (Some("connector-graphql"), Some(name)) => format!("the {name} connector's data API"),
+    (Some("connector" | "connector-graphql"), None) => "a connector".to_string(),
+    _ => "the app's data API".to_string(),
+  };
+  let who = match field("as") {
+    None => "as you".to_string(),
+    Some(caller) => match caller.to_ascii_lowercase().as_str() {
+      "developer" => "as you".to_string(),
+      "anonymous" => "while signed out".to_string(),
+      _ => format!("as {}", truncate(caller.strip_prefix("user:").unwrap_or(caller).trim(), 80)),
+    },
+  };
+  format!("{what} {who}")
 }
 
 /// Files a call reads or writes, when the tool names them.
@@ -330,6 +362,24 @@ mod tests {
     assert_eq!(tool_title("ask_user", Some(&json!({"question":"Which   theme?"}))), "Which theme?");
     assert_eq!(tool_title("mystery", Some(&json!({"flag":true}))), "mystery");
     assert_eq!(tool_title("mystery", None), "mystery");
+  }
+
+  #[test]
+  fn local_backend_calls_say_what_they_called_and_as_whom() {
+    let title = |args: serde_json::Value| tool_title("fabricator_local_call", Some(&args));
+    assert_eq!(title(json!({"target":"graphql","body":{"query":"{ notes { items { id } } }"}})), "the app's data API as you");
+    assert_eq!(title(json!({"target":"function","name":"getBacklog","as":"anonymous"})), "the getBacklog function while signed out");
+    assert_eq!(title(json!({"target":"connector","name":"sales","as":"developer"})), "the sales connector as you");
+    assert_eq!(title(json!({"target":"connector-graphql","name":"warehouse","as":"user:ana@example.com"})), "the warehouse connector's data API as ana@example.com");
+    assert_eq!(title(json!({"target":"function"})), "a function as you");
+    // A Goals run calls its copy of the app the same way.
+    let goals = json!({"target":"graphql","as":"user:bo@example.com"});
+    assert_eq!(tool_title("fabricator_goals_call", Some(&goals)), "the app's data API as bo@example.com");
+    // The status takes no arguments, so its title stays the tool's name.
+    assert_eq!(tool_title("fabricator_local_status", Some(&json!({}))), "fabricator_local_status");
+    // The seed tool's title is what it does.
+    assert_eq!(tool_title("fabricator_local_seed", Some(&json!({}))), "check");
+    assert_eq!(tool_title("fabricator_local_seed", Some(&json!({"action":" Load "}))), "load");
   }
 
   #[test]

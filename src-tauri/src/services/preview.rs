@@ -1,7 +1,9 @@
 //! Embedded preview pane.
 //!
 //! A single native WebView2 **child webview** (label [`PREVIEW_LABEL`]) overlaid
-//! on the main window, rendering the user's *deployed* Rayfin app. It replaces the
+//! on the main window, rendering the user's Rayfin app: by default the one running
+//! on this computer (its local backend's Vite, or the local Fabric host that
+//! embeds it), else the published app on Fabric. It replaces the
 //! Electron `<webview>` (see the former `src/main/index.ts`). The child webview is
 //! a real OS surface that always paints above the HTML layout, so the renderer
 //! reports the host element's bounds and we keep the webview positioned over it;
@@ -15,6 +17,7 @@
 //! workaround needed, unlike Electron/Chromium). Plain `target=_blank` links open
 //! in the user's real browser instead.
 
+use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -142,7 +145,7 @@ pub struct PreviewBounds {
 }
 
 impl PreviewBounds {
-  fn to_rect(self) -> AppResult<tauri::Rect> {
+  pub(crate) fn to_rect(self) -> AppResult<tauri::Rect> {
     let ratio = self.pixel_ratio.unwrap_or(1.0);
     if !ratio.is_finite() || ratio <= 0.0
       || !self.width.is_finite() || !self.height.is_finite()
@@ -187,6 +190,52 @@ struct PreviewNavState {
 #[derive(Default)]
 pub struct PreviewState {
   inner: Mutex<Inner>,
+  /// The latest stills captured for overlays ([`preview_still`]), newest last,
+  /// kept apart from `inner` so serving one never waits on navigation bookkeeping.
+  stills: Mutex<VecDeque<Still>>,
+}
+
+/// How many recent stills are kept, so one the renderer is about to show isn't
+/// gone because another was taken meanwhile (the warm-up, a second press).
+const STILLS_KEPT: usize = 3;
+
+/// A still of the preview, served to the main webview at
+/// `http://preview-still.localhost/<key>` until newer stills push it out.
+struct Still {
+  key: String,
+  bytes: Vec<u8>,
+}
+
+impl PreviewState {
+  /// Keep `bytes` as the newest still, letting the oldest go, and return its key.
+  #[cfg_attr(not(windows), allow(dead_code))]
+  fn keep_still(&self, bytes: Vec<u8>) -> String {
+    let key = next_still_key();
+    let mut stills = self.stills.lock().unwrap();
+    if stills.len() == STILLS_KEPT {
+      stills.pop_front();
+    }
+    stills.push_back(Still { key: key.clone(), bytes });
+    key
+  }
+
+  /// The still kept under `key`, while it's kept.
+  fn still_bytes(&self, key: &str) -> Option<Vec<u8>> {
+    let stills = self.stills.lock().unwrap();
+    stills.iter().find(|s| s.key == key).map(|s| s.bytes.clone())
+  }
+}
+
+/// A key no earlier still had, in this run or another, so a still can't be mixed
+/// up with one the webview remembers from before.
+fn next_still_key() -> String {
+  use std::sync::atomic::{AtomicU64, Ordering};
+  static COUNT: AtomicU64 = AtomicU64::new(0);
+  let now = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .map(|d| d.as_nanos())
+    .unwrap_or_default();
+  format!("{now:x}-{}", COUNT.fetch_add(1, Ordering::Relaxed))
 }
 
 #[derive(Default)]
@@ -211,9 +260,8 @@ struct Inner {
   load_waiters: Vec<oneshot::Sender<()>>,
   /// Whether the child webview is currently shown (`true` after `show()`,
   /// `false` after `hide()`). WebView2's `CapturePreview` never completes on a
-  /// hidden surface — it pumps the UI-thread message loop forever and freezes
-  /// the whole app — so [`capture_preview_bytes`] refuses to capture unless this
-  /// is `true`.
+  /// hidden surface, so a capture there could only run out its timeout;
+  /// [`capture_visible`] refuses to capture unless this is `true`.
   visible: bool,
   /// Whether an in-preview "design mode" session is active. Drives re-injection
   /// of the design controller on every finished page load (so it survives SPA
@@ -647,6 +695,62 @@ pub fn preview_reload(app: AppHandle) -> AppResult<()> {
   Ok(())
 }
 
+/// Clear the `localStorage` and `sessionStorage` of the page the preview shows,
+/// then reload it. Preview as calls this once it has changed who the app signs in
+/// as on its local backend, so the app forgets its old session and signs in
+/// again. Only for a page served from this computer ([`loopback_origin`]): it
+/// resolves `false`, changing nothing, while the preview shows another site or
+/// nothing at all, and fails when the page doesn't answer in time.
+#[tauri::command]
+pub async fn preview_reset_site_data(app: AppHandle) -> AppResult<bool> {
+  let Some(wv) = app.get_webview(PREVIEW_LABEL) else {
+    return Ok(false);
+  };
+  let url = wv.url().map_err(|e| AppError::Msg(e.to_string()))?;
+  let Some(origin) = loopback_origin(&url) else {
+    return Ok(false);
+  };
+  match design_eval::<bool>(&app, &reset_site_data_js(&origin)).await? {
+    Some(true) => {
+      wv.reload().map_err(|e| AppError::Msg(e.to_string()))?;
+      Ok(true)
+    }
+    // It went to another page in the meantime, which isn't this one's to clear.
+    Some(false) => Ok(false),
+    None => Err(AppError::Msg("The preview didn’t answer, so it wasn’t reloaded.".into())),
+  }
+}
+
+/// The origin (`scheme://host:port`) of a page served from this computer: `http`
+/// or `https` on `localhost` or a loopback address. `None` for anything else, so
+/// [`preview_reset_site_data`] never clears a site on the web.
+fn loopback_origin(url: &Url) -> Option<String> {
+  if !matches!(url.scheme(), "http" | "https") {
+    return None;
+  }
+  let host = url.host_str()?;
+  let loopback = host.eq_ignore_ascii_case("localhost")
+    || host
+      .trim_start_matches('[')
+      .trim_end_matches(']')
+      .parse::<std::net::IpAddr>()
+      .is_ok_and(|ip| ip.is_loopback());
+  loopback.then(|| url.origin().ascii_serialization())
+}
+
+/// JS that clears the page's `localStorage` and `sessionStorage` when it is still
+/// on `origin` (it may have navigated since its URL was read), and answers
+/// whether it was. Storage the page can't use holds nothing to clear.
+fn reset_site_data_js(origin: &str) -> String {
+  let origin = serde_json::to_string(origin).unwrap_or_else(|_| "null".into());
+  format!(
+    "(function(){{try{{if(location.origin!=={origin})return false;\
+     try{{localStorage.clear()}}catch(e){{}}\
+     try{{sessionStorage.clear()}}catch(e){{}}\
+     return true}}catch(e){{return false}}}})()"
+  )
+}
+
 /// Reload the preview when it shows a page from `origin` (e.g. a local preview
 /// that was just started again), leaving any other page alone.
 pub fn reload_if_showing(app: &AppHandle, origin: &str) {
@@ -855,14 +959,42 @@ pub fn preview_design_set_theme(app: AppHandle, theme: serde_json::Value) -> App
   Ok(())
 }
 
+/// URI scheme the main webview loads overlay stills from ([`preview_still`]):
+/// `http://preview-still.localhost/<key>` on Windows. The renderer's CSP allows it
+/// as an image source (src/renderer/index.html).
+pub const STILL_SCHEME: &str = "preview-still";
+
+/// How long the still for an overlay may take. The overlay waits on it, behind the
+/// live surface, so this is short: a healthy capture takes tens of milliseconds,
+/// and past this the renderer moves the preview away without a still.
+#[cfg(windows)]
+const STILL_TIMEOUT: Duration = Duration::from_millis(1500);
+
+/// How long a capture for an attachment may take.
+const CAPTURE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// What a capture is encoded as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(windows), allow(dead_code))]
+enum CaptureFormat {
+  /// Lossless, for what's attached to a chat turn or read by a model.
+  Png,
+  /// For the still shown in the preview's place while an overlay covers it: a few
+  /// times faster to encode than PNG on pages with texture or photos, and smaller.
+  Jpeg,
+}
+
+/// Where a capture's image bytes, or why it failed, are sent.
+type CaptureDone = oneshot::Sender<Result<Vec<u8>, String>>;
+
 /// Capture the current preview content as a PNG and return it as a `data:` URL.
 ///
 /// Uses WebView2's `ICoreWebView2::CapturePreview`, which captures the actual
 /// rendered web content (not screen pixels), so it works regardless of the
-/// webview's z-order or whether something overlaps it. The capture must run on the
-/// UI thread, so it is dispatched via [`tauri::webview::Webview::with_webview`];
+/// webview's z-order or whether something overlaps it. The capture must start on
+/// the UI thread, so it is dispatched via [`tauri::webview::Webview::with_webview`];
 /// the resulting bytes are handed back to this async command over a oneshot
-/// channel. The renderer then shows the image in an annotation overlay.
+/// channel. Design attaches the image to a chat turn.
 #[tauri::command]
 pub async fn preview_capture(app: AppHandle) -> AppResult<String> {
   let bytes = capture_preview_bytes(&app).await?;
@@ -870,13 +1002,57 @@ pub async fn preview_capture(app: AppHandle) -> AppResult<String> {
   Ok(format!("data:image/png;base64,{b64}"))
 }
 
-/// Capture the current preview content as raw PNG bytes, **without** any
-/// visibility check. The caller MUST guarantee the surface is currently rendering
-/// (visible — possibly parked off-screen): WebView2's `CapturePreview` pumps the
-/// UI-thread message loop until completion, and on a hidden surface that signal
-/// never comes, freezing the whole app. The capture runs on the UI thread via
+/// Capture the preview's current frame for the still the renderer paints in its
+/// place while an HTML overlay covers it, and return a URL to load it from.
+///
+/// The overlay can't show over the live surface until the still is up, so this is
+/// built for speed. On Windows it's a JPEG, a few times faster to encode than a
+/// PNG on pages with texture or photos, kept here and served from
+/// [`STILL_SCHEME`] ([`serve_still`]), so the image never travels through IPC as
+/// base64. Elsewhere it's the PNG `data:` URL [`preview_capture`] returns.
+#[tauri::command]
+pub async fn preview_still(app: AppHandle, state: State<'_, PreviewState>) -> AppResult<String> {
+  #[cfg(windows)]
+  {
+    let bytes = capture_visible(&app, CaptureFormat::Jpeg, STILL_TIMEOUT).await?;
+    let key = state.keep_still(bytes);
+    Ok(format!("http://{STILL_SCHEME}.localhost/{key}"))
+  }
+  #[cfg(not(windows))]
+  {
+    let _ = state;
+    preview_capture(app).await
+  }
+}
+
+/// Serve a still [`preview_still`] kept, to the main webview only. A key no longer
+/// kept, or another webview (the previewed app itself), gets a 404.
+pub fn serve_still<R: tauri::Runtime>(
+  ctx: tauri::UriSchemeContext<'_, R>,
+  request: tauri::http::Request<Vec<u8>>,
+) -> tauri::http::Response<Vec<u8>> {
+  use tauri::http::{header, Response, StatusCode};
+
+  let key = request.uri().path().trim_start_matches('/');
+  let bytes = (ctx.webview_label() == "main")
+    .then(|| ctx.app_handle().state::<PreviewState>().still_bytes(key))
+    .flatten();
+  // Never cached: the webview keeps what it has loaded for as long as the page
+  // shows it anyway.
+  let response = Response::builder().header(header::CACHE_CONTROL, "no-store");
+  match bytes {
+    Some(bytes) => response.header(header::CONTENT_TYPE, "image/jpeg").body(bytes),
+    None => response.status(StatusCode::NOT_FOUND).body(Vec::new()),
+  }
+  .unwrap_or_default()
+}
+
+/// Capture the current preview content, **without** any visibility check: on a
+/// hidden surface WebView2's `CapturePreview` never completes, so the caller MUST
+/// make sure the surface is rendering (shown, possibly parked off-screen) or the
+/// capture only runs out `timeout`. The capture starts on the UI thread via
 /// [`tauri::webview::Webview::with_webview`]; the bytes come back over a oneshot.
-async fn capture_now(app: &AppHandle) -> AppResult<Vec<u8>> {
+async fn capture_now(app: &AppHandle, format: CaptureFormat, timeout: Duration) -> AppResult<Vec<u8>> {
   let wv = app
     .get_webview(PREVIEW_LABEL)
     .ok_or_else(|| AppError::Msg("preview is not open".into()))?;
@@ -885,26 +1061,23 @@ async fn capture_now(app: &AppHandle) -> AppResult<Vec<u8>> {
   wv.with_webview(move |platform| {
     // On the UI thread now: label it so a hang here names CapturePreview.
     let _guard = watchdog::activity(Activity::PreviewCapture);
-    let _ = tx.send(capture_png(&platform));
+    start_capture(&platform, format, tx);
   })
   .map_err(|e| AppError::Msg(format!("failed to access preview webview: {e}")))?;
 
-  // Belt-and-suspenders: `capture_png` already bounds its own UI-thread pump, but
-  // cap the whole round-trip too so a stalled dispatch can never wedge the caller.
-  let out = match tokio::time::timeout(Duration::from_secs(10), rx).await {
+  let out = match tokio::time::timeout(timeout, rx).await {
     Ok(Ok(res)) => res.map_err(AppError::Msg),
     Ok(Err(_)) => Err(AppError::Msg("preview capture was cancelled".into())),
     Err(_) => Err(AppError::Msg("preview capture timed out".into())),
   };
-  // A capture timeout means CapturePreview never signalled and the UI thread was
-  // blocked up to ~5s — a near-hang worth a breadcrumb (the watchdog only fires
-  // past 10s, so these would otherwise go unrecorded).
+  // A capture that times out means CapturePreview never signalled (a slow or
+  // absent GPU signal, as on some VMs) — worth a breadcrumb.
   if let Err(ref e) = out {
     let msg = e.to_string();
     if msg.contains("timed out") {
       crashlog::log_error(
         "preview",
-        &format!("{msg} — CapturePreview blocked the UI thread up to ~5s (slow/absent GPU signal)"),
+        &format!("{msg} — CapturePreview didn't finish within {timeout:?} (slow/absent GPU signal)"),
       );
     }
   }
@@ -912,20 +1085,23 @@ async fn capture_now(app: &AppHandle) -> AppResult<Vec<u8>> {
 }
 
 /// Capture the current preview content as raw PNG bytes for the renderer's
-/// annotate/capture flow ([`preview_capture`]). Refuses (soft failure) unless the
-/// surface is currently shown to the user.
+/// capture flow ([`preview_capture`]). Refuses (soft failure) unless the surface
+/// is currently shown to the user.
 pub(crate) async fn capture_preview_bytes(app: &AppHandle) -> AppResult<Vec<u8>> {
+  capture_visible(app, CaptureFormat::Png, CAPTURE_TIMEOUT).await
+}
+
+/// Capture the current preview content as `format`, refusing (soft failure) unless
+/// the surface is shown: on a hidden one the capture never completes, so it would
+/// only run out `timeout`.
+async fn capture_visible(app: &AppHandle, format: CaptureFormat, timeout: Duration) -> AppResult<Vec<u8>> {
   if app.get_webview(PREVIEW_LABEL).is_none() {
     return Err(AppError::Msg("preview is not open".into()));
   }
-  // CapturePreview pumps the UI-thread message loop until WebView2 signals
-  // completion — but on a hidden surface that signal never comes, hanging the
-  // entire app (you can't even close the window). Refuse to capture unless the
-  // webview is currently shown; callers treat this as a soft failure.
   if !is_preview_visible(app) {
     return Err(AppError::Msg("preview is not visible".into()));
   }
-  capture_now(app).await
+  capture_now(app, format, timeout).await
 }
 
 /// Bounds used to park the preview far off-screen before a durable hide
@@ -948,64 +1124,65 @@ pub(crate) fn is_preview_visible(app: &AppHandle) -> bool {
   app.state::<PreviewState>().inner.lock().unwrap().visible
 }
 
-/// Hard ceiling on how long the Windows capture may pump the UI-thread message
-/// loop. `CapturePreview`'s completion is delivered via the message loop, but on a
-/// misbehaving GPU (notably Parallels/VMs) it can never arrive — an unbounded pump
-/// (`wait_for_async_operation`) then freezes the entire app. We pump our own
-/// bounded loop instead and bail with an error after this deadline, which callers
-/// treat as a soft failure (blank/hide) rather than a hang.
+/// Start capturing the WebView2 preview as `format`. Runs on the UI thread inside
+/// [`capture_now`]'s `with_webview` closure and returns at once: `CapturePreview`
+/// completes later, through the UI thread's own message loop, and its handler
+/// sends the image to `done`. Nothing waits on the UI thread meanwhile, so the app
+/// stays responsive however long the capture takes, and a completion that never
+/// comes (a flaky VM GPU) can't freeze it; [`capture_now`] stops waiting at its
+/// timeout.
 #[cfg(windows)]
-const CAPTURE_PUMP_DEADLINE: Duration = Duration::from_secs(5);
-
-/// Capture the WebView2 preview to PNG bytes. Runs on the UI thread inside
-/// [`preview_capture`]'s `with_webview` closure. `CapturePreview` completes via
-/// the UI-thread message loop, so we pump it ourselves — but with a deadline so a
-/// completion that never comes (flaky VM GPU) can't hang the app, mirroring the
-/// macOS snapshot path's bounded run-loop.
-#[cfg(windows)]
-fn capture_png(platform: &tauri::webview::PlatformWebview) -> Result<Vec<u8>, String> {
-  use std::sync::mpsc;
+fn start_capture(platform: &tauri::webview::PlatformWebview, format: CaptureFormat, done: CaptureDone) {
+  use std::cell::Cell;
+  use std::rc::Rc;
 
   use webview2_com::CapturePreviewCompletedHandler;
-  use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG;
+  use webview2_com::Microsoft::Web::WebView2::Win32::{
+    COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_JPEG, COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG,
+  };
 
-  let core = unsafe { platform.controller().CoreWebView2() }
-    .map_err(|e| format!("CoreWebView2(): {e}"))?;
-  let stream = win_capture::memory_stream()?;
-
-  // Kick off the capture and signal completion over a channel, then pump the UI
-  // message loop ourselves until it fires — bounded by `CAPTURE_PUMP_DEADLINE` so
-  // a never-arriving completion can't block forever.
-  let (tx, rx) = mpsc::channel::<windows::core::Result<()>>();
-  let handler = CapturePreviewCompletedHandler::create(Box::new(move |result| {
-    let _ = tx.send(result);
-    Ok(())
-  }));
-  unsafe {
-    core
-      .CapturePreview(COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG, &stream, &handler)
-      .map_err(|e| format!("CapturePreview: {e}"))?;
+  fn report(done: &Cell<Option<CaptureDone>>, out: Result<Vec<u8>, String>) {
+    if let Some(tx) = done.take() {
+      let _ = tx.send(out);
+    }
   }
-  win_capture::pump_until(&rx, CAPTURE_PUMP_DEADLINE)?.map_err(|e| format!("CapturePreview: {e}"))?;
 
-  // The PNG now lives in the stream's backing HGLOBAL — copy it into a Vec.
-  win_capture::stream_bytes(&stream)
+  // Shared with the completion handler; whichever reports first, reports.
+  let done = Rc::new(Cell::new(Some(done)));
+  let started = (|| -> Result<(), String> {
+    let core = unsafe { platform.controller().CoreWebView2() }
+      .map_err(|e| format!("CoreWebView2(): {e}"))?;
+    let stream = win_capture::memory_stream()?;
+    let image_format = match format {
+      CaptureFormat::Png => COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG,
+      CaptureFormat::Jpeg => COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_JPEG,
+    };
+    let finished = done.clone();
+    let written = stream.clone();
+    let handler = CapturePreviewCompletedHandler::create(Box::new(move |result| {
+      // The image now lives in the stream's backing HGLOBAL — copy it into a Vec.
+      let out = result
+        .map_err(|e| format!("CapturePreview: {e}"))
+        .and_then(|()| win_capture::stream_bytes(&written));
+      report(&finished, out);
+      Ok(())
+    }));
+    unsafe { core.CapturePreview(image_format, &stream, &handler) }
+      .map_err(|e| format!("CapturePreview: {e}"))
+  })();
+  if let Err(e) = started {
+    report(&done, Err(e));
+  }
 }
 
 /// The Win32 plumbing around `CapturePreview`, kept apart from the WebView2 call so
 /// it can be tested without a live webview.
 #[cfg(windows)]
 mod win_capture {
-  use std::sync::mpsc;
-  use std::time::{Duration, Instant};
-
   use windows::Win32::Foundation::HGLOBAL;
   use windows::Win32::System::Com::IStream;
   use windows::Win32::System::Com::StructuredStorage::{CreateStreamOnHGlobal, GetHGlobalFromStream};
   use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
-  use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
-  };
 
   /// An auto-growing in-memory stream; its HGLOBAL is freed when the last
   /// reference drops, after the bytes have been copied out.
@@ -1014,34 +1191,8 @@ mod win_capture {
       .map_err(|e| format!("CreateStreamOnHGlobal: {e}"))
   }
 
-  /// Pump this thread's message loop until `done` yields a value, or fail once
-  /// `timeout` passes or its sender is dropped.
-  pub(super) fn pump_until<T>(done: &mpsc::Receiver<T>, timeout: Duration) -> Result<T, String> {
-    let deadline = Instant::now() + timeout;
-    loop {
-      match done.try_recv() {
-        Ok(value) => return Ok(value),
-        Err(mpsc::TryRecvError::Disconnected) => return Err("preview capture handler dropped".into()),
-        Err(mpsc::TryRecvError::Empty) => {}
-      }
-      if Instant::now() >= deadline {
-        return Err("preview capture timed out".into());
-      }
-      // Drain any pending messages (delivers WebView2's completion), then yield
-      // briefly so we don't spin the CPU while waiting.
-      unsafe {
-        let mut msg = MSG::default();
-        while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
-          let _ = TranslateMessage(&msg);
-          DispatchMessageW(&msg);
-        }
-      }
-      std::thread::sleep(Duration::from_millis(5));
-    }
-  }
-
   /// Copy out the bytes held in `stream`'s backing HGLOBAL. The block can be a few
-  /// bytes larger than what was written, which PNG decoders ignore.
+  /// bytes larger than what was written, which PNG and JPEG decoders ignore.
   pub(super) fn stream_bytes(stream: &IStream) -> Result<Vec<u8>, String> {
     unsafe {
       let hglobal = GetHGlobalFromStream(stream).map_err(|e| format!("GetHGlobalFromStream: {e}"))?;
@@ -1071,42 +1222,29 @@ mod win_capture {
       assert_eq!(written as usize, png.len());
       assert!(stream_bytes(&stream).unwrap().starts_with(png));
     }
-
-    #[test]
-    fn the_pump_returns_a_completion_that_arrives_while_it_waits() {
-      let (tx, rx) = mpsc::channel();
-      std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(30));
-        let _ = tx.send(42);
-      });
-      assert_eq!(pump_until(&rx, Duration::from_secs(5)), Ok(42));
-    }
-
-    #[test]
-    fn the_pump_gives_up_instead_of_hanging() {
-      let (tx, rx) = mpsc::channel::<()>();
-      let started = Instant::now();
-      assert_eq!(pump_until(&rx, Duration::from_millis(50)), Err("preview capture timed out".into()));
-      assert!(started.elapsed() < Duration::from_secs(2));
-      drop(tx);
-      assert_eq!(pump_until(&rx, Duration::from_secs(5)), Err("preview capture handler dropped".into()));
-    }
   }
 }
 
-/// Non-Windows stub so the crate still builds on other targets (WebView2-only).
+/// Non-Windows, non-macOS stub so the crate still builds on other targets.
 #[cfg(not(any(windows, target_os = "macos")))]
-fn capture_png(_platform: &tauri::webview::PlatformWebview) -> Result<Vec<u8>, String> {
-  Err("preview capture is not supported on this platform".into())
+fn start_capture(_platform: &tauri::webview::PlatformWebview, _format: CaptureFormat, done: CaptureDone) {
+  let _ = done.send(Err("preview capture is not supported on this platform".into()));
+}
+
+/// Capture the WKWebView preview as PNG (whatever `format` asks for) and send it
+/// to `done` before returning. See [`capture_png`].
+#[cfg(target_os = "macos")]
+fn start_capture(platform: &tauri::webview::PlatformWebview, _format: CaptureFormat, done: CaptureDone) {
+  let _ = done.send(capture_png(platform));
 }
 
 /// Capture the WKWebView preview to PNG bytes. Runs on the UI thread inside
-/// [`preview_capture`]'s `with_webview` closure. Uses
+/// [`capture_now`]'s `with_webview` closure. Uses
 /// `-[WKWebView takeSnapshotWithConfiguration:completionHandler:]`, which captures
 /// the rendered web content (the macOS analogue of WebView2's `CapturePreview`),
 /// then converts the resulting `NSImage` to PNG via `NSBitmapImageRep`. The
 /// snapshot API is asynchronous, so we pump the main run loop until its completion
-/// block fires (bounded by a timeout), mirroring the Windows message-pump approach.
+/// block fires (bounded by a timeout).
 #[cfg(target_os = "macos")]
 fn capture_png(platform: &tauri::webview::PlatformWebview) -> Result<Vec<u8>, String> {
   use std::cell::RefCell;
@@ -1196,7 +1334,20 @@ unsafe fn snapshot_image_to_png(
 
 #[cfg(test)]
 mod tests {
-  use super::{design_command_js, design_enable_js, PreviewBounds};
+  use super::{design_command_js, design_enable_js, loopback_origin, reset_site_data_js, PreviewBounds, PreviewState};
+  use tauri::Url;
+
+  #[test]
+  fn stills_are_served_by_key_until_newer_ones_push_them_out() {
+    let state = PreviewState::default();
+    let keys: Vec<String> = (0..4u8).map(|n| state.keep_still(vec![n])).collect();
+    assert_eq!(keys.iter().collect::<std::collections::HashSet<_>>().len(), keys.len());
+    assert_eq!(state.still_bytes(&keys[0]), None, "the oldest still was let go");
+    for (n, key) in keys.iter().enumerate().skip(1) {
+      assert_eq!(state.still_bytes(key), Some(vec![n as u8]), "{key}");
+    }
+    assert_eq!(state.still_bytes(""), None);
+  }
 
   fn bounds(pixel_ratio: Option<f64>) -> PreviewBounds {
     PreviewBounds { x: 100.0, y: 80.0, width: 900.0, height: 600.0, pixel_ratio }
@@ -1290,5 +1441,46 @@ mod tests {
       .trim_start_matches("try{window.__rayfinDesign&&window.__rayfinDesign.command(")
       .trim_end_matches(")}catch(e){}");
     assert_eq!(serde_json::from_str::<serde_json::Value>(json).unwrap(), cmd);
+  }
+
+  #[test]
+  fn site_data_is_reset_only_for_pages_served_from_this_computer() {
+    for (url, origin) in [
+      ("http://localhost:5173/", "http://localhost:5173"),
+      ("http://localhost:5173/notes?id=1#top", "http://localhost:5173"),
+      ("http://LOCALHOST:5173/", "http://localhost:5173"),
+      ("https://localhost:7171/.rayfin-local/portal/embed", "https://localhost:7171"),
+      ("http://127.0.0.1:5173/", "http://127.0.0.1:5173"),
+      ("http://127.4.5.6/", "http://127.4.5.6"),
+      ("http://[::1]:5173/", "http://[::1]:5173"),
+    ] {
+      assert_eq!(loopback_origin(&Url::parse(url).unwrap()).as_deref(), Some(origin), "{url}");
+    }
+    for url in [
+      "https://app.fabric.microsoft.com/groups/1/appbackends/2",
+      "https://notes.example.app/",
+      "http://localhost.example.com:5173/",
+      "http://192.168.1.4:5173/",
+      "http://0.0.0.0:5173/",
+      "ws://localhost:5173/",
+      "tauri://localhost/",
+      "file:///C:/apps/notes/index.html",
+      "about:blank",
+    ] {
+      assert_eq!(loopback_origin(&Url::parse(url).unwrap()), None, "{url}");
+    }
+  }
+
+  #[test]
+  fn the_site_data_reset_runs_only_on_the_origin_it_was_asked_for() {
+    let js = reset_site_data_js("http://localhost:5173");
+    assert!(js.starts_with("(function(){"), "{js}");
+    assert!(js.contains(r#"if(location.origin!=="http://localhost:5173")return false;"#), "{js}");
+    assert!(js.contains("try{localStorage.clear()}catch(e){}"), "{js}");
+    assert!(js.contains("try{sessionStorage.clear()}catch(e){}"), "{js}");
+    assert!(js.ends_with("return true}catch(e){return false}})()"), "{js}");
+    // Whatever the origin holds, it stays inside a JSON string literal.
+    let odd = reset_site_data_js(r#"http://localhost:1")||alert(1)//"#);
+    assert!(odd.contains(r#"location.origin!=="http://localhost:1\")||alert(1)//")return false;"#), "{odd}");
   }
 }

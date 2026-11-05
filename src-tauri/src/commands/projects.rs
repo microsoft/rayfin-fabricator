@@ -4,13 +4,13 @@
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 
-use crate::commands::util::{annotate_state, with_missing};
+use crate::commands::util::{annotate_project, annotate_state};
 use crate::services::store;
 use crate::state::AppState;
 use crate::types::{
   CommunityGalleryResult, CreateProjectInput, FileContent, FileNode, GitChange, GitCommitResult,
-  GitCommitSummary, GitFileDiff, GitHistory, GitRemoteStatus, GitStatus, GitSyncResult,
-  ProjectActionResult, ProjectNameCheck, ProjectsState, RevertResult,
+  GitBranches, GitCommitSummary, GitFileDiff, GitHistory, GitRemoteStatus, GitStatus, GitSyncResult,
+  ProjectActionResult, ProjectLocationCheck, ProjectNameCheck, ProjectsState, RevertResult, SavedTurn,
 };
 
 /// Show a native folder picker, returning the chosen absolute path (or None).
@@ -33,15 +33,20 @@ pub fn projects_state() -> ProjectsState {
 }
 
 /// Whether a new project's name is free where it will be saved: the projects
-/// folder on this computer, or the chosen team workspace (its apps and the
-/// Fabric workspace its pipeline publishes to).
+/// folder on this computer, or the folder chosen instead (`location`), or the
+/// chosen team workspace (its apps and the Fabric workspace its pipeline
+/// publishes to).
 #[tauri::command]
-pub async fn projects_check_name(name: String, team_workspace_id: Option<String>) -> ProjectNameCheck {
+pub async fn projects_check_name(
+  name: String,
+  team_workspace_id: Option<String>,
+  location: Option<String>,
+) -> ProjectNameCheck {
   if let Some(problem) = crate::commands::projects_impl::project_name_problem(&name) {
     return ProjectNameCheck { ok: false, message: Some(problem.into()) };
   }
   let Some(id) = team_workspace_id.filter(|id| !id.trim().is_empty()) else {
-    return crate::commands::projects_impl::check_local_name(&name);
+    return crate::commands::projects_impl::check_local_name(&name, location.as_deref());
   };
   let Some(ws) = store::find_team_workspace(&id) else {
     return ProjectNameCheck { ok: false, message: Some("That team workspace is no longer on this computer.".into()) };
@@ -60,6 +65,18 @@ pub async fn projects_community_templates(repo_url: Option<String>) -> Community
 #[tauri::command]
 pub async fn projects_pick_folder(app: AppHandle) -> Option<String> {
   pick_folder_dialog(&app).await
+}
+
+/// Whether a folder can take a new project: it exists, or is missing and can be created.
+#[tauri::command(async)]
+pub fn projects_check_location(path: String) -> ProjectLocationCheck {
+  crate::commands::projects_impl::check_location(&path)
+}
+
+/// Create a missing folder for a new project to go in.
+#[tauri::command(async)]
+pub fn projects_create_location(path: String) -> ProjectLocationCheck {
+  crate::commands::projects_impl::create_location(&path)
 }
 
 #[tauri::command]
@@ -123,6 +140,36 @@ pub fn projects_set_active(id: Option<String>) -> ProjectsState {
   annotate_state(store::set_active(id))
 }
 
+/// Pin a project to the top of Home's recent projects, or unpin it.
+#[tauri::command(async)]
+pub fn projects_set_pinned(id: String, pinned: bool) -> ProjectsState {
+  annotate_state(store::set_pinned(&id, pinned))
+}
+
+/// Open a project's folder in the file manager.
+#[tauri::command]
+pub fn projects_reveal(app: AppHandle, id: String) -> Result<(), String> {
+  use tauri_plugin_opener::OpenerExt;
+  let project = store::find_project(&id).ok_or_else(|| "That project isn't in Fabricator anymore.".to_string())?;
+  if !std::path::Path::new(&project.path).is_dir() {
+    return Err("The project's folder isn't there anymore.".into());
+  }
+  app.opener().open_path(project.path, None::<&str>).map_err(|e| e.to_string())
+}
+
+/// Keep a project's thumbnail: a WebP `data:` URL drawn from its preview.
+/// Returns when it was saved, as `thumbnailAt` reports it.
+#[tauri::command(async)]
+pub fn projects_thumbnail_save(id: String, image: String) -> Result<String, String> {
+  crate::services::thumbnails::save(&id, &image)
+}
+
+/// The projects' thumbnails as `data:` URLs, by id; projects without one are left out.
+#[tauri::command(async)]
+pub fn projects_thumbnails(ids: Vec<String>) -> std::collections::HashMap<String, String> {
+  crate::services::thumbnails::read_many(&ids)
+}
+
 #[tauri::command]
 pub async fn projects_rename(id: String, name: String) -> ProjectActionResult {
   crate::commands::projects_impl::rename_project(id, name).await
@@ -147,7 +194,7 @@ pub fn projects_set_workspace(
   ProjectActionResult {
     ok: true,
     error: None,
-    project: store::find_project(&id).map(with_missing),
+    project: store::find_project(&id).map(annotate_project),
   }
 }
 
@@ -164,7 +211,7 @@ pub fn projects_set_preview_mode(id: String, mode: String) -> ProjectActionResul
   ProjectActionResult {
     ok: true,
     error: None,
-    project: store::find_project(&id).map(with_missing),
+    project: store::find_project(&id).map(annotate_project),
   }
 }
 
@@ -175,10 +222,7 @@ pub async fn projects_remove(
   id: String,
   delete_files: Option<bool>,
 ) -> Result<ProjectsState, String> {
-  Ok(
-    crate::commands::projects_impl::remove_project(&app, state.inner(), id, delete_files.unwrap_or(false))
-      .await,
-  )
+  crate::commands::projects_impl::remove_project(&app, state.inner(), id, delete_files.unwrap_or(false)).await
 }
 
 /* ----------------------------- git (ported in Phase 3) ----------------------------- */
@@ -191,6 +235,11 @@ pub async fn projects_git_status(id: String) -> GitStatus {
 #[tauri::command]
 pub async fn projects_git_commit(id: String, message: String) -> GitCommitResult {
   crate::commands::git::git_commit(id, message).await
+}
+
+#[tauri::command]
+pub async fn projects_git_save_turn(id: String, request: String) -> SavedTurn {
+  crate::commands::git::git_save_turn(id, request).await
 }
 
 #[tauri::command]
@@ -259,6 +308,31 @@ pub async fn projects_git_push(id: String) -> GitSyncResult {
   crate::commands::git::git_push(id).await
 }
 
+#[tauri::command]
+pub async fn projects_git_branches(id: String) -> GitBranches {
+  crate::commands::git::git_branches(id).await
+}
+
+#[tauri::command]
+pub async fn projects_git_switch(id: String, branch: String) -> GitSyncResult {
+  crate::commands::git::git_switch(id, branch).await
+}
+
+#[tauri::command]
+pub async fn projects_git_merge_latest(id: String) -> GitSyncResult {
+  crate::commands::git::git_merge_latest(id).await
+}
+
+#[tauri::command]
+pub async fn projects_git_finish_merge(id: String) -> GitSyncResult {
+  crate::commands::git::git_finish_merge(id).await
+}
+
+#[tauri::command]
+pub async fn projects_git_abort_merge(id: String) -> GitSyncResult {
+  crate::commands::git::git_abort_merge(id).await
+}
+
 /* ----------------------------- files (ported in Phase 3) ----------------------------- */
 
 #[tauri::command]
@@ -269,4 +343,10 @@ pub async fn projects_files_tree(id: String) -> Vec<FileNode> {
 #[tauri::command]
 pub async fn projects_files_read(id: String, path: String) -> FileContent {
   crate::commands::files::files_read(id, path).await
+}
+
+/// One folder's entries, for an `@` reference in chat (in the project or outside it).
+#[tauri::command]
+pub async fn projects_files_list_dir(id: String, path: String) -> crate::types::DirListing {
+  crate::commands::files::files_list_dir(id, path).await
 }

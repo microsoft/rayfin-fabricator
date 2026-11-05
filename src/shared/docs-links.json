@@ -7,11 +7,16 @@
     "accounts": "/docs/start/accounts",
     "copilotSignIn": "/docs/troubleshooting/setup-and-sign-in#copilot-asks-you-to-sign-in-again",
     "previewPorts": "/docs/troubleshooting/preview#all-preview-ports-are-busy",
+    "localBackendBlocked": "/docs/troubleshooting/preview#windows-blocked-rayfin-local",
     "deployFailed": "/docs/troubleshooting/deploy#a-deploy-failed",
     "skills": "/docs/build/skills",
     "secrets": "/docs/build/secrets",
     "apiKeys": "/docs/build/your-own-api-keys",
     "migrate": "/docs/build/migrate-power-bi",
-    "teamAdmins": "/docs/team/administrators"
+    "plugins": "/docs/build/fabric-iq-and-work-iq",
+    "chatUsage": "/docs/build/chat#see-what-a-chat-has-used",
+    "mcpServers": "/docs/build/mcp-servers",
+    "teamAdmins": "/docs/team/administrators",
+    "install": "/docs/start/install"
   }
 }

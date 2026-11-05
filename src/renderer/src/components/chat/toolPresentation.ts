@@ -22,6 +22,12 @@ export type ToolKind =
   | 'console'
   | 'scroll'
   | 'model'
+  | 'local-status'
+  | 'local-call'
+  | 'local-seed'
+  | 'fabric-iq'
+  | 'work-iq'
+  | 'mcp'
   | 'other'
 
 /** Tools whose UI lives elsewhere (question cards, the plan card, the status line). */
@@ -31,11 +37,23 @@ export function isHiddenTool(name: string): boolean {
   return HIDDEN_TOOLS.has(name.toLowerCase())
 }
 
+/** A tool call's kind: a tool of an MCP server you added goes by that, whatever its name. */
+export function kindOf(tool: Pick<ChatToolCall, 'name' | 'server'>): ToolKind {
+  return tool.server ? 'mcp' : toolKind(tool.name)
+}
+
 export function toolKind(name: string): ToolKind {
   const n = name.toLowerCase()
+  // Fabric IQ's and Work IQ's tools, named after their MCP servers
+  // (FabricIQ-ValueSearch, workiq-fetch): not project searches or web reads.
+  if (n.startsWith('fabriciq-')) return 'fabric-iq'
+  if (n.startsWith('workiq-')) return 'work-iq'
   // Fabricator's own tools first: their names contain substrings ("cat", "read")
   // that would otherwise be misread.
   if (n.startsWith('fabricator_')) {
+    if (n.includes('local_status')) return 'local-status'
+    if (n.includes('local_call') || n.includes('goals_call')) return 'local-call'
+    if (n.includes('local_seed')) return 'local-seed'
     if (n.includes('screenshot')) return 'screenshot'
     if (n.includes('navigate')) return 'navigate'
     if (n.includes('deploy')) return 'deploy'
@@ -75,12 +93,18 @@ const VERBS: Record<ToolKind, [running: string, done: string]> = {
   skill: ['Loading the skill', 'Used the skill'],
   todo: ['Updating the task list', 'Updated the task list'],
   agent: ['Delegating', 'Delegated'],
-  deploy: ['Deploying the app', 'Deployed the app'],
+  deploy: ['Publishing the app', 'Published the app'],
   navigate: ['Opening in the preview', 'Opened in the preview'],
   screenshot: ['Taking a screenshot', 'Took a screenshot'],
   console: ['Reading the preview console', 'Read the preview console'],
   scroll: ['Scrolling the preview', 'Scrolled the preview'],
   model: ['Looking up a semantic model', 'Looked up a semantic model'],
+  'local-status': ['Checking the local backend', 'Checked the local backend'],
+  'local-call': ['Calling', 'Called'],
+  'local-seed': ['Checking the seed data', 'Checked the seed data'],
+  'fabric-iq': ['Looking up in Fabric IQ', 'Looked up in Fabric IQ'],
+  'work-iq': ['Looking up in Work IQ', 'Looked up in Work IQ'],
+  mcp: ['Using', 'Used'],
   other: ['Using', 'Used']
 }
 
@@ -96,7 +120,8 @@ const BARE_VERBS: Partial<Record<ToolKind, [running: string, done: string]>> = {
   web: ['Reading a web page', 'Read a web page'],
   'web-search': ['Searching the web', 'Searched the web'],
   skill: ['Loading a skill', 'Used a skill'],
-  agent: ['Delegating a task', 'Delegated a task']
+  agent: ['Delegating a task', 'Delegated a task'],
+  'local-call': ['Calling the app', 'Called the app']
 }
 
 /** Present-tense phrase for the live status line ("Running a command"). */
@@ -114,17 +139,24 @@ const PHASES: Record<ToolKind, string> = {
   skill: 'Loading a skill',
   todo: 'Updating the task list',
   agent: 'Delegating a task',
-  deploy: 'Deploying the app',
+  deploy: 'Publishing the app',
   navigate: 'Opening the preview',
   screenshot: 'Taking a screenshot',
   console: 'Reading the preview console',
   scroll: 'Scrolling the preview',
   model: 'Looking up a semantic model',
+  'local-status': 'Checking the local backend',
+  'local-call': 'Calling the app',
+  'local-seed': 'Checking the seed data',
+  'fabric-iq': 'Looking up Power BI data',
+  'work-iq': 'Looking up Microsoft 365',
+  mcp: 'Using an MCP server',
   other: 'Working'
 }
 
-export function phaseLabel(name: string): string {
-  return PHASES[toolKind(name)]
+/** Present-tense phrase for the live status line; `server` names the MCP server a tool came from. */
+export function phaseLabel(name: string, server?: string): string {
+  return server ? `Using ${server}` : PHASES[toolKind(name)]
 }
 
 const SHELL_IO_VERBS: Record<string, [string, string]> = {
@@ -171,7 +203,7 @@ function webTarget(title: string): string {
 }
 
 export function describeStep(tool: ChatToolCall, projectPath: string): StepView {
-  const kind = toolKind(tool.name)
+  const kind = kindOf(tool)
   const running = tool.state === 'running'
   let [verbRunning, verbDone] = VERBS[kind]
   if (kind === 'shell-io') {
@@ -179,6 +211,10 @@ export function describeStep(tool: ChatToolCall, projectPath: string): StepView 
     if (io) [verbRunning, verbDone] = io
   }
   const title = tool.title?.trim() ?? ''
+  // The seed tool's title is what it did (see chat_tools.rs).
+  if (kind === 'local-seed' && title === 'load') {
+    ;[verbRunning, verbDone] = ['Loading the seed data', 'Loaded the seed data']
+  }
   const hasTitle = title !== '' && title.toLowerCase() !== tool.name.toLowerCase()
   const paths = tool.paths?.length ? tool.paths : hasTitle && looksLikePath(title) ? [title] : []
   let target: StepTarget | undefined
@@ -196,10 +232,15 @@ export function describeStep(tool: ChatToolCall, projectPath: string): StepView 
     case 'search':
     case 'find':
     case 'web-search':
+    case 'fabric-iq':
+    case 'work-iq':
       if (hasTitle) target = { kind: 'quote', text: title }
       break
     case 'web':
       if (hasTitle) target = { kind: 'text', text: webTarget(title) }
+      break
+    case 'mcp':
+      target = { kind: 'text', text: `${title || humanize(tool.name)} from ${tool.server}` }
       break
     case 'todo':
     case 'shell-io':
@@ -207,6 +248,8 @@ export function describeStep(tool: ChatToolCall, projectPath: string): StepView 
     case 'screenshot':
     case 'console':
     case 'scroll':
+    case 'local-status':
+    case 'local-seed':
       break
     case 'other':
       target = { kind: 'text', text: hasTitle ? title : humanize(tool.name) }
@@ -258,7 +301,7 @@ const n = (count: number, one: string, many: string): string =>
 export function summarizeKinds(tools: readonly ChatToolCall[]): KindCount[] {
   const c = { read: 0, edit: 0, create: 0, run: 0, search: 0, web: 0 }
   for (const t of tools) {
-    const k = toolKind(t.name)
+    const k = kindOf(t)
     if (k === 'read') c.read++
     else if (k === 'edit') c.edit++
     else if (k === 'create') c.create++

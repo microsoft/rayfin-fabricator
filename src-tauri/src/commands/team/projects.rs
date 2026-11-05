@@ -38,10 +38,7 @@ fn register(ws: &TeamWorkspace, folder: &str, branch: &str, pr: Option<&TeamPull
     view: Some(if pr.is_some() { "preview".into() } else { "production".into() }),
     ..Default::default()
   };
-  store::mutate_project(&project.id, |p| {
-    p.team = Some(binding);
-    p.awaiting_first_deploy = None;
-  });
+  store::mutate_project(&project.id, |p| p.team = Some(binding));
   store::set_active(Some(project.id.clone()));
   store::find_project(&project.id)
 }
@@ -309,8 +306,12 @@ async fn move_project(app: AppHandle, workspace_id: String, project_id: String) 
   };
   history::copy_history(&source.id, &project.id);
   store::mutate_project(&project.id, |p| {
+    // The same app: its chat keeps its own choices, not the chat defaults.
     p.model = source.model.clone();
     p.effort = source.effort.clone();
+    p.auto_tier = source.auto_tier.clone();
+    p.context_tier = source.context_tier.clone();
+    p.plugins = source.plugins.clone();
     p.preview_mode = source.preview_mode.clone();
   });
   first_save(&app, &project.id, &format!("Move {} into the team workspace", source.name)).await

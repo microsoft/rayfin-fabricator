@@ -1,6 +1,7 @@
 /* Blueprint tab: how the app is put together. One header row holds the view
-   switcher (Architecture / Data model / Semantic model) and the active view's
-   summary; the Data and Semantic model views keep their own .model-* styles.
+   switcher (Architecture / Data model / Fabric connections / Data explorer) and the active
+   view's summary; the Data model and Fabric connections views keep their own .model-*
+   styles, and the Data explorer's rows are .bp-data-*.
    Flat, like the workspace overview: solid surfaces, neutral 1px borders,
    dashed outlines for the places things live, and color only for the
    identity a connection signs in as. The toolbar reuses .model-toolbar. */
@@ -1331,6 +1332,816 @@
 
 .bp-insp-actions .btn .codicon {
   font-size: 13px;
+}
+
+/* ── Data explorer: the app's local data ───────────────────────────────────── */
+
+.bp-data {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.bp-data .model-tool-btn .codicon[class*='codicon-'] {
+  font-size: 13px;
+}
+
+.bp-data .model-tool-btn:disabled,
+.bp-data .model-tool-btn:disabled:hover {
+  color: var(--text-dim);
+  background: transparent;
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.bp-data-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.bp-data-note .codicon[class*='codicon-'] {
+  flex: none;
+  font-size: 13px;
+  color: var(--text-faint);
+}
+
+/* The preview runs on the published app's backend. */
+.bp-data-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  flex: none;
+  padding: 8px 14px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-dim);
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+}
+
+.bp-data-notice .codicon[class*='codicon-'] {
+  flex: none;
+  margin-top: 2px;
+  font-size: 13px;
+  color: var(--accent);
+}
+
+.bp-data-notice code,
+.bp-data-alert code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+/* The backend runs on the previous data model: a change couldn't be read. */
+.bp-data-notice-dot {
+  flex: none;
+  margin-top: 5px;
+}
+
+.bp-data-notice-text {
+  min-width: 0;
+}
+
+/* What loading or saving the seed data did, until it's dismissed. */
+.bp-data-notice-text + .bp-data-notice-close {
+  margin-left: auto;
+}
+
+.bp-data-notice-close {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  padding: 2px;
+  color: var(--text-faint);
+  background: none;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.bp-data-notice-close:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+}
+
+.bp-data-notice .bp-data-notice-close .codicon[class*='codicon-'] {
+  margin-top: 0;
+  color: inherit;
+}
+
+.bp-data-notice-detail {
+  display: block;
+  max-height: 4.8em;
+  margin-top: 3px;
+  padding: 0;
+  overflow: hidden;
+  line-height: 1.6;
+  color: var(--text-faint);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: none;
+}
+
+/* A stopped backend: a hollow dot. */
+.bp-dot--off {
+  background: transparent;
+  border: 1.5px solid var(--text-faint);
+}
+
+.bp-data-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 9px;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+
+.bp-data-state .bp-dot {
+  width: 7px;
+  height: 7px;
+}
+
+.bp-data .model-empty .btn {
+  margin-top: 4px;
+}
+
+.bp-data-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}
+
+.bp-data .model-empty .btn .codicon[class*='codicon-'] {
+  font-size: 13px;
+}
+
+.bp-data .model-empty-sub {
+  margin: 0;
+}
+
+.bp-data .model-empty-sub.bp-data-hint {
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.bp-data-empty-ico {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  color: var(--text-dim);
+  background: var(--bg-elev-2);
+  border-radius: 9px;
+}
+
+.bp-data-empty-ico .codicon[class*='codicon-'] {
+  font-size: 18px;
+}
+
+.bp-data-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+/* The entities and the local users. */
+.bp-data-side {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 1px;
+  width: 232px;
+  padding: 10px 8px;
+  overflow-y: auto;
+  background: var(--bg-elev);
+  border-right: 1px solid var(--border);
+}
+
+.bp-data-side-h {
+  padding: 4px 8px 6px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.bp-data-side-empty {
+  padding: 4px 8px;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.bp-data-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  width: 100%;
+  min-width: 0;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  color: var(--text);
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.bp-data-item:hover {
+  background: var(--bg-elev-2);
+}
+
+.bp-data-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* Selected: a solid fill a step above hover, as the view tabs above show theirs. Light
+   surfaces darken as they recess, so there the step is --bg-elev-2 and hover a half step. */
+.bp-data-item--on,
+.bp-data-item--on:hover {
+  background: var(--bg-elev-3);
+}
+
+[data-theme='light'] .bp-data-item:hover {
+  background: color-mix(in srgb, var(--bg-elev-2) 55%, transparent);
+}
+
+[data-theme='light'] .bp-data-item--on,
+[data-theme='light'] .bp-data-item--on:hover {
+  background: var(--bg-elev-2);
+}
+
+.bp-data-item .codicon[class*='codicon-'] {
+  flex: none;
+  font-size: 13px;
+  color: var(--text-faint);
+}
+
+.bp-data-item--on .codicon[class*='codicon-'],
+.bp-data-item--on .bp-data-item-count {
+  color: var(--text-dim);
+}
+
+.bp-data-item-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bp-data-item--on .bp-data-item-name {
+  font-weight: 600;
+}
+
+.bp-data-item-count {
+  flex: none;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-faint);
+}
+
+.bp-data-sep {
+  flex: none;
+  height: 1px;
+  margin: 8px;
+  background: var(--border-soft);
+}
+
+/* The selected entity's rows, or the local users. */
+.bp-data-main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.bp-data-main-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  min-height: 44px;
+  padding: 6px 12px 6px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.bp-data-title {
+  margin: 0;
+  overflow: hidden;
+  font-size: 13.5px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bp-data-meta {
+  flex: none;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}
+
+.bp-data-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.bp-data-table {
+  min-width: 100%;
+  font-size: 12px;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.bp-data-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 0;
+  font-weight: 600;
+  text-align: left;
+  white-space: nowrap;
+  vertical-align: bottom;
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+}
+
+.bp-data-table th + th,
+.bp-data-table td + td {
+  border-left: 1px solid var(--border-soft);
+}
+
+.bp-data-table td {
+  padding: 6px 12px;
+  white-space: nowrap;
+  vertical-align: top;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.bp-data-table tbody tr:hover td {
+  background: var(--bg-elev);
+}
+
+/* Light: rows on a white surface, the header a faint band above them. */
+[data-theme='light'] .bp-data-main {
+  background: var(--bg-elev);
+}
+
+[data-theme='light'] .bp-data-table th {
+  background: var(--bg-elev-3);
+}
+
+[data-theme='light'] .bp-data-table tbody tr:hover td {
+  background: var(--bg-elev-3);
+}
+
+.bp-data-th {
+  display: block;
+  padding: 8px 12px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+.bp-data-sort {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  width: 100%;
+  padding: 6px 12px;
+  font: inherit;
+  text-align: left;
+  color: var(--text);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.bp-data-sort:hover {
+  background: var(--bg-elev-2);
+}
+
+.bp-data-sort:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.bp-data-num .bp-data-sort {
+  align-items: flex-end;
+  text-align: right;
+}
+
+.bp-data-col {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.bp-data-col-name {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.bp-data-col-type {
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--text-faint);
+}
+
+.bp-data-sort .codicon[class*='codicon-'] {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.bp-data-sort .bp-data-key.codicon[class*='codicon-'] {
+  color: var(--pending);
+}
+
+/* Values, by type: the full value is on hover. */
+.bp-data-cell {
+  display: block;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bp-data-td--number,
+.bp-data-td--date {
+  font-variant-numeric: tabular-nums;
+}
+
+.bp-data-td--number {
+  text-align: right;
+}
+
+.bp-data-td--null .bp-data-cell,
+.bp-data-td--empty .bp-data-cell {
+  font-style: italic;
+  color: var(--text-faint);
+}
+
+.bp-data-td--boolean .bp-data-cell,
+.bp-data-td--id .bp-data-cell,
+.bp-data-td--json .bp-data-cell,
+.bp-data-td--key .bp-data-cell {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.bp-data-td--id .bp-data-cell,
+.bp-data-td--json .bp-data-cell {
+  color: var(--text-dim);
+}
+
+.bp-data-pager {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  min-height: 38px;
+  padding: 5px 12px 5px 16px;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+  background: var(--bg-elev);
+  border-top: 1px solid var(--border);
+}
+
+.bp-data-pager .model-tool-btn {
+  padding: 3px 8px;
+}
+
+.bp-data-user {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 360px;
+}
+
+.bp-data-td--actions {
+  width: 1%;
+  text-align: right;
+}
+
+.bp-data-row-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  font: inherit;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.bp-data-row-btn:hover {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+}
+
+.bp-data-row-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.bp-data-row-btn .codicon[class*='codicon-'] {
+  font-size: 12px;
+}
+
+/* Storage: a folder's files beside the opened file's preview. */
+.bp-data-side-h--next {
+  margin-top: 10px;
+}
+
+.bp-data-folder {
+  flex: none;
+  max-width: 240px;
+  overflow: hidden;
+  padding: 1px 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+  background: var(--bg-elev);
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+}
+
+.bp-data-files {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.bp-data-files > .bp-data-scroll {
+  min-width: 0;
+}
+
+.bp-data-file {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 420px;
+  padding: 0;
+  font: inherit;
+  text-align: left;
+  color: var(--text);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.bp-data-file:hover .bp-data-cell {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.bp-data-file:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+.bp-data-file .codicon[class*='codicon-'] {
+  flex: none;
+  font-size: 13px;
+  color: var(--text-faint);
+}
+
+.bp-data-file-dir {
+  color: var(--text-faint);
+}
+
+.bp-data-table tbody tr.bp-data-tr--on td {
+  background: var(--bg-elev-2);
+}
+
+[data-theme='light'] .bp-data-table tbody tr.bp-data-tr--on td {
+  background: var(--bg-elev-2);
+}
+
+.bp-data-preview {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  width: 42%;
+  min-width: 300px;
+  max-width: 560px;
+  min-height: 0;
+  background: var(--bg-elev);
+  border-left: 1px solid var(--border);
+}
+
+.bp-data-preview-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  min-height: 40px;
+  padding: 4px 8px 4px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.bp-data-preview-head > .codicon[class*='codicon-'] {
+  flex: none;
+  font-size: 14px;
+  color: var(--text-faint);
+}
+
+.bp-data-preview-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12.5px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bp-data-preview-head .model-tool-btn {
+  padding: 3px 8px;
+}
+
+.bp-data-preview-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  color: var(--text-dim);
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.bp-data-preview-close:hover {
+  color: var(--text);
+  background: var(--bg-elev-2);
+}
+
+.bp-data-preview-close:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.bp-data-preview-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  min-height: 160px;
+  padding: 12px;
+  overflow: auto;
+  background: var(--bg);
+}
+
+.bp-data-preview-body > .model-empty {
+  align-self: stretch;
+}
+
+.bp-data-preview-img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  object-fit: contain;
+}
+
+.bp-data-preview-media,
+.bp-data-preview-audio {
+  width: 100%;
+}
+
+.bp-data-preview-page {
+  display: block;
+  width: 100%;
+  height: auto;
+  background: #fff;
+  border: 1px solid var(--border);
+}
+
+.bp-data-preview-text {
+  align-self: stretch;
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text);
+}
+
+.bp-data-preview-note {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+.bp-data-preview-facts {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 12px;
+  flex: none;
+  max-height: 40%;
+  margin: 0;
+  padding: 10px 12px;
+  overflow: auto;
+  font-size: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.bp-data-preview-facts dt {
+  color: var(--text-dim);
+}
+
+.bp-data-preview-facts dd {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bp-data-preview-dim {
+  color: var(--text-faint);
+}
+
+/* Confirmations: what they delete, and why a clear was refused. */
+.bp-data-confirm-list {
+  margin: 0 0 10px;
+  padding-left: 20px;
+}
+
+.bp-data-confirm-list li + li {
+  margin-top: 3px;
+}
+
+/* Why the seed data wasn't loaded: a long list scrolls in the dialog. */
+.bp-data-seed-problems {
+  max-height: 260px;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+}
+
+.bp-data-seed-problems code {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.bp-data-alert {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 9px 11px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 30%, var(--border));
+  border-radius: 8px;
+}
+
+.bp-data-alert .codicon[class*='codicon-'] {
+  flex: none;
+  margin-top: 2px;
+  font-size: 14px;
+  color: var(--danger);
+}
+
+.confirm-message .bp-data-alert p {
+  margin: 0;
+}
+
+.confirm-message .bp-data-alert .bp-data-alert-detail {
+  margin-top: 4px;
+  font-size: 11.5px;
+  color: var(--text-dim);
 }
 
 /* ── Motion ─────────────────────────────────────────────────────────────── */

@@ -7,21 +7,26 @@ import {
   type KeyboardEvent,
   type ChangeEvent,
   type ClipboardEvent,
-  type DragEvent,
   type JSX,
   type ReactNode,
 } from 'react'
 import {
   type ChatAdvisorSummary,
   type ChatDataRef,
+  type ChatFileRef,
   type ChatMigrationRef,
   type ChatMode,
+  type ChatPathInfo,
   type ChatPlanArtifact,
+  type ChatPluginId,
   type ChatTurnResult,
   type CopilotAuthStatus,
+  type DirListing,
+  type ExperimentFlags,
   type StudioProject
 } from '@shared/ipc'
 import { isCopilotAuthError } from '../copilotAuth'
+import { openDocs } from '../docsLinks'
 import type { WorkspaceUse } from '../fabric'
 import {
   dataTurnPrompt,
@@ -32,6 +37,8 @@ import {
   type DataSource
 } from '../fabricData'
 import { DataTray } from './chat/DataTray'
+import { FileTray } from './chat/FileTray'
+import { filesTurnPrompt, pendingFiles, setPendingFiles, withFiles } from './chat/fileRefs'
 import CopilotSignInNotice from './CopilotSignInNotice'
 import type { PendingShot } from './PreviewPane'
 import { splitMentions } from './MentionText'
@@ -48,7 +55,10 @@ import {
 import type { OutboundPrompt, UIChatMessage } from './chat/types'
 import { suggestionsFor, useGeneratedSuggestions } from './chat/suggestions'
 import { SendIcon } from './chat/icons'
-import { AddMenu } from './chat/ComposerMenus'
+import { AddMenu, PluginsMenu } from './chat/ComposerMenus'
+import { UsageMeter } from './chat/UsageMeter'
+import { offeredPlugins } from './chat/plugins'
+import { useMcpServers } from '../mcpServers'
 import { ModelPicker } from './models/ModelPicker'
 import { selectionArgs, selectionOf, type ModelSelection } from '../modelSelection'
 import { useCopilotModels } from '../copilotModels'
@@ -57,13 +67,25 @@ import { uid } from './chat/format'
 import { readAsDataUrl, toPngAndThumb } from './chat/images'
 import { reduceChatMessage, rollbackInterjection, settleRunningTools } from './chat/reducer'
 import { ChatEventBuffer, isStreamingEvent } from './chat/eventCoalescer'
-import { flattenFiles, rankFiles, type MentionFile } from './chat/mentions'
+import {
+  activeMention,
+  flattenFiles,
+  isImagePath,
+  isPathQuery,
+  mentionText,
+  rankEntries,
+  rankFiles,
+  splitPathQuery,
+  type MentionFile,
+  type MentionOption
+} from './chat/mentions'
 import { createFileResolver } from './chat/paths'
 import { MessageRow } from './chat/MessageRow'
 import { tryAgainPrompt } from './chat/prompts'
 import type { ChatDesignSummary, DesignItem } from '@shared/design'
 import type { DesignTurn } from '../design/useDesignSession'
 import { DesignTray } from '../design/DesignTray'
+import { useFileDrop } from '../fileDrop'
 import './chat/chat.css'
 
 export type { OutboundPrompt, UIChatMessage } from './chat/types'
@@ -80,11 +102,13 @@ function rerunPrompt(user: UIChatMessage): string | null {
 }
 
 /** What a user message carries beyond its text: a Design or Advisor card, the
- *  Fabric data it added, the migration page it builds, and the prompt reruns re-send. */
+ *  Fabric data and the files it added, the migration page it builds, and the
+ *  prompt reruns re-send. */
 interface TurnExtra {
   design?: ChatDesignSummary
   advisor?: ChatAdvisorSummary
   data?: ChatDataRef[]
+  files?: ChatFileRef[]
   migration?: ChatMigrationRef
   storedPrompt?: string
 }
@@ -92,7 +116,16 @@ interface TurnExtra {
 /** A Design or Advisor message's card and prompt, carried to its rerun (without
  *  the captures — those were deleted once the original turn used them). */
 function rerunExtra(user: UIChatMessage): TurnExtra | undefined {
-  if (!user.prompt && !user.design && !user.advisor && !user.data && !user.migration) return undefined
+  if (
+    !user.prompt &&
+    !user.design &&
+    !user.advisor &&
+    !user.data &&
+    !user.files &&
+    !user.migration
+  ) {
+    return undefined
+  }
   return {
     design: user.design
       ? {
@@ -106,6 +139,7 @@ function rerunExtra(user: UIChatMessage): TurnExtra | undefined {
       : undefined,
     advisor: user.advisor,
     data: user.data,
+    files: user.files,
     migration: user.migration,
     storedPrompt: user.prompt
   }
@@ -135,7 +169,7 @@ interface Props {
   onAttachmentsConsumed?: () => void
   /** Called when the user starts a new chat (parent clears persisted history). */
   onClearHistory?: () => void
-  /** Called after the model / effort options change (parent refreshes project). */
+  /** Called after the model / effort options or the plugins change (parent refreshes project). */
   onOptionsChanged?: () => void
   /** Open Accounts at Model providers (your own API keys). */
   onManageKeys?: () => void
@@ -151,18 +185,14 @@ interface Props {
   focused?: boolean
   /** Toggle chat focus (full-width chat ⇄ split with preview). */
   onToggleFocus?: () => void
-  /** Hard-gate: the project has no deployment yet — disable the composer until it does. */
-  deployLock?: boolean
-  /** True while the project's first deploy is actively streaming (gate shows progress). */
+  /** True while the project is publishing: `blockSubmitWhileDeploying` pauses sending. */
   deploying?: boolean
-  /** When true, a deploy in progress pauses *submitting* a new turn (typing stays
-   *  enabled). Used by the live local preview so a turn never overlaps a deploy —
-   *  otherwise the dev server can't start during the deploy and never comes back. */
+  /** When true, a publish in progress pauses *submitting* a new turn (typing stays
+   *  enabled). Used by the live local preview so a turn never overlaps a publish —
+   *  otherwise the dev server can't start during the publish and never comes back. */
   blockSubmitWhileDeploying?: boolean
-  /** Tooltip on the paused Send button (defaults to the deploy wording). */
+  /** Tooltip on the paused Send button (defaults to the publish wording). */
   submitBlockedTitle?: string
-  /** Open the fullscreen deploy step (the gate CTA). */
-  onRequestDeploy?: () => void
   /** The host owns the global chat-event subscription (keeps turns live while this panel is unmounted). */
   eventsManagedExternally?: boolean
   /** Open a file referenced by an @-mention chip (path without the leading @). */
@@ -192,6 +222,10 @@ interface Props {
   recentWorkspaces?: readonly WorkspaceUse[]
   /** Shown above the composer, such as a report migration's progress card. */
   banner?: ReactNode
+  /** The experiments that are on, for the plugins they add to chat (Work IQ, MCP servers). */
+  experiments?: ExperimentFlags
+  /** Open the MCP servers dialog (MCP servers experiment), adding a server when `add` is set. */
+  onManageMcpServers?: (add: boolean) => void
 }
 
 export default function ChatPanel({
@@ -213,11 +247,9 @@ export default function ChatPanel({
   onAdvisorRerun,
   focused,
   onToggleFocus,
-  deployLock = false,
   deploying = false,
   blockSubmitWhileDeploying = false,
-  submitBlockedTitle = 'Deploying — sending resumes when it goes live',
-  onRequestDeploy,
+  submitBlockedTitle = 'Publishing — sending resumes when it goes live',
   eventsManagedExternally = false,
   onOpenMention,
   draft,
@@ -232,7 +264,9 @@ export default function ChatPanel({
   copilotAuth,
   onCopilotAuthChanged,
   recentWorkspaces,
-  banner
+  banner,
+  experiments,
+  onManageMcpServers
 }: Props): JSX.Element {
   // The composer draft is seeded from — and mirrored back to — the parent so a
   // typed-but-unsent prompt survives this panel unmounting. Switching to the Code
@@ -339,15 +373,26 @@ export default function ChatPanel({
   const stick = useRef(true)
   const [showJump, setShowJump] = useState(false)
   const [jumpNew, setJumpNew] = useState(false)
-  const [dragOver, setDragOver] = useState(false)
-  const dragDepth = useRef(0)
+  /** The composer box: where files and folders dragged from this computer drop. */
+  const boxRef = useRef<HTMLDivElement>(null)
+  const dragOver = useFileDrop(boxRef, (paths) => void addPaths(paths), !sending)
   const [fileList, setFileList] = useState<MentionFile[] | null>(null)
   const knownFiles = useMemo(() => (fileList ? new Set(fileList.map((f) => f.path)) : undefined), [fileList])
   const [atOpen, setAtOpen] = useState(false)
   const [atStart, setAtStart] = useState(0)
   const [atQuery, setAtQuery] = useState('')
+  /** The @-token is quoted (`@"…`), for a path with spaces. */
+  const [atQuoted, setAtQuoted] = useState(false)
   const [atIdx, setAtIdx] = useState(0)
   const [atDismissed, setAtDismissed] = useState(false)
+  const atMenuRef = useRef<HTMLDivElement>(null)
+  /** The arrow keys moved the @-picker's selection: scroll it into view. */
+  const revealAtSel = useRef(false)
+  /** The folder an @-path browses (as typed), and what's in it once listed. */
+  const [listing, setListing] = useState<{ dir: string; result?: DirListing } | null>(null)
+  const listingDir = useRef<string | null>(null)
+  /** A folder was picked: list what's in it once the composer has its new text. */
+  const browseNext = useRef(false)
   const pendingCaret = useRef<number | null>(null)
   const taRef = useRef<HTMLTextAreaElement>(null)
   const highlightRef = useRef<HTMLDivElement>(null)
@@ -363,6 +408,14 @@ export default function ChatPanel({
     setPendingData(project.id, next)
     setDataChipsState(next)
   }
+  /** Files and folders on this computer waiting to go out with the next message, shown as chips. */
+  const [fileChips, setFileChipsState] = useState<ChatFileRef[]>(() => pendingFiles(project.id))
+  const changeFileChips = (change: (files: ChatFileRef[]) => ChatFileRef[]): void =>
+    setFileChipsState((files) => {
+      const next = change(files)
+      setPendingFiles(project.id, next)
+      return next
+    })
 
   // Keep the caret in view inside the composer's single scrollport
   // (`.composer-input-sizer`). The textarea is sized to its full content height so
@@ -464,6 +517,26 @@ export default function ChatPanel({
     setSelection(next)
     void window.api.chat.setOptions(project.id, selectionArgs(next))
     onOptionsChanged?.()
+  }
+
+  // The plugins on in this chat. A switch flips at once and flips back if it can't be saved.
+  const [plugins, setPlugins] = useState<readonly string[]>(() => project.plugins ?? [])
+  // Follow the saved list when it changes elsewhere, e.g. removing an MCP server turns it off everywhere.
+  const savedPlugins = (project.plugins ?? []).join('\n')
+  useEffect(() => {
+    setPlugins(savedPlugins ? savedPlugins.split('\n') : [])
+  }, [savedPlugins])
+  // The MCP servers you added, offered while their experiment is on.
+  const mcpEnabled = Boolean(experiments?.mcpServers)
+  const mcpServers = useMcpServers(mcpEnabled)
+  function togglePlugin(plugin: ChatPluginId, on: boolean): void {
+    const turn = (value: boolean) => (ids: readonly string[]) =>
+      value ? [...ids.filter((id) => id !== plugin), plugin] : ids.filter((id) => id !== plugin)
+    setPlugins(turn(on))
+    window.api.chat.setPlugin(project.id, plugin, on).then(
+      () => onOptionsChanged?.(),
+      () => setPlugins(turn(!on))
+    )
   }
 
   // Coalesce high-frequency streamed events (text / reasoning deltas and live tool
@@ -598,20 +671,23 @@ export default function ChatPanel({
   // scrollport shared by the textarea and the highlight overlay, so the two can
   // never scroll out of sync; `revealCaretSoon` (above) keeps the caret visible.
 
-  // Stage one or more images (from the file picker, paste, or drag-drop) as chat
-  // attachments — re-encoded to PNG and saved to a temp file, reusing the same
-  // pending-attachment flow as annotated screenshots.
+  // Stage one or more images (from the file picker, paste, or a drop from this
+  // computer) as chat attachments — re-encoded to PNG and saved to a temp file,
+  // reusing the same pending-attachment flow as annotated screenshots.
   async function stageImages(files: Iterable<File | null | undefined>): Promise<void> {
-    if (!onAddAttachment) return
     const images = Array.from(files).filter(
       (f): f is File => !!f && f.type.startsWith('image/')
     )
-    if (images.length === 0) return
+    await attachImages(images.map((file) => () => readAsDataUrl(file)))
+  }
+
+  /** Attach images, each read as a data URL when its turn comes. */
+  async function attachImages(reads: Array<() => Promise<string>>): Promise<void> {
+    if (!onAddAttachment || reads.length === 0) return
     setAttaching(true)
     try {
-      for (const file of images) {
-        const src = await readAsDataUrl(file)
-        const { png, thumb } = await toPngAndThumb(src)
+      for (const read of reads) {
+        const { png, thumb } = await toPngAndThumb(await read())
         const path = await window.api.screenshot.save(png)
         onAddAttachment({ path, thumb })
       }
@@ -638,53 +714,34 @@ export default function ChatPanel({
     }
   }
 
-  function dragHasFiles(e: DragEvent<HTMLDivElement>): boolean {
-    return Array.from(e.dataTransfer?.items ?? []).some((it) => it.kind === 'file')
-  }
-
-  function onComposerDragEnter(e: DragEvent<HTMLDivElement>): void {
-    if (!dragHasFiles(e) || sending) return
-    e.preventDefault()
-    dragDepth.current += 1
-    setDragOver(true)
-  }
-
-  function onComposerDragOver(e: DragEvent<HTMLDivElement>): void {
-    if (dragHasFiles(e) && !sending) e.preventDefault()
-  }
-
-  function onComposerDragLeave(): void {
-    if (dragDepth.current === 0) return
-    dragDepth.current -= 1
-    if (dragDepth.current <= 0) {
-      dragDepth.current = 0
-      setDragOver(false)
+  /**
+   * Add files and folders from this computer, dropped on the composer or picked
+   * in the system's file dialog: images are attached, like pasted ones, and the
+   * rest wait as chips for the next message, which gives Copilot each to read.
+   */
+  async function addPaths(paths: string[]): Promise<void> {
+    if (paths.length === 0) return
+    let found: ChatPathInfo[]
+    try {
+      found = await window.api.chat.inspectPaths(paths)
+    } catch (err) {
+      console.error('Failed to look at the files to add', err)
+      return
     }
+    const images = onAddAttachment ? found.filter((f) => !f.dir && isImagePath(f.path)) : []
+    const files = found
+      .filter((f) => !images.includes(f))
+      .map((f) => ({ path: f.path, dir: f.dir }))
+    if (files.length > 0) changeFileChips((chips) => withFiles(chips, files))
+    await attachImages(images.map((f) => () => window.api.screenshot.read(f.path)))
   }
 
-  async function onComposerDrop(e: DragEvent<HTMLDivElement>): Promise<void> {
-    dragDepth.current = 0
-    setDragOver(false)
-    const all = Array.from(e.dataTransfer?.files ?? [])
-    if (all.length === 0) return
-    e.preventDefault()
-    const images = all.filter((f) => f.type.startsWith('image/'))
-    const others = all.filter((f) => !f.type.startsWith('image/'))
-    if (images.length > 0) void stageImages(images)
-    if (others.length > 0) {
-      // Match dropped files to project files by basename and insert references.
-      const list = await ensureFiles()
-      const refs: string[] = []
-      for (const f of others) {
-        const hits = list
-          .filter((x) => x.name === f.name)
-          .sort((a, b) => a.path.length - b.path.length)
-        if (hits.length > 0) refs.push(`@${hits[0].path}`)
-      }
-      if (refs.length > 0) {
-        setInput((prev) => `${prev}${prev && !prev.endsWith(' ') ? ' ' : ''}${refs.join(' ')} `)
-        taRef.current?.focus()
-      }
+  /** Add files and folders picked in the system's file dialog (the "+" menu). */
+  async function browse(): Promise<void> {
+    try {
+      await addPaths(await window.api.chat.pickPaths())
+    } catch (err) {
+      console.error('Failed to pick files', err)
     }
   }
 
@@ -693,7 +750,7 @@ export default function ChatPanel({
   const submitBlocked = deploying && blockSubmitWhileDeploying
 
   async function send(): Promise<void> {
-    if (deployLock || imagesBlocked) return
+    if (imagesBlocked) return
     const text = input.trim()
     const shots = attachments ?? []
     // Mid-turn: interrupt the running reply with this message (conversation
@@ -747,7 +804,9 @@ export default function ChatPanel({
       }
       setInput('')
       onAttachmentsConsumed?.()
-      await steer(text, shots)
+      const files = fileChips
+      if (files.length > 0) changeFileChips(() => [])
+      await steer(text, shots, files)
       return
     }
     // Pause a *new* turn while a deploy runs (steering a live turn above is still
@@ -759,15 +818,23 @@ export default function ChatPanel({
       await sendDesign(text, shots)
       return
     }
-    // Fabric data goes out with the message as chips; Copilot gets how to connect it.
-    if (dataChips.length > 0) {
+    // Fabric data and files go out with the message as chips: Copilot gets how to
+    // connect the data, and a reference to each file and folder, which it reads.
+    if (dataChips.length > 0 || fileChips.length > 0) {
       const sources = dataChips
-      const prompt = dataTurnPrompt(text, sources)
+      const files = fileChips
+      const prompt = filesTurnPrompt(
+        sources.length > 0 ? dataTurnPrompt(text, sources) : text,
+        files,
+        project.path
+      )
       setInput('')
       setDataChips([])
+      changeFileChips(() => [])
       onAttachmentsConsumed?.()
       await dispatch(text, prompt, shots, undefined, undefined, {
-        data: sources.map(toDataRef),
+        data: sources.length > 0 ? sources.map(toDataRef) : undefined,
+        files: files.length > 0 ? files : undefined,
         storedPrompt: prompt
       })
       return
@@ -811,8 +878,14 @@ export default function ChatPanel({
    * shows it inline in the live assistant feed, then asks the backend to deliver
    * it immediately. If the turn happened to finish first (`steered: false`), the
    * optimistic bubble is rolled back and the message is sent as a fresh turn.
+   * Copilot gets a reference to each of `files` too.
    */
-  async function steer(text: string, shots: PendingShot[]): Promise<void> {
+  async function steer(
+    text: string,
+    shots: PendingShot[],
+    files: ChatFileRef[] = []
+  ): Promise<void> {
+    const prompt = filesTurnPrompt(text, files, project.path)
     const liveTurnId = [...messages].reverse().find((m) => m.pending && m.turnId)?.turnId
     const thumbs = shots.length ? shots.map((s) => s.thumb) : undefined
     if (liveTurnId) {
@@ -826,7 +899,11 @@ export default function ChatPanel({
     }
     let steered = true
     try {
-      const res = await window.api.chat.steer(project.id, text, shots.map((s) => s.path))
+      const res = await window.api.chat.steer(
+        project.id,
+        prompt,
+        shots.map((s) => s.path)
+      )
       steered = !!res?.steered
     } catch (err) {
       console.error('Failed to steer', err)
@@ -839,7 +916,14 @@ export default function ChatPanel({
           )
         )
       }
-      await dispatch(text, text, shots)
+      await dispatch(
+        text,
+        prompt,
+        shots,
+        undefined,
+        undefined,
+        files.length > 0 ? { files, storedPrompt: prompt } : undefined
+      )
     }
   }
 
@@ -905,6 +989,7 @@ export default function ChatPanel({
       design: extra?.design,
       advisor: extra?.advisor,
       data: extra?.data,
+      files: extra?.files,
       migration: extra?.migration,
       prompt: extra?.storedPrompt
     }
@@ -959,7 +1044,7 @@ export default function ChatPanel({
 
   /** Re-run the latest prompt for a fresh attempt (its context and file changes stay). */
   async function tryAgain(assistantId: string): Promise<void> {
-    if (sending || deployLock || submitBlocked) return
+    if (sending || submitBlocked) return
     const idx = messages.findIndex((m) => m.id === assistantId)
     if (idx <= 0 || idx !== messages.length - 1) return
     const turn = messages[idx]
@@ -1243,21 +1328,6 @@ export default function ChatPanel({
     taRef.current?.focus()
   }
 
-  /** Insert an "@" at the caret and open the file picker (the "+" menu's "File"). */
-  function insertMention(): void {
-    const caret = taRef.current?.selectionStart ?? input.length
-    const before = input.slice(0, caret)
-    const lead = before && !/\s$/.test(before) ? ' ' : ''
-    setInput(`${before}${lead}@${input.slice(caret)}`)
-    pendingCaret.current = before.length + lead.length + 1
-    setAtStart(before.length + lead.length)
-    setAtQuery('')
-    setAtIdx(0)
-    setAtDismissed(false)
-    setAtOpen(true)
-    void ensureFiles()
-  }
-
   // @-mentions: typing "@" (after whitespace/start) opens a fuzzy file picker;
   // selecting inserts an "@<relative/path>" reference the agent reads as context.
   async function ensureFiles(): Promise<MentionFile[]> {
@@ -1313,16 +1383,34 @@ export default function ChatPanel({
       return
     }
     const caret = ta.selectionStart ?? ta.value.length
-    const m = /(^|\s)@([^\s@]*)$/.exec(ta.value.slice(0, caret))
-    if (!m) {
+    const token = activeMention(ta.value.slice(0, caret))
+    if (!token) {
       setAtOpen(false)
       return
     }
-    setAtStart(caret - m[2].length - 1)
-    setAtQuery(m[2])
+    setAtStart(token.start)
+    setAtQuery(token.query)
+    setAtQuoted(token.quoted)
     setAtIdx(0)
     setAtOpen(true)
-    void ensureFiles()
+    // A path browses folders, in the project or outside it; anything else
+    // searches the project's files. Opening the picker lists a folder afresh.
+    if (isPathQuery(token.query)) void ensureListing(splitPathQuery(token.query).dir, !atOpen)
+    else void ensureFiles()
+  }
+
+  /** List the folder an @-path is in: once per folder typed while the picker is open. */
+  async function ensureListing(dir: string, fresh: boolean): Promise<void> {
+    if (!fresh && listingDir.current === dir) return
+    listingDir.current = dir
+    setListing({ dir })
+    let result: DirListing
+    try {
+      result = await window.api.projects.files.listDir(project.id, dir)
+    } catch (err) {
+      result = { dir, entries: [], error: err instanceof Error ? err.message : String(err) }
+    }
+    if (listingDir.current === dir) setListing({ dir, result })
   }
 
   function onComposerChange(e: ChangeEvent<HTMLTextAreaElement>): void {
@@ -1337,24 +1425,85 @@ export default function ChatPanel({
     evalAt()
   }
 
-  const atMatches = useMemo(() => {
+  const pathParts = useMemo(
+    () => (atOpen && isPathQuery(atQuery) ? splitPathQuery(atQuery) : null),
+    [atOpen, atQuery]
+  )
+  const pathListing = pathParts && listing?.dir === pathParts.dir ? listing.result : undefined
+  const atOptions = useMemo<MentionOption[]>(() => {
     if (!atOpen) return []
-    return fileList ? rankFiles(fileList, atQuery) : []
-  }, [atOpen, fileList, atQuery])
-  const atLoading = atOpen && fileList == null
-  const atCapture = atOpen && atMatches.length > 0
-  const atSel = Math.max(0, Math.min(atIdx, atMatches.length - 1))
+    if (!pathParts) {
+      return (fileList ? rankFiles(fileList, atQuery) : []).map((f) => ({
+        key: f.path,
+        kind: 'file' as const,
+        name: f.name,
+        detail: f.path,
+        insert: `${mentionText(f.path)} `
+      }))
+    }
+    if (!pathListing || pathListing.error) return []
+    const { dir, partial } = pathParts
+    // Folders keep the separator the path was typed with.
+    const sep = dir.includes('\\') && !dir.includes('/') ? '\\' : '/'
+    const options: MentionOption[] = rankEntries(pathListing.entries, partial).map((e) =>
+      e.dir
+        ? {
+            key: `dir:${e.name}`,
+            kind: 'dir' as const,
+            name: e.name,
+            detail: `${dir}${e.name}${sep}`,
+            insert: mentionText(`${dir}${e.name}${sep}`, atQuoted, true),
+            browse: true
+          }
+        : {
+            key: `file:${e.name}`,
+            kind: 'file' as const,
+            name: e.name,
+            detail: `${dir}${e.name}`,
+            insert: `${mentionText(`${dir}${e.name}`, atQuoted)} `
+          }
+    )
+    if (!partial) {
+      options.unshift({
+        key: 'here',
+        kind: 'here',
+        name: 'This folder',
+        detail: dir,
+        insert: `${mentionText(dir, atQuoted)} `
+      })
+    }
+    return options
+  }, [atOpen, atQuery, atQuoted, fileList, pathParts, pathListing])
+  const atLoading = atOpen && (pathParts ? !pathListing : fileList == null)
+  const atCapture = atOpen && atOptions.length > 0
+  const atSel = Math.max(0, Math.min(atIdx, atOptions.length - 1))
+  // A new query, or another folder, lists from the top.
+  useEffect(() => {
+    if (atMenuRef.current) atMenuRef.current.scrollTop = 0
+  }, [atQuery, pathListing])
+  // The arrow keys keep the selection in view; hovering leaves the list where it is.
+  useEffect(() => {
+    if (!revealAtSel.current) return
+    revealAtSel.current = false
+    const menu = atMenuRef.current
+    if (!menu) return
+    if (atSel === 0) menu.scrollTop = 0
+    else
+      menu
+        .querySelector<HTMLElement>('[aria-selected="true"]')
+        ?.scrollIntoView?.({ block: 'nearest' })
+  }, [atSel])
 
-  /** Replace the active @-token with a reference to `path`. */
-  function pickFile(path: string): void {
+  /** Replace the active @-token with `option`'s reference; a folder goes on to list what's in it. */
+  function pickMention(option: MentionOption): void {
     const caret = taRef.current?.selectionStart ?? input.length
     const before = input.slice(0, atStart)
     const after = input.slice(caret)
-    const insert = `@${path} `
-    setInput(before + insert + after)
+    setInput(before + option.insert + after)
     setAtOpen(false)
     setAtDismissed(false)
-    pendingCaret.current = before.length + insert.length
+    pendingCaret.current = before.length + option.insert.length
+    browseNext.current = Boolean(option.browse)
   }
 
   // Restore focus + caret after an @-mention insertion (input is controlled).
@@ -1367,24 +1516,30 @@ export default function ChatPanel({
       ta.focus()
       ta.setSelectionRange(c, c)
     }
+    if (browseNext.current) {
+      browseNext.current = false
+      evalAt()
+    }
   }, [input])
 
   function onKeyDown(e: KeyboardEvent<HTMLTextAreaElement>): void {
     if (atCapture) {
-      const len = atMatches.length
+      const len = atOptions.length
       if (e.key === 'ArrowDown') {
         e.preventDefault()
+        revealAtSel.current = true
         setAtIdx((i) => (Math.max(0, Math.min(i, len - 1)) + 1) % len)
         return
       }
       if (e.key === 'ArrowUp') {
         e.preventDefault()
+        revealAtSel.current = true
         setAtIdx((i) => (Math.max(0, Math.min(i, len - 1)) - 1 + len) % len)
         return
       }
       if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) {
         e.preventDefault()
-        pickFile(atMatches[atSel].path)
+        pickMention(atOptions[atSel])
         return
       }
       if (e.key === 'Escape') {
@@ -1408,7 +1563,9 @@ export default function ChatPanel({
   useEffect(() => {
     if (!outbound || outbound.id === handledOutbound.current) return
     handledOutbound.current = outbound.id
-    if (outbound.design) {
+    if (outbound.connectData) {
+      setConnect({})
+    } else if (outbound.design) {
       // The preview toolbar's Send: the same as pressing Send here.
       if (!sending) void send()
     } else if (sending || outbound.stage) {
@@ -1449,13 +1606,7 @@ export default function ChatPanel({
         const next = messages[i + 1]
         const working = m.role === 'user' && next?.role === 'assistant' && next.pending
         const canTryAgain =
-          latest &&
-          rerunnable &&
-          !deployLock &&
-          !m.pending &&
-          !m.error &&
-          !m.interrupted &&
-          !m.plan
+          latest && rerunnable && !m.pending && !m.error && !m.interrupted && !m.plan
         return (
           <MessageRow
             key={m.id}
@@ -1484,7 +1635,6 @@ export default function ChatPanel({
     [
       messages,
       sending,
-      deployLock,
       project.name,
       project.path,
       planBusyId,
@@ -1515,6 +1665,13 @@ export default function ChatPanel({
           </button>
         )}
         <span className="chat-toolbar-spacer" />
+        <UsageMeter
+          key={project.id}
+          projectId={project.id}
+          sending={sending}
+          hidden={messages.length === 0}
+          host={copilotAuth?.host}
+        />
         <button
           type="button"
           className="chat-tool chat-tool--label"
@@ -1570,43 +1727,7 @@ export default function ChatPanel({
 
       <div className={`composer${sending ? ' composer--busy' : ''}`}>
         {banner}
-        {deployLock && (
-          <div className="deploy-gate" role="status">
-            {deploying ? (
-              <span className="ws-spinner deploy-gate-spin" aria-hidden="true" />
-            ) : (
-              <span className="deploy-gate-ico" aria-hidden="true">
-                <Codicon name="rocket" />
-              </span>
-            )}
-            <div className="deploy-gate-text">
-              <span className="deploy-gate-title">
-                {deploying ? 'Deploying your app…' : 'Deploy your app to start building'}
-              </span>
-              <span className="deploy-gate-sub">
-                {deploying
-                  ? `Chat unlocks as soon as ${project.name} is live.`
-                  : `Chat is locked until ${project.name} has a deployment.`}
-              </span>
-            </div>
-            {deploying ? (
-              <button className="btn btn--sm" disabled>
-                Deploying…
-              </button>
-            ) : (
-              <button className="btn btn--sm btn--primary" onClick={onRequestDeploy}>
-                Deploy now
-              </button>
-            )}
-          </div>
-        )}
-        <div
-          className={`composer-box${dragOver ? ' composer-box--drag' : ''}`}
-          onDrop={onComposerDrop}
-          onDragEnter={onComposerDragEnter}
-          onDragOver={onComposerDragOver}
-          onDragLeave={onComposerDragLeave}
-        >
+        <div ref={boxRef} className={`composer-box${dragOver ? ' composer-box--drag' : ''}`}>
           {sending && <div className="composer-busyline" aria-hidden="true" />}
           {dragOver && (
             <div className="composer-drop" aria-hidden="true">
@@ -1615,15 +1736,41 @@ export default function ChatPanel({
             </div>
           )}
           {atOpen && (
-            <div className="mention-menu" role="listbox" aria-label="Project files">
-              <div className="mention-menu-head">Reference a file</div>
-              {atLoading && <div className="mention-empty">Loading files…</div>}
-              {!atLoading && atMatches.length === 0 && (
-                <div className="mention-empty">No files match “{atQuery}”</div>
+            <div
+              ref={atMenuRef}
+              className="mention-menu"
+              role="listbox"
+              aria-label={pathParts ? 'Files and folders' : 'Project files'}
+            >
+              <div className="mention-menu-head">
+                {pathParts ? 'Reference a file or folder' : 'Reference a file'}
+              </div>
+              {pathListing?.dir && (
+                <div className="mention-dir" title={pathListing.dir}>
+                  {pathListing.dir}
+                </div>
               )}
-              {atMatches.map((f, i) => (
+              {atLoading && <div className="mention-empty">Loading files…</div>}
+              {!atLoading && pathListing?.error && (
+                <div className="mention-empty">{pathListing.error}</div>
+              )}
+              {!atLoading && !pathListing?.error && atOptions.length === 0 && (
+                <div className="mention-empty">
+                  {pathParts ? (
+                    `Nothing here matches “${pathParts.partial}”`
+                  ) : (
+                    <>
+                      No files match “{atQuery}”
+                      <span className="mention-hint">
+                        To reference something outside the project, type ../ or a full path.
+                      </span>
+                    </>
+                  )}
+                </div>
+              )}
+              {atOptions.map((o, i) => (
                 <button
-                  key={f.path}
+                  key={o.key}
                   type="button"
                   role="option"
                   aria-selected={i === atSel}
@@ -1631,12 +1778,15 @@ export default function ChatPanel({
                   onMouseEnter={() => setAtIdx(i)}
                   onMouseDown={(e) => {
                     e.preventDefault()
-                    pickFile(f.path)
+                    pickMention(o)
                   }}
                 >
-                  <span className="codicon codicon-file mention-ico" aria-hidden="true" />
-                  <span className="mention-name">{f.name}</span>
-                  <span className="mention-path">{f.path}</span>
+                  <span
+                    className={`codicon codicon-${o.kind === 'file' ? 'file' : o.kind === 'dir' ? 'folder' : 'folder-opened'} mention-ico`}
+                    aria-hidden="true"
+                  />
+                  <span className="mention-name">{o.name}</span>
+                  <span className="mention-path">{o.detail}</span>
                 </button>
               ))}
             </div>
@@ -1653,6 +1803,10 @@ export default function ChatPanel({
             sources={dataChips}
             onOpen={() => setConnect({})}
             onRemove={(id) => setDataChips(dataChips.filter((s) => s.item.id !== id))}
+          />
+          <FileTray
+            files={fileChips}
+            onRemove={(path) => changeFileChips((files) => files.filter((f) => f.path !== path))}
           />
           {((attachments?.length ?? 0) > 0 || attaching) && (
             <div className="chat-attachments">
@@ -1700,17 +1854,16 @@ export default function ChatPanel({
               ref={taRef}
               className="composer-input"
               placeholder={
-                deployLock
-                  ? 'Deploy your app to start chatting…'
-                  : designItems.length > 0
-                    ? 'Add a note for these changes (optional) — or just press Enter to send them'
-                    : dataChips.length > 0
-                      ? 'Say what to build with this data, or just press Enter to connect it'
+                designItems.length > 0
+                  ? 'Add a note for these changes (optional) — or just press Enter to send them'
+                  : dataChips.length > 0
+                    ? 'Say what to build with this data, or just press Enter to connect it'
+                    : fileChips.length > 0
+                      ? 'Say what to do with these, or just press Enter to send them'
                       : `Message Fabricator about ${project.name}…`
               }
               value={input}
               rows={1}
-              disabled={deployLock}
               onChange={onComposerChange}
               onSelect={onComposerSelect}
               onKeyDown={onKeyDown}
@@ -1721,12 +1874,20 @@ export default function ChatPanel({
           <div className="composer-actions">
             <div className="composer-left">
               <AddMenu
-                locked={deployLock}
                 attaching={attaching}
                 imageNote={imageNote}
                 onImage={() => fileRef.current?.click()}
                 onConnectData={(kind) => setConnect({ kind })}
-                onReferenceFile={insertMention}
+                onBrowse={() => void browse()}
+              />
+              <PluginsMenu
+                plugins={offeredPlugins(experiments)}
+                servers={mcpEnabled ? mcpServers : undefined}
+                on={plugins}
+                disabled={sending}
+                onToggle={togglePlugin}
+                onManageServers={onManageMcpServers}
+                onLearnMore={() => openDocs('plugins')}
               />
               <ModelPicker
                 value={selection}
@@ -1779,14 +1940,14 @@ export default function ChatPanel({
                     className="composer-send"
                     onClick={send}
                     disabled={
-                      deployLock ||
                       submitBlocked ||
                       designSending ||
                       imagesBlocked ||
                       (!input.trim() &&
                         (attachments?.length ?? 0) === 0 &&
                         designItems.length === 0 &&
-                        dataChips.length === 0)
+                        dataChips.length === 0 &&
+                        fileChips.length === 0)
                     }
                     title={
                       submitBlocked || imagesBlocked

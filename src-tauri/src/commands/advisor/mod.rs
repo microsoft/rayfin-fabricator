@@ -14,11 +14,12 @@
 
 mod catalog;
 mod collect;
-mod evidence;
+pub(crate) mod evidence;
 mod prompt;
 mod tools;
 
 pub(crate) use evidence::mask_secrets;
+pub(crate) use prompt::APP_SHAPE;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -46,7 +47,7 @@ use crate::services::{paths, store};
 use crate::state::AppState;
 use crate::types::{
   AdvisorEvent, AdvisorFinding, AdvisorLoadResult, AdvisorProjectSnapshot, AdvisorRawReport, AdvisorReport,
-  AdvisorRuleResult, AdvisorRunRequest, AdvisorSnapshot, AdvisorVerdict, ChatToolCall, ChatToolState,
+  AdvisorRuleResult, AdvisorRunRequest, AdvisorSnapshot, AdvisorVerdict, ChatToolCall, ChatToolState, StudioProject,
 };
 use tools::{Emit, ReviewContext, ReviewCore, RuleMeta, SharedLog, SharedVerdicts, VerifyContext};
 
@@ -67,7 +68,7 @@ const SNAPSHOT_SCHEMA: u32 = 2;
 
 /// Built-in tools an Advisor session must not use. The permission policy
 /// enforces read-only regardless; excluding them keeps the model from trying.
-const EXCLUDED_TOOLS: &[&str] = &[
+pub(crate) const EXCLUDED_TOOLS: &[&str] = &[
   "edit",
   "create",
   "apply_patch",
@@ -169,6 +170,13 @@ fn is_secret_file(path: &str) -> bool {
     || [".pem", ".key", ".pfx", ".p12"].iter().any(|ext| name.ends_with(ext))
 }
 
+/// Whether `path` is in an app's `.rayfin-local` folder: the local backend's
+/// database, signing keys and secret values. The quick checks look at its
+/// `.gitignore` locally, and nothing else needs it.
+fn in_local_state(path: &str) -> bool {
+  path.split(['/', '\\']).any(|part| part.eq_ignore_ascii_case(".rayfin-local"))
+}
+
 /// Whether a read-only Advisor session may perform a requested action. Fails
 /// closed: anything unrecognized, and any sandbox-bypass request, is denied.
 #[cfg(test)]
@@ -184,7 +192,7 @@ pub(crate) fn permitted_in(root: &Path, sandbox: Sandbox, data: &PermissionReque
     return false;
   }
   match request_kind(data).as_deref() {
-    Some("read") => text("path").is_some_and(|p| path_inside(root, p) && !is_secret_file(p)),
+    Some("read") => text("path").is_some_and(|p| path_inside(root, p) && !is_secret_file(p) && !in_local_state(p)),
     Some("url") => text("url").is_some_and(|u| url_allowed(u, sandbox.url_hosts)),
     Some("custom-tool") => true,
     Some("mcp") => sandbox.read_only_mcp && body.get("readOnly").and_then(Value::as_bool).unwrap_or(false),
@@ -258,6 +266,8 @@ pub(crate) async fn drain(
           return DrainEnd::Cancelled;
         }
         recv = sub.recv() => match recv {
+          // A Fusion draft may yet be revised: its settled answer follows.
+          Ok(ev) if crate::services::copilot::is_fusion_draft(&ev) => {}
           Ok(ev) => {
             if on_event(&ev.event_type, &ev.data) {
               return DrainEnd::Finished;
@@ -286,9 +296,9 @@ pub(crate) async fn drain(
 
 /// Assistant text reassembled in stream order, plus the terminal state.
 #[derive(Default)]
-struct TextAcc {
+pub(crate) struct TextAcc {
   /// Every assistant message, concatenated.
-  text: String,
+  pub(crate) text: String,
   /// Characters of each assistant message already appended (dedup with the
   /// terminal `assistant.message` event).
   streamed: HashMap<String, usize>,
@@ -296,7 +306,7 @@ struct TextAcc {
   messages: Vec<(String, String)>,
   /// Messages that handed off to tool calls — narration, not the answer.
   narration: HashSet<String>,
-  errored: Option<String>,
+  pub(crate) errored: Option<String>,
 }
 
 /// A finished assistant message that hands off to tool calls ("Let me check
@@ -316,7 +326,7 @@ impl TextAcc {
   }
 
   /// Take one event; returns the newly appended text, if any.
-  fn feed(&mut self, event_type: &str, data: &Value) -> Option<String> {
+  pub(crate) fn feed(&mut self, event_type: &str, data: &Value) -> Option<String> {
     let id = || data.get("messageId").and_then(Value::as_str).unwrap_or("").to_string();
     match event_type {
       "assistant.message_delta" => {
@@ -360,7 +370,7 @@ impl TextAcc {
   }
 
   /// The reply without narration: the messages that didn't lead to tool calls.
-  fn answer(&self) -> String {
+  pub(crate) fn answer(&self) -> String {
     let parts: Vec<&str> = self
       .messages
       .iter()
@@ -372,7 +382,7 @@ impl TextAcc {
   }
 }
 
-fn is_terminal(event_type: &str) -> bool {
+pub(crate) fn is_terminal(event_type: &str) -> bool {
   matches!(event_type, "session.idle" | "session.error")
 }
 
@@ -499,7 +509,7 @@ fn fold_by_id(findings: impl IntoIterator<Item = AdvisorFinding>) -> Vec<Advisor
 
 /* ----------------------------- persistence ----------------------------- */
 
-fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
+pub(crate) fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
   let tmp = path.with_extension("tmp");
   std::fs::write(&tmp, text).map_err(|e| e.to_string())?;
   std::fs::rename(&tmp, path).map_err(|e| e.to_string())
@@ -537,7 +547,14 @@ pub async fn advisor_collect(project_id: String) -> Result<AdvisorProjectSnapsho
   let Some(project) = store::find_project(&project_id) else {
     return Err("Project not found.".into());
   };
-  Ok(collect::collect(&project.path).await)
+  let local = runs_locally(&project);
+  Ok(collect::collect(&project.path, local).await)
+}
+
+/// Whether the bundled local backend runs the app, so the local-only quick
+/// checks apply to it: personal apps. Team apps run on their pipeline's backend.
+fn runs_locally(project: &StudioProject) -> bool {
+  project.team.is_none()
 }
 
 /// Return the saved deep review (with `stale` recomputed) and the
@@ -644,13 +661,13 @@ fn finalize_review(
 /* ----------------------------- one-shot sessions ----------------------------- */
 
 /// Where a one-shot Advisor session runs, and how it can be stopped.
-struct RunCtx<'a> {
-  copilot: &'a CopilotManager,
+pub(crate) struct RunCtx<'a> {
+  pub copilot: &'a CopilotManager,
   /// Your own API keys, for runs on a provider's model.
-  byok: &'a ByokManager,
-  root: &'a str,
-  choice: ModelChoice,
-  token: &'a CancelToken,
+  pub byok: &'a ByokManager,
+  pub root: &'a str,
+  pub choice: ModelChoice,
+  pub token: &'a CancelToken,
 }
 
 /// Deliver a project's Advisor events to the renderer.
@@ -661,7 +678,7 @@ fn emitter(app: &AppHandle, project_id: &str) -> Emit {
 
 /// Send `prompt` on a throwaway read-only session and feed its events to
 /// `on_event` until the turn ends. `Err` means the prompt never started.
-async fn one_shot(
+pub(crate) async fn one_shot(
   run: &RunCtx<'_>,
   mut opts: SessionOptions,
   prompt: String,
@@ -726,7 +743,7 @@ async fn one_shot(
 }
 
 /// Why a one-shot turn ended without a usable answer.
-fn incomplete_detail(text: &TextAcc, end: &DrainEnd, fallback: &str) -> String {
+pub(crate) fn incomplete_detail(text: &TextAcc, end: &DrainEnd, fallback: &str) -> String {
   if let Some(e) = &text.errored {
     e.clone()
   } else if matches!(end, DrainEnd::TimedOut) {
@@ -935,7 +952,13 @@ pub async fn advisor_explain(
   };
   let emit = emitter(&app, &project_id);
   let choice = ModelChoice::new(model, effort, auto_tier, context_tier);
-  let run = RunCtx { copilot: &state.copilot, byok: &state.byok, root: &project.path, choice, token: &token };
+  let run = RunCtx {
+    copilot: &state.copilot,
+    byok: &state.byok,
+    root: &project.path,
+    choice,
+    token: &token,
+  };
   let result = explain(&run, &finding, |text, reset| {
     emit(AdvisorEvent::ExplainDelta { explain_id: explain_id.clone(), text, reset });
   })
@@ -980,7 +1003,13 @@ pub async fn advisor_verify(
     return Err("A verification is already running for this project.".into());
   };
   let choice = ModelChoice::new(model, effort, auto_tier, context_tier);
-  let run = RunCtx { copilot: &state.copilot, byok: &state.byok, root: &project.path, choice, token: &token };
+  let run = RunCtx {
+    copilot: &state.copilot,
+    byok: &state.byok,
+    root: &project.path,
+    choice,
+    token: &token,
+  };
   let result = verify(&run, &findings, &verify_id, emit.clone()).await;
   state.end_verify(&project_id, &token);
   emit(AdvisorEvent::VerifyDone { verify_id, ok: result.is_ok(), error: result.as_ref().err().cloned() });
@@ -1094,6 +1123,20 @@ mod tests {
   }
 
   #[test]
+  fn the_local_only_checks_apply_to_personal_apps() {
+    let project = |team: bool| -> StudioProject {
+      let mut project: StudioProject = serde_json::from_value(json!({
+        "id": "p", "name": "App", "path": "C:\\apps\\app", "addedAt": "2026-01-01T00:00:00.000Z"
+      }))
+      .unwrap();
+      project.team = team.then(crate::types::TeamBinding::default);
+      project
+    };
+    assert!(runs_locally(&project(false)));
+    assert!(!runs_locally(&project(true)), "team apps run on their pipeline's backend");
+  }
+
+  #[test]
   fn secret_files_are_never_read() {
     let root = std::env::temp_dir().join("advisor-perm-root");
     let read = |rel: &str| request(json!({ "kind": "read", "path": root.join(rel).to_string_lossy() }));
@@ -1103,6 +1146,17 @@ mod tests {
     for fine in [".env.example", "rayfin/.env.sample", "src/env.ts", "src/vite-env.d.ts", "rayfin/rayfin.yml"] {
       assert!(permitted(&root, &read(fine)), "{fine} must be readable");
     }
+  }
+
+  #[test]
+  fn the_local_backends_state_is_never_read() {
+    let root = std::env::temp_dir().join("advisor-perm-root");
+    let read = |path: &str| request(json!({ "kind": "read", "path": path }));
+    for state in [".rayfin-local", ".rayfin-local/db.sqlite", ".rayfin-local\\keys\\signing.json", ".Rayfin-Local/secrets.json"] {
+      assert!(!permitted(&root, &read(state)), "{state} must be blocked");
+    }
+    assert!(!permitted(&root, &read(&root.join(".rayfin-local").join("state.json").to_string_lossy())));
+    assert!(permitted(&root, &read("rayfin-local.toml")), "the backend's settings file isn't its state");
   }
 
   #[test]
