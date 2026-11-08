@@ -39,6 +39,28 @@ The script writes `resources/telemetry.json` and `.deploy.state.json`. If `gh` i
 
 ## Cut a release
 
+### ADO official-pipeline pilot
+
+`.azure-pipelines/fabricator.official.yml` is the initial **Windows-only, build-validation**
+pipeline for `powerbi/AppDev`. It extends the 1ES official template and uses the existing
+Windows build pool. Both CI and PR triggers are disabled: queue it manually for an exact
+commit while the ESRP integration is being established.
+
+The pipeline checks application versions in npm, Tauri, Cargo, and both lockfiles, verifies
+the checked-out commit against `Build.SourceVersion`, runs the renderer/backend checks,
+and builds the desktop binary without an installer. Its only published artifact is
+`windows-validation`, containing source/version metadata. It does **not** sign, publish
+executables, create a GitHub release, access the ESRP connection, or generate updater assets.
+Official-template security checks are not disabled.
+
+Register the pipeline against this YAML in the GitHub repository and authorize the GitHub
+connection, template repository, and Windows pool only for that pipeline. ESRP resource
+authorization and a protected release environment are separate prerequisites for the later
+signing/publishing stages. Keep those credentials in ADO/Key Vault, not in this repository.
+macOS remains blocked until an approved Apple Silicon pool is available.
+
+### Existing GitHub Actions release
+
 Push a version tag to trigger the GitHub Actions release workflow that builds the Windows installer (Tauri/NSIS) and publishes it to a GitHub Release:
 
 ```powershell
