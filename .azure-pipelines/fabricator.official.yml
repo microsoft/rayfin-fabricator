@@ -1,0 +1,116 @@
+name: fabricator-validation-$(Date:yyyyMMdd).$(Rev:r)
+
+trigger: none
+pr: none
+
+variables:
+  NodeVersion: '24.x'
+
+resources:
+  repositories:
+    - repository: 1ESPipelineTemplates
+      type: git
+      name: 1ESPipelineTemplates/1ESPipelineTemplates
+      ref: refs/tags/release
+
+extends:
+  template: v1/1ES.Official.PipelineTemplate.yml@1ESPipelineTemplates
+  parameters:
+    settings:
+      networkIsolationPolicy: Permissive
+
+    pool:
+      name: 1ES-AppDev
+      image: windows-2022
+      os: windows
+
+    sdl:
+      sourceAnalysisPool:
+        name: 1ES-AppDev
+        image: windows-2022
+        os: windows
+      policheck:
+        enabled: true
+
+    stages:
+      - stage: ValidateWindows
+        displayName: Validate Windows build (no distribution)
+        jobs:
+          - job: BuildWindows
+            displayName: Build and test Windows x64
+            timeoutInMinutes: 120
+            templateContext:
+              outputs:
+                # Executables stay on the agent until the signing phases are implemented.
+                - output: pipelineArtifact
+                  displayName: Publish source and version metadata
+                  targetPath: $(Build.ArtifactStagingDirectory)/validation
+                  artifactName: windows-validation
+            steps:
+              - checkout: self
+                clean: true
+                persistCredentials: false
+
+              - task: UseNode@1
+                displayName: Install Node.js
+                inputs:
+                  version: $(NodeVersion)
+
+              - pwsh: |
+                  $ErrorActionPreference = 'Stop'
+                  if ($env:AGENT_OS -ne 'Windows_NT' -or $env:AGENT_OSARCHITECTURE -ne 'X64') {
+                    throw 'This validation job requires a Windows x64 agent.'
+                  }
+                  New-Item -ItemType Directory -Force -Path "$(Build.ArtifactStagingDirectory)/validation" | Out-Null
+                  node scripts/check-release-version.mjs > "$(Build.ArtifactStagingDirectory)/validation/source.json"
+                  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                displayName: Verify source commit and release versions
+
+              - pwsh: |
+                  $ErrorActionPreference = 'Stop'
+                  $cargoBin = Join-Path $env:USERPROFILE '.cargo/bin'
+                  $rustup = Join-Path $cargoBin 'rustup.exe'
+                  if (-not (Test-Path $rustup)) {
+                    $installer = Join-Path $env:AGENT_TEMPDIRECTORY 'rustup-init.exe'
+                    Invoke-WebRequest 'https://win.rustup.rs/x86_64' -OutFile $installer
+                    & $installer -y --profile minimal --default-toolchain stable
+                    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                  }
+                  & $rustup toolchain install stable --profile minimal
+                  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                  & $rustup default stable
+                  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                  & $rustup target add x86_64-pc-windows-msvc
+                  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                  Write-Host "##vso[task.prependpath]$cargoBin"
+                displayName: Install stable Rust toolchain
+
+              - script: npm ci
+                displayName: Install dependencies
+
+              - script: node scripts/rayfin-local/fetch.mjs --target x86_64-pc-windows-msvc
+                displayName: Fetch and verify pinned sidecar
+
+              - script: node --test scripts/check-release-version.test.mjs
+                displayName: Test release version validation
+
+              - script: npm run typecheck
+                displayName: Typecheck
+
+              - script: npm test
+                displayName: Test renderer
+
+              - script: npm run lint
+                displayName: Lint
+
+              - script: npm run vendor:wry -- verify
+                displayName: Verify vendored wry
+
+              - script: cargo test --manifest-path src-tauri/Cargo.toml --lib --locked
+                displayName: Test backend
+
+              - script: npm exec -- tauri build --ci --no-bundle -- --locked
+                displayName: Build desktop binary without installer
+
+              - script: npm run check:build
+                displayName: Verify renderer bundle
