@@ -50,6 +50,8 @@ The Node.js task requires Node 24.15 or newer within the 24.x line, matching the
 locked dependencies' engine requirements rather than accepting an older cached Node 24.
 Rust setup updates the stable toolchain without self-updating the agent image's rustup
 executable, avoiding replacement of the running tool and its preinstalled proxies.
+Dependency setup checks public npm registry connectivity first and logs HTTP/lifecycle
+progress, with a 20-minute install timeout so agent connectivity failures surface promptly.
 
 The pipeline checks application versions in npm, Tauri, Cargo, and both lockfiles, verifies
 the checked-out commit against `Build.SourceVersion`, runs the renderer/backend checks,
