@@ -5,6 +5,7 @@ pr: none
 
 variables:
   NodeVersion: '>=24.15.0 <25.0.0'
+  NpmRegistry: https://pkgs.dev.azure.com/powerbi/AppDev/_packaging/rayfin-official/npm/registry/
 
 resources:
   repositories:
@@ -85,13 +86,27 @@ extends:
                   Write-Host "##vso[task.prependpath]$cargoBin"
                 displayName: Install stable Rust toolchain
 
-              - script: npm ping --registry=https://registry.npmjs.org --fetch-retries=0 --fetch-timeout=30000
+              - pwsh: |
+                  $ErrorActionPreference = 'Stop'
+                  Set-Content -Path "$(Agent.TempDirectory)/fabricator.npmrc" -Value "registry=$(NpmRegistry)"
+                displayName: Configure official npm feed
+
+              - task: npmAuthenticate@0
+                displayName: Authenticate official npm feed
+                inputs:
+                  workingFile: $(Agent.TempDirectory)/fabricator.npmrc
+
+              - script: npm view react version --fetch-retries=0 --fetch-timeout=30000
                 displayName: Verify npm registry access
                 timeoutInMinutes: 2
+                env:
+                  NPM_CONFIG_USERCONFIG: $(Agent.TempDirectory)/fabricator.npmrc
 
               - script: npm ci --loglevel=http --foreground-scripts
                 displayName: Install dependencies
                 timeoutInMinutes: 20
+                env:
+                  NPM_CONFIG_USERCONFIG: $(Agent.TempDirectory)/fabricator.npmrc
 
               - script: node scripts/rayfin-local/fetch.mjs --target x86_64-pc-windows-msvc
                 displayName: Fetch and verify pinned sidecar
