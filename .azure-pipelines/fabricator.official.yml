@@ -76,7 +76,7 @@ extends:
                     & $installer -y --profile minimal --default-toolchain stable
                     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
                   }
-                  & $rustup toolchain install stable --profile minimal
+                  & $rustup toolchain install stable --profile minimal --no-self-update
                   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
                   & $rustup default stable
                   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
