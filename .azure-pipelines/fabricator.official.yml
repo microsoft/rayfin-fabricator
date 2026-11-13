@@ -85,8 +85,13 @@ extends:
                   Write-Host "##vso[task.prependpath]$cargoBin"
                 displayName: Install stable Rust toolchain
 
-              - script: npm ci
+              - script: npm ping --registry=https://registry.npmjs.org --fetch-retries=0 --fetch-timeout=30000
+                displayName: Verify npm registry access
+                timeoutInMinutes: 2
+
+              - script: npm ci --loglevel=http --foreground-scripts
                 displayName: Install dependencies
+                timeoutInMinutes: 20
 
               - script: node scripts/rayfin-local/fetch.mjs --target x86_64-pc-windows-msvc
                 displayName: Fetch and verify pinned sidecar
