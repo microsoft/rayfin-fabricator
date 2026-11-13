@@ -81,7 +81,9 @@ is gone. If you ever bring back something like it, keep
   and `WRY_CARGO_TOKEN` to its authorization value. The verifier obtains the pinned
   version's checksum and archive from that registry instead of crates.io, with no public
   fallback. Credentials are sent only to the index's origin. Without these variables,
-  the existing public crates.io workflow is unchanged.
+  the existing public crates.io workflow is unchanged. For Azure Artifacts, first save
+  the pinned version through `cargo info wry@<version> --registry <registry-name>`:
+  upstream ingestion is restricted to the official Cargo client.
 - **`.gitattributes`** keeps `src-tauri/vendor/**` byte-identical to upstream (no CRLF
   conversion on Windows), so patches apply and verify the same way on every OS.
 - **`webview2-com`, `windows` and the `objc2` crates** in `src-tauri/Cargo.toml` must match
