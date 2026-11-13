@@ -6,6 +6,7 @@ pr: none
 variables:
   NodeVersion: '>=24.15.0 <25.0.0'
   NpmRegistry: https://pkgs.dev.azure.com/powerbi/AppDev/_packaging/rayfin-official/npm/registry/
+  CargoRegistry: https://pkgs.dev.azure.com/powerbi/AppDev/_packaging/rayfin-official/Cargo/index/
 
 resources:
   repositories:
@@ -88,6 +89,25 @@ extends:
 
               - pwsh: |
                   $ErrorActionPreference = 'Stop'
+                  New-Item -ItemType Directory -Force -Path .cargo | Out-Null
+                  @'
+                  [registries.rayfin-official]
+                  index = "sparse+$(CargoRegistry)"
+                  credential-provider = "cargo:token"
+                  [source.crates-io]
+                  replace-with = "rayfin-official"
+                  [source.rayfin-official]
+                  registry = "sparse+$(CargoRegistry)"
+                  '@ | Set-Content -Path .cargo/config.toml
+                displayName: Configure official Cargo feed
+
+              - task: CargoAuthenticate@0
+                displayName: Authenticate official Cargo feed
+                inputs:
+                  configFile: $(Build.SourcesDirectory)/.cargo/config.toml
+
+              - pwsh: |
+                  $ErrorActionPreference = 'Stop'
                   Set-Content -Path "$(Agent.TempDirectory)/fabricator.npmrc" -Value "registry=$(NpmRegistry)"
                 displayName: Configure official npm feed
 
@@ -111,8 +131,8 @@ extends:
               - script: node scripts/rayfin-local/fetch.mjs --target x86_64-pc-windows-msvc
                 displayName: Fetch and verify pinned sidecar
 
-              - script: node --test scripts/check-release-version.test.mjs
-                displayName: Test release version validation
+              - script: node --test scripts/check-release-version.test.mjs scripts/wry/download-crate.test.mjs
+                displayName: Test release validation tooling
 
               - script: npm run typecheck
                 displayName: Typecheck
@@ -125,6 +145,9 @@ extends:
 
               - script: npm run vendor:wry -- verify
                 displayName: Verify vendored wry
+                env:
+                  WRY_CARGO_INDEX: $(CargoRegistry)
+                  WRY_CARGO_TOKEN: $(CARGO_REGISTRIES_RAYFIN_OFFICIAL_TOKEN)
 
               - script: cargo test --manifest-path src-tauri/Cargo.toml --lib --locked
                 displayName: Test backend

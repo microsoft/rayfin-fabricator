@@ -58,6 +58,11 @@ for dependencies not already cached. npm retains lockfile versions and integrity
 A bounded package-metadata read checks feed access before installation, which logs
 HTTP/lifecycle progress and has a 20-minute timeout.
 
+Cargo uses the same feed's crates.io upstream through a generated `.cargo/config.toml`
+and `CargoAuthenticate@0`. Vendored-wry verification also reads that sparse registry,
+authenticates with the task's token, and verifies the archive against the registry checksum.
+The official build does not fall back to blocked public package endpoints.
+
 The pipeline checks application versions in npm, Tauri, Cargo, and both lockfiles, verifies
 the checked-out commit against `Build.SourceVersion`, runs the renderer/backend checks,
 and builds the desktop binary without an installer. Its only published artifact is
