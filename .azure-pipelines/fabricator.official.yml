@@ -108,6 +108,16 @@ extends:
 
               - pwsh: |
                   $ErrorActionPreference = 'Stop'
+                  $manifest = Get-Content src-tauri/vendor/wry/Cargo.toml -Raw
+                  $package = ($manifest -split '(?m)^\[' | Where-Object { $_.StartsWith('package]') })
+                  $version = [regex]::Match($package, '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
+                  if (-not $version) { throw 'Cannot determine vendored wry version.' }
+                  cargo info "wry@$version" --registry rayfin-official
+                  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                displayName: Save pinned wry through official Cargo client
+
+              - pwsh: |
+                  $ErrorActionPreference = 'Stop'
                   Set-Content -Path "$(Agent.TempDirectory)/fabricator.npmrc" -Value "registry=$(NpmRegistry)"
                 displayName: Configure official npm feed
 

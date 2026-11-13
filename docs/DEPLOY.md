@@ -59,7 +59,9 @@ A bounded package-metadata read checks feed access before installation, which lo
 HTTP/lifecycle progress and has a 20-minute timeout.
 
 Cargo uses the same feed's crates.io upstream through a generated `.cargo/config.toml`
-and `CargoAuthenticate@0`. Vendored-wry verification also reads that sparse registry,
+and `CargoAuthenticate@0`. The Cargo client first saves the pinned wry package from the
+upstream; Azure Artifacts requires an official client for upstream ingestion.
+Vendored-wry verification then reads that saved package through the sparse registry,
 authenticates with the task's token, and verifies the archive against the registry checksum.
 The official build does not fall back to blocked public package endpoints.
 
