@@ -50,8 +50,13 @@ The Node.js task requires Node 24.15 or newer within the 24.x line, matching the
 locked dependencies' engine requirements rather than accepting an older cached Node 24.
 Rust setup updates the stable toolchain without self-updating the agent image's rustup
 executable, avoiding replacement of the running tool and its preinstalled proxies.
-Dependency setup checks public npm registry connectivity first and logs HTTP/lifecycle
-progress, with a 20-minute install timeout so agent connectivity failures surface promptly.
+Dependency setup uses AppDev's `rayfin-official` Azure Artifacts npm feed, matching
+project-rayfin's official pipeline; direct npmjs.org access returns HTTP 403 on the agent.
+`npmAuthenticate@0` authenticates a temporary npm config without putting credentials in
+the checkout. The build identity needs feed access, including upstream-save permission
+for dependencies not already cached. npm retains lockfile versions and integrity checks.
+A bounded package-metadata read checks feed access before installation, which logs
+HTTP/lifecycle progress and has a 20-minute timeout.
 
 The pipeline checks application versions in npm, Tauri, Cargo, and both lockfiles, verifies
 the checked-out commit against `Build.SourceVersion`, runs the renderer/backend checks,
