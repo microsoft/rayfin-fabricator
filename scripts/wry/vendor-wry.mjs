@@ -16,18 +16,17 @@
 //       `diff --git a/<file> b/<file>` line per file, then run this.
 
 import { spawnSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { gunzipSync } from 'node:zlib'
+import { downloadCrate } from './download-crate.mjs'
 
 const CRATE = 'wry'
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 const VENDOR_DIR = path.join(ROOT, 'src-tauri', 'vendor', CRATE)
 const PATCH_DIR = path.join(ROOT, 'src-tauri', 'vendor', `${CRATE}-patches`)
-const USER_AGENT = 'rayfin-fabricator vendor-wry (https://github.com/spatney/rayfin-fabricator)'
 const DIFF_HEADER = /^diff --git a\/(\S+) b\/(\S+)$/gm
 
 class UsageError extends Error {}
@@ -44,26 +43,11 @@ function vendoredVersion() {
   return version
 }
 
-async function get(url) {
-  try {
-    const res = await fetch(url, { headers: { 'User-Agent': USER_AGENT } })
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    return res
-  } catch (error) {
-    throw new Error(`Couldn't download ${url}: ${error.cause?.message ?? error.message}`, { cause: error })
-  }
-}
-
 async function download(version) {
-  const meta = (await (await get(`https://crates.io/api/v1/crates/${CRATE}/${version}`)).json())
-    .version
-  if (meta.yanked) console.warn(`warning: ${CRATE} ${version} is yanked on crates.io`)
-  const url = `https://static.crates.io/crates/${CRATE}/${CRATE}-${version}.crate`
-  const crate = Buffer.from(await (await get(url)).arrayBuffer())
-  const actual = createHash('sha256').update(crate).digest('hex')
-  if (actual !== meta.checksum) {
-    throw new Error(`Checksum mismatch for ${url}: expected ${meta.checksum}, got ${actual}`)
-  }
+  const crate = await downloadCrate(CRATE, version, {
+    index: process.env.WRY_CARGO_INDEX,
+    token: process.env.WRY_CARGO_TOKEN
+  })
   return untar(crate, `${CRATE}-${version}`)
 }
 
