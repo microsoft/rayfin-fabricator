@@ -752,6 +752,11 @@ async fn open_session(
         .with_enable_host_git_operations(false)
         .with_memory(MemoryConfiguration::disabled());
     }
+    // The runtime checks the effort against the session's last model, which
+    // may be Auto (Copilot Fusion) and refuse any effort, so name its model too.
+    if choice.effort.is_some() {
+      cfg.model = Some(set_model_target(&choice.model));
+    }
     cfg.reasoning_effort = choice.effort.clone();
     match client.resume_session(cfg).await {
       Ok(session) => {
@@ -2205,6 +2210,36 @@ pub(crate) mod tests {
     assert_eq!(dirs("instructionDirectories"), [agent_skills::instructions_dir(Guidance::FabricBacked)], "{resume}");
     assert_eq!(dirs("skillDirectories"), [agent_skills::skills_dir(Guidance::FabricBacked)], "{resume}");
     assert_eq!(manager.engine.lock().await.sessions["project"].guidance, Some(Guidance::FabricBacked));
+    client.force_stop();
+  }
+
+  /// A session last run on Auto (Copilot Fusion) refuses an effort on resume
+  /// unless the resume also names the model it goes with.
+  #[tokio::test]
+  async fn a_resume_with_an_effort_names_its_model() {
+    let (client, server) = fake_client(vec![
+      ("session.create", json!({ "result": { "sessionId": "thread" } })),
+      ("auth.getStatus", json!({ "result": { "isAuthenticated": true } })),
+      ("session.detach", json!({ "result": {} })),
+      ("session.resume", json!({ "result": { "sessionId": "thread" } })),
+      ("session.skills.reload", json!({ "result": {} })),
+      ("session.model.switchTo", json!({ "result": {} })),
+    ]);
+    let cached = client.create_session(SessionConfig::default().with_session_id(SessionId::new("thread"))).await.unwrap();
+    let manager = manager_with(client.clone());
+    manager.engine.lock().await.sessions.insert("project".into(), Entry {
+      session: Arc::new(cached), cwd: ".".into(), choice: ModelChoice::default(), registry_rev: None,
+      guidance: Some(Guidance::Local),
+      iq: IqConfig::default(),
+      mcp: String::new(),
+    });
+    let choice = ModelChoice::of(m("claude-sonnet-5.5"), m("medium"));
+    manager.turn_session(
+      "project", ".", "thread", choice, None, None, Vec::new(), Some(Guidance::FabricBacked), None, IqConfig::default(), McpServers::default(),
+    ).await.unwrap();
+    let requests = server.await.unwrap();
+    let resume = &requests[3]["params"];
+    assert_eq!((resume["model"].as_str(), resume["reasoningEffort"].as_str()), (Some("claude-sonnet-5.5"), Some("medium")), "{resume}");
     client.force_stop();
   }
 
