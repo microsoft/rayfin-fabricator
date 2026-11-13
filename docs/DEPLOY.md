@@ -46,6 +46,9 @@ pipeline for `powerbi/AppDev`. It extends the 1ES official template and uses the
 Windows build pool. Both CI and PR triggers are disabled: queue it manually for an exact
 commit while the ESRP integration is being established.
 
+The Node.js task requires Node 24.15 or newer within the 24.x line, matching the
+locked dependencies' engine requirements rather than accepting an older cached Node 24.
+
 The pipeline checks application versions in npm, Tauri, Cargo, and both lockfiles, verifies
 the checked-out commit against `Build.SourceVersion`, runs the renderer/backend checks,
 and builds the desktop binary without an installer. Its only published artifact is
