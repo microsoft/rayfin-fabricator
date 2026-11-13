@@ -48,6 +48,8 @@ commit while the ESRP integration is being established.
 
 The Node.js task requires Node 24.15 or newer within the 24.x line, matching the
 locked dependencies' engine requirements rather than accepting an older cached Node 24.
+Rust setup updates the stable toolchain without self-updating the agent image's rustup
+executable, avoiding replacement of the running tool and its preinstalled proxies.
 
 The pipeline checks application versions in npm, Tauri, Cargo, and both lockfiles, verifies
 the checked-out commit against `Build.SourceVersion`, runs the renderer/backend checks,
