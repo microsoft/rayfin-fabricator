@@ -68,7 +68,13 @@ The official build does not fall back to blocked public package endpoints.
 The pipeline checks application versions in npm, Tauri, Cargo, and both lockfiles, verifies
 the checked-out commit against `Build.SourceVersion`, runs the renderer/backend checks,
 and builds the desktop binary without an installer. Its only published artifact is
-`windows-validation`, containing source/version metadata. It does **not** sign, publish
+`windows-validation`, containing source/version metadata and `windows-binaries.json`.
+The inventory records SHA-256, PE machine type, and existing Authenticode status for
+top-level release PE outputs, the pinned sidecar, and files inside both embedded Copilot
+SDK archives (including native `.node` modules). Archives are inspected in a temporary
+directory, never executed or modified; only metadata is published. This is not a complete
+installer or recursively embedded sidecar inventory, and signature status is evidence,
+not an approved signing-policy determination. It does **not** sign, publish
 executables, create a GitHub release, access the ESRP connection, or generate updater assets.
 Official-template security checks are not disabled.
 

@@ -141,7 +141,7 @@ extends:
               - script: node scripts/rayfin-local/fetch.mjs --target x86_64-pc-windows-msvc
                 displayName: Fetch and verify pinned sidecar
 
-              - script: node --test scripts/check-release-version.test.mjs scripts/wry/download-crate.test.mjs
+              - script: node --test scripts/check-release-version.test.mjs scripts/wry/download-crate.test.mjs scripts/inventory-windows-release.test.mjs
                 displayName: Test release validation tooling
 
               - script: npm run typecheck
@@ -167,3 +167,9 @@ extends:
 
               - script: npm run check:build
                 displayName: Verify renderer bundle
+
+              - pwsh: |
+                  $ErrorActionPreference = 'Stop'
+                  node scripts/inventory-windows-release.mjs "$(Build.ArtifactStagingDirectory)/validation/windows-binaries.json"
+                  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                displayName: Inventory Windows payload hashes and signatures
