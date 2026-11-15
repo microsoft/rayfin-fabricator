@@ -1,10 +1,15 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { inventoryFiles, peMachine, validateArchiveListing } from './inventory-windows-release.mjs'
+import {
+  findCopilotArchives,
+  inventoryFiles,
+  peMachine,
+  validateArchiveListing
+} from './inventory-windows-release.mjs'
 
 async function fixture(t) {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'fabricator-inventory-test-'))
@@ -77,3 +82,38 @@ test('rejects archive traversal, absolute paths and links before extraction', ()
     )
   }
 })
+
+test('finds the generated pair across Cargo layouts and rejects missing or ambiguous pairs', async (t) => {
+  const { binary } = await fixture(t)
+  const root = path.dirname(binary)
+  await assert.rejects(findCopilotArchives(root), /found 0/)
+  for (const layout of [
+    'github-copilot-sdk/hash/build-script-execution/out',
+    'github-copilot-sdk-hash/out'
+  ]) {
+    const out = path.join(root, layout)
+    await mkdir(out, { recursive: true })
+    await writeFile(path.join(out, 'copilot_cli.archive'), '')
+    await assert.rejects(findCopilotArchives(root), /found 0/)
+    await writeFile(path.join(out, 'copilot_runtime.archive'), '')
+    assert.equal(await findCopilotArchives(root), out)
+    await rm(path.join(root, layout.split('/')[0]), { recursive: true })
+  }
+  for (const name of ['first', 'second']) {
+    const out = path.join(root, name)
+    await mkdir(out)
+    await writeFile(path.join(out, 'copilot_cli.archive'), '')
+    await writeFile(path.join(out, 'copilot_runtime.archive'), '')
+  }
+  await assert.rejects(findCopilotArchives(root), /found 2/)
+})
+
+test(
+  'inspects Authenticode using Windows PowerShell',
+  { skip: process.platform !== 'win32' },
+  async () => {
+    const [record] = await inventoryFiles([{ file: process.execPath, name: 'node.exe' }])
+    assert.ok(record.machine)
+    assert.ok(record.authenticode.status)
+  }
+)

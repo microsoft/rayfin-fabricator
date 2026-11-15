@@ -115,23 +115,23 @@ async function filesIn(root, prefix) {
   return files
 }
 
-async function inventory(root) {
-  const release = path.join(root, 'src-tauri/target/release')
+export async function findCopilotArchives(build) {
   const archives = []
-  for (const entry of await readdir(path.join(release, 'build'), { withFileTypes: true })) {
-    if (!entry.isDirectory() || !entry.name.startsWith('github-copilot-sdk-')) continue
-    const out = path.join(release, 'build', entry.name, 'out')
-    // Cargo also creates a sibling directory for the build-script executable.
-    const children = await readdir(path.dirname(out))
-    if (children.includes('out')) {
-      const names = await readdir(out)
-      if (names.includes('copilot_cli.archive') && names.includes('copilot_runtime.archive')) {
-        archives.push(out)
-      }
+  // Cargo 1.100 changed the internal build layout; locate the generated files, not a package/hash path.
+  for (const entry of await readdir(build, { recursive: true, withFileTypes: true })) {
+    if (entry.isFile() && entry.name === 'copilot_cli.archive') {
+      const names = await readdir(entry.parentPath)
+      if (names.includes('copilot_runtime.archive')) archives.push(entry.parentPath)
     }
   }
   if (archives.length !== 1)
     throw new Error(`Expected one release SDK archive pair, found ${archives.length}.`)
+  return archives[0]
+}
+
+async function inventory(root) {
+  const release = path.join(root, 'src-tauri/target/release')
+  const archives = await findCopilotArchives(path.join(release, 'build'))
   const app = path.join(release, 'rayfin-fabricator.exe')
   const sidecar = path.join(root, 'src-tauri/binaries/rayfin-local-x86_64-pc-windows-msvc.exe')
   if (!(await peMachine(app)) || !(await peMachine(sidecar)))
@@ -145,7 +145,7 @@ async function inventory(root) {
   const scratch = await mkdtemp(path.join(os.tmpdir(), 'fabricator-inventory-'))
   try {
     for (const name of ['copilot_cli.archive', 'copilot_runtime.archive']) {
-      const archive = path.join(archives[0], name)
+      const archive = path.join(archives, name)
       const tar = (args) =>
         execFileSync('tar', args, { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 })
       validateArchiveListing(tar(['-tf', archive]), tar(['-tvf', archive]))
