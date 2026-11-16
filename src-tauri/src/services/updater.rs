@@ -5,7 +5,8 @@
 //! Flow: `check` looks for a newer release (no download); `download` fetches the
 //! installer in the background and retains its bytes; `install` applies those
 //! bytes and restarts. Endpoints + the signing public key come from
-//! `tauri.conf.json` (`plugins.updater`).
+//! `tauri.conf.json` (`plugins.updater`), a copy of `src/shared/distribution.json`'s
+//! `updater` that `scripts/distribution/sync.mjs` keeps in step.
 
 use std::sync::Mutex;
 
@@ -167,12 +168,11 @@ mod tests {
   fn the_app_updater_config_parses() {
     let conf: serde_json::Value = serde_json::from_str(include_str!("../../tauri.conf.json")).unwrap();
     let config: Config = serde_json::from_value(conf["plugins"]["updater"].clone()).unwrap();
+    let distribution: serde_json::Value =
+      serde_json::from_str(include_str!("../../../src/shared/distribution.json")).unwrap();
     let endpoints: Vec<&str> = config.endpoints.iter().map(|url| url.as_str()).collect();
-    assert_eq!(
-      endpoints,
-      ["https://github.com/microsoft/rayfin-fabricator/releases/latest/download/latest.json"]
-    );
-    assert!(!config.pubkey.is_empty());
+    assert_eq!(endpoints, [distribution["updater"]["endpoint"].as_str().unwrap()]);
+    assert_eq!(config.pubkey, distribution["updater"]["pubkey"].as_str().unwrap());
     assert_eq!(config.pubkey.trim(), include_str!("../../updater.pub").trim());
     assert!(config.require_signed_version);
   }

@@ -26,16 +26,16 @@ use serde::{Deserialize, Serialize};
 
 use super::{exec, git, paths};
 
+pub use crate::distribution::RELEASES_URL;
+use crate::distribution::DOCS_BASE;
+
 /// The public repository the source is cloned from.
-const REPO_URL: &str = "https://github.com/spatney/rayfin-fabricator.git";
-/// Where the published documentation lives.
-const DOCS_BASE: &str = "https://spatney.github.io/rayfin-fabricator";
-/// Where Fabricator's releases, and the notes for each, are published.
-pub const RELEASES_URL: &str = "https://github.com/spatney/rayfin-fabricator/releases";
-/// The same releases from GitHub's API, which returns every release's notes in
+const REPO_URL: &str = concat!("https://github.com/", env!("FABRICATOR_REPOSITORY"), ".git");
+/// The releases from GitHub's API, which returns every release's notes in
 /// one response. The newest thirty are the history anyone asks "what's new?"
 /// about, and keep the response to a few hundred kilobytes.
-const RELEASES_API: &str = "https://api.github.com/repos/spatney/rayfin-fabricator/releases?per_page=30";
+const RELEASES_API: &str =
+  concat!("https://api.github.com/repos/", env!("FABRICATOR_REPOSITORY"), "/releases?per_page=30");
 /// Refresh the cached docs once a day; they change independently of the app.
 const DOCS_MAX_AGE_SECS: u64 = 24 * 60 * 60;
 /// How often to look again for release notes that don't cover the running

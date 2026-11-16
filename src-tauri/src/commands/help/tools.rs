@@ -250,7 +250,7 @@ explain that only a workspace owner can grant it."
         Some(u) if super::fabricator_docs_url(u) => {}
         Some(_) => {
           return Ok(fail(
-            "open-docs only opens pages on https://spatney.github.io/rayfin-fabricator.".to_string(),
+            format!("open-docs only opens pages on {}.", crate::distribution::DOCS_BASE),
           ))
         }
         None => return Ok(fail("open-docs needs the full https URL of the page.".to_string())),
@@ -315,8 +315,9 @@ impl ToolHandler for CiteTool {
     let url = params.url.trim();
     if !super::docs_url_allowed(url) && !super::release_notes_url(url) {
       return Ok(fail(format!(
-        "Cite only the Fabricator documentation (https://spatney.github.io/rayfin-fabricator), \
-Fabricator's release notes ({}), or https://rayfin.ai.",
+        "Cite only the Fabricator documentation ({}), Fabricator's release notes ({}), or \
+https://rayfin.ai.",
+        crate::distribution::DOCS_BASE,
         crate::services::grounding::RELEASES_URL
       )));
     }

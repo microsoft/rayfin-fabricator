@@ -232,10 +232,12 @@ there are not readable directly.\n",
 every page in one file; `llms.txt` is the index with each page's URL. Search these before \
 answering a \"how do I\" question.\n"
       )),
-      None => s.push_str(
+      None => s.push_str(concat!(
         "- The documentation is not cached on this machine. Answer from the logs and the source, \
-and point the user at https://spatney.github.io/rayfin-fabricator/docs.\n",
-      ),
+and point the user at ",
+        crate::docs!("/docs"),
+        ".\n",
+      )),
     }
 
     let this_release = grounding::release_page(&self.app_version);

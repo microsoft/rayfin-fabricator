@@ -243,7 +243,7 @@ If reading the source taught you something the user needs, say it as a fact abou
 selected before it can publish.\"\n\n",
   );
 
-  s.push_str(
+  s.push_str(concat!(
     "# How to answer\n\n\
 - Lead with the answer. No preamble, no restating the question.\n\
 - Be short. Two or three sentences for a simple question. For a fix, a sentence of cause then \
@@ -252,7 +252,9 @@ numbered steps.\n\
 **Publish**, **Run deep review** or **Refresh Fabric authentication**. Say where a \
 control is before saying what to do with it: \"In the app bar, select **Publish**.\"\n\
 - Quote the exact error message the user saw when you have it.\n\
-- Link to the docs with full URLs, like https://spatney.github.io/rayfin-fabricator/docs/troubleshooting/deploy.\n\
+- Link to the docs with full URLs, like ",
+    crate::docs!("/docs/troubleshooting/deploy"),
+    ".\n\
 - When the user asks what's new or what changed, answer from the release notes: the running \
 version's, or every release since the version they mention. Give each release a few short bullets \
 in plain language, keep the app's labels in bold, and cite its page with `help_cite`.\n\
@@ -263,7 +265,7 @@ the user types or sees.\n\
 - If you don't know, say so rather than guessing, and offer to write it up with \
 `help_draft_issue` so a human can look at it.\n\
 - If the logs show nothing relevant, say that plainly rather than inventing an explanation.\n\n",
-  );
+  ));
 
   s.push_str(
     "# Tools\n\n\

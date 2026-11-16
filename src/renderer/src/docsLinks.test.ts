@@ -1,12 +1,15 @@
 import { describe, expect, it, vi } from 'vitest'
 import docs from '@shared/docs-links.json'
+import distribution from '@shared/distribution.json'
 import { docsUrl, openDocs, type DocsLink } from './docsLinks'
 
 describe('docs links', () => {
   it('points every link at a page of the published docs site', () => {
-    expect(docs.base).toBe('https://spatney.github.io/rayfin-fabricator')
+    expect(distribution.docsBase).toMatch(/^https:\/\/[^/]+(\/[a-z0-9-]+)*$/)
     for (const link of Object.keys(docs.links) as DocsLink[]) {
-      expect(docsUrl(link)).toMatch(/^https:\/\/spatney\.github\.io\/rayfin-fabricator\/docs(\/[a-z0-9-]+)*(#[a-z0-9-]+)?$/)
+      const url = docsUrl(link)
+      expect(url.startsWith(distribution.docsBase)).toBe(true)
+      expect(url.slice(distribution.docsBase.length)).toMatch(/^\/docs(\/[a-z0-9-]+)*(#[a-z0-9-]+)?$/)
     }
   })
 
@@ -15,7 +18,7 @@ describe('docs links', () => {
     ;(window as unknown as { api: unknown }).api = { openExternal }
     openDocs('deployFailed')
     expect(openExternal).toHaveBeenCalledWith(
-      'https://spatney.github.io/rayfin-fabricator/docs/troubleshooting/deploy#a-deploy-failed'
+      `${distribution.docsBase}/docs/troubleshooting/deploy#a-deploy-failed`
     )
   })
 })

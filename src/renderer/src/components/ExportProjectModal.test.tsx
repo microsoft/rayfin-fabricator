@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import type { ExportPreview, ExportResult, StudioProject, ZipProgressEvent } from '@shared/ipc'
+import distribution from '@shared/distribution.json'
 import { OverlayProvider } from '../overlay'
 import { drawAppIcon } from '../appIcon'
 import ExportProjectModal from './ExportProjectModal'
@@ -197,7 +198,7 @@ describe('ExportProjectModal', () => {
         fireEvent.click(screen.getByRole('button', { name: 'Copy the install link' }))
       })
       expect(writeText).toHaveBeenCalledWith(
-        'https://spatney.github.io/rayfin-fabricator/docs/start/install'
+        `${distribution.docsBase}/docs/start/install`
       )
       expect(screen.getByRole('button', { name: 'Install link copied' })).toBeTruthy()
     } finally {

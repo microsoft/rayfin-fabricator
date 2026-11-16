@@ -18,11 +18,10 @@ import { buildDocsIndex } from '../../scripts/docs-index.mjs';
 const WEBSITE = path.resolve(import.meta.dirname, '..');
 const OUT = path.join(WEBSITE, 'out');
 const LINKS_FILE = path.resolve(WEBSITE, '..', 'src', 'shared', 'docs-links.json');
+const DISTRIBUTION_FILE = path.resolve(WEBSITE, '..', 'src', 'shared', 'distribution.json');
 
-const { base, links } = JSON.parse(readFileSync(LINKS_FILE, 'utf8')) as {
-  base: string;
-  links: Record<string, string>;
-};
+const { links } = JSON.parse(readFileSync(LINKS_FILE, 'utf8')) as { links: Record<string, string> };
+const { docsBase: base } = JSON.parse(readFileSync(DISTRIBUTION_FILE, 'utf8')) as { docsBase: string };
 
 const errors: string[] = [];
 const pages = new Map<string, string>();
@@ -38,7 +37,7 @@ function pageHtml(route: string): string | undefined {
 }
 
 if (base !== siteConfig.baseUrl) {
-  errors.push(`docs-links.json base ${base} does not match the site URL ${siteConfig.baseUrl}`);
+  errors.push(`distribution.json docsBase ${base} does not match the site URL ${siteConfig.baseUrl}`);
 }
 
 for (const [name, target] of Object.entries(links)) {
