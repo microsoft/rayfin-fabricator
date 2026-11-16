@@ -72,6 +72,15 @@ describe('a recent project’s links and updates', () => {
     expect(rayfinUpdate(makeProject('p'), { recommended: '1.36.2' })).toBeNull()
     expect(rayfinUpdate({ ...project, missing: true }, { recommended: '1.36.2' })).toBeNull()
   })
+
+  it('offers updates only within the app’s major version', () => {
+    expect(
+      rayfinUpdate(makeProject('p', { rayfinVersion: '1.35.1' }), { recommended: '1.36.2' })
+    ).toBe('1.36.2')
+    expect(
+      rayfinUpdate(makeProject('p', { rayfinVersion: '1.36.2' }), { recommended: '2.0.0' })
+    ).toBeNull()
+  })
 })
 
 describe('recent projects’ groups and filter', () => {

@@ -3520,8 +3520,8 @@ pub struct RayfinVersionInfo {
   /// Where Fabricator's updates go, for the headline package (Rayfin's packages
   /// ship in lockstep): the newest stable release the bundled local backend
   /// runs (`rayfin-local.json` `sdk.supported`) that isn't newer than npm's
-  /// `latest`, so the app keeps running on this computer. Absent when npm
-  /// couldn't list the releases or none is.
+  /// `latest`, of the app's major version, so the app keeps running on this
+  /// computer. Absent when npm couldn't list the releases or none is.
   #[serde(skip_serializing_if = "Option::is_none")]
   pub recommended: Option<String>,
   /// A stable release newer than `recommended`, which Fabricator offers too,
@@ -3542,6 +3542,9 @@ pub struct RayfinNewerRelease {
   /// Whether the bundled local backend runs it. With one it doesn't, some
   /// things might not work as expected on this computer.
   pub runs_locally: bool,
+  /// Whether it's of a newer major version than the app's: a migration, not
+  /// a routine update.
+  pub major_upgrade: bool,
 }
 
 /// The newest Rayfin releases, for Home: it offers an update on the projects

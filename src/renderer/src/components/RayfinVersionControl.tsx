@@ -23,6 +23,8 @@ interface Props {
   onUpdate: (info: RayfinVersionInfo, newer?: RayfinNewerRelease) => void
   /** Chat turns publish the app as they finish, so the update reaches Fabric with its turn. */
   publishes?: boolean
+  /** A team app: moving it to another major version can leave teammates behind. */
+  team?: boolean
 }
 
 interface SummaryRow {
@@ -64,7 +66,8 @@ export default function RayfinVersionControl({
   info,
   newer = null,
   onUpdate,
-  publishes = false
+  publishes = false,
+  team = false
 }: Props): JSX.Element | null {
   const { t } = useTranslation('publish')
   const [open, setOpen] = useState(false)
@@ -147,7 +150,7 @@ export default function RayfinVersionControl({
                 )}
               </div>
               <ul className="ver-warnings">
-                {newerRayfinWarnings(newer).map((warning) => (
+                {newerRayfinWarnings(newer, team).map((warning) => (
                   <li key={warning} className="ver-warning">
                     {warning}
                   </li>

@@ -77,14 +77,18 @@ export function newerRayfin(info: RayfinVersionInfo | null | undefined): RayfinN
 }
 
 /**
- * Why an update to `newer` needs care, as sentences: it might be unstable
- * while it isn't Rayfin's latest release, and some things might not work on
- * this computer while the local backend doesn't run it.
+ * Why an update to `newer` needs care, as sentences: a new major version is a
+ * migration, it might be unstable while it isn't Rayfin's latest release, and
+ * some things might not work on this computer while the local backend doesn't
+ * run it. A team app (`team`) moving to another major version might leave
+ * teammates on an older Fabricator unable to run it.
  */
-export function newerRayfinWarnings(newer: RayfinNewerRelease): string[] {
+export function newerRayfinWarnings(newer: RayfinNewerRelease, team = false): string[] {
   const t = translator('preview')
   const warnings: string[] = []
+  if (newer.majorUpgrade) warnings.push(t('rayfinWarning.majorUpgrade'))
   if (!newer.isLatest) warnings.push(t('rayfinWarning.prerelease'))
   if (!newer.runsLocally) warnings.push(t('rayfinWarning.unsupported'))
+  if (team && newer.majorUpgrade) warnings.push(t('rayfinWarning.team'))
   return warnings
 }

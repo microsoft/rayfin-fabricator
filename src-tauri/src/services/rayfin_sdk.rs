@@ -7,8 +7,9 @@
 //! the newest stable release of one of them, `sdk.newProjects`, and pins its
 //! `@microsoft/rayfin-*` packages to that minor (`~1.36.0`): the templates'
 //! caret ranges would otherwise pull a newer minor. Updates go to the newest
-//! release rayfin-local runs that isn't newer than Rayfin's latest, and a newer
-//! one is offered too, with a warning (see [`update_targets`]).
+//! release rayfin-local runs that isn't newer than Rayfin's latest, within the
+//! app's major version, and a newer one (another major's included) is offered
+//! too, with a warning (see [`update_targets`]).
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -108,31 +109,54 @@ pub async fn new_project_sdk(cwd: &Path) -> NewProjectSdk {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct UpdateTargets {
   /// The newest stable release rayfin-local runs that isn't newer than npm's
-  /// `latest`: the update Fabricator offers.
+  /// `latest`, of the app's major version: the update Fabricator offers. A
+  /// move to another major version is a migration, never a routine update.
   pub recommended: Option<Version>,
   /// The newest stable release, whatever its dist-tag, when it's newer than
-  /// `recommended`, such as a `preview` 2.0.0 while `latest` is 1.36.2.
+  /// `recommended`, such as a `preview` 2.0.0 while `latest` is 1.36.2, or a
+  /// `latest` 2.0.0 for an app on 1.36.
   /// Fabricator offers it too, with a warning: while it isn't `latest` it might
   /// be unstable, and if rayfin-local doesn't run it, some things might not
   /// work as expected on this computer.
   pub newer: Option<Version>,
 }
 
-/// Where updates go, from what npm lists for a package. Nothing while its
-/// `latest` dist-tag isn't known.
-pub fn update_targets(published: &Published) -> UpdateTargets {
-  targets(published, &PIN.supported)
+/// Where updates go for an app on `installed` (its headline package's
+/// version, or `None` for Home's offers across apps), from what npm lists for a
+/// package. Nothing while its `latest` dist-tag isn't known.
+pub fn update_targets(published: &Published, installed: Option<&str>) -> UpdateTargets {
+  targets(published, &PIN.supported, routine_major(installed))
 }
 
-/// [`update_targets`] for the npm range `supported`.
-fn targets(published: &Published, supported: &str) -> UpdateTargets {
+/// The major version an app on `installed` updates within: its own, or that
+/// of the line new projects start on while it isn't known, so the update
+/// offered and the release new projects start on move in lockstep.
+pub fn routine_major(installed: Option<&str>) -> u64 {
+  installed
+    .and_then(release_line)
+    .or_else(|| release_line(&PIN.new_projects))
+    .map(|(major, _)| major)
+    .unwrap_or_else(|| tested_release().major)
+}
+
+/// Whether updating an app on `installed` to `version` moves it to another
+/// major version: a migration, which Fabricator warns about.
+pub fn is_major_upgrade(installed: Option<&str>, version: &Version) -> bool {
+  version.major > routine_major(installed)
+}
+
+/// [`update_targets`] for the npm range `supported`, within major version `major`.
+fn targets(published: &Published, supported: &str, major: u64) -> UpdateTargets {
   let Some(latest) = published.latest.as_deref().and_then(|v| Version::parse(v.trim()).ok()) else {
     return UpdateTargets::default();
   };
   let range = NpmRange::parse(supported);
   let stable = stable_releases(&published.versions);
-  let recommended =
-    stable.iter().rev().find(|v| **v <= latest && range.as_ref().is_some_and(|r| r.matches(v))).cloned();
+  let recommended = stable
+    .iter()
+    .rev()
+    .find(|v| v.major == major && **v <= latest && range.as_ref().is_some_and(|r| r.matches(v)))
+    .cloned();
   let newer = stable.last().filter(|newest| recommended.as_ref().is_none_or(|r| *newest > r)).cloned();
   UpdateTargets { recommended, newer }
 }
@@ -607,22 +631,41 @@ mod tests {
     }
     let releases = ["1.35.1", "1.36.0", "1.36.2", "1.37.0-alpha.2159", "2.0.0-beta.1", "2.0.0"];
     // 2.0.0 is a preview: newer than `latest`, so it's offered on its own.
-    assert_eq!(targets(&npm(&releases, Some("1.36.2")), LINES), to(Some("1.36.2"), Some("2.0.0")));
-    // Once it's `latest`, it's the update.
-    assert_eq!(targets(&npm(&releases, Some("2.0.0")), LINES), to(Some("2.0.0"), None));
+    assert_eq!(targets(&npm(&releases, Some("1.36.2")), LINES, 1), to(Some("1.36.2"), Some("2.0.0")));
+    // Once it's `latest`, an app on 1.x still updates within 1.x: 2.0 is a
+    // migration, offered on its own.
+    assert_eq!(targets(&npm(&releases, Some("2.0.0")), LINES, 1), to(Some("1.36.2"), Some("2.0.0")));
+    // An app on 2.x updates to it.
+    assert_eq!(targets(&npm(&releases, Some("2.0.0")), LINES, 2), to(Some("2.0.0"), None));
     // A newer `latest` than the local backend runs is offered, not recommended.
     let next: Vec<&str> = releases.iter().copied().chain(["2.1.0"]).collect();
-    assert_eq!(targets(&npm(&next, Some("2.1.0")), LINES), to(Some("2.0.0"), Some("2.1.0")));
+    assert_eq!(targets(&npm(&next, Some("2.1.0")), LINES, 2), to(Some("2.0.0"), Some("2.1.0")));
+    assert_eq!(targets(&npm(&next, Some("2.1.0")), LINES, 1), to(Some("1.36.2"), Some("2.1.0")));
     // Nothing is newer than `latest`.
-    assert_eq!(targets(&npm(&releases[..3], Some("1.36.2")), LINES), to(Some("1.36.2"), None));
+    assert_eq!(targets(&npm(&releases[..3], Some("1.36.2")), LINES, 1), to(Some("1.36.2"), None));
+    // Nothing of the app's major version: only the newer one is offered.
+    assert_eq!(targets(&npm(&releases[4..], Some("2.0.0")), LINES, 1), to(None, Some("2.0.0")));
     // Without `latest`, nothing is known.
-    assert_eq!(targets(&npm(&releases, None), LINES), to(None, None));
-    assert_eq!(targets(&npm(&[], Some("1.36.2")), LINES), to(None, None));
+    assert_eq!(targets(&npm(&releases, None), LINES, 1), to(None, None));
+    assert_eq!(targets(&npm(&[], Some("1.36.2")), LINES, 1), to(None, None));
     // With the pin file's range.
     let tested = tested_release().to_string();
     let published = npm(&["0.1.0", tested.as_str()], Some(tested.as_str()));
-    assert_eq!(update_targets(&published).recommended, Some(tested_release()));
+    assert_eq!(update_targets(&published, Some(&tested)).recommended, Some(tested_release()));
+    assert_eq!(update_targets(&published, None).recommended, Some(tested_release()));
     assert!(runs_locally(&tested_release()) && !runs_locally(&v("999.0.0")));
+  }
+
+  #[test]
+  fn updates_stay_within_the_apps_major_version_or_the_new_projects_one() {
+    let new_projects = release_line(&PIN.new_projects).expect("sdk.newProjects names a line").0;
+    assert_eq!(routine_major(None), new_projects, "Home's offers follow new projects");
+    assert_eq!(routine_major(Some("1.36.2")), 1);
+    assert_eq!(routine_major(Some("2.0.0-beta.1")), 2);
+    assert_eq!(routine_major(Some("not a version")), new_projects);
+    assert!(is_major_upgrade(Some("1.36.2"), &v("2.0.0")));
+    assert!(!is_major_upgrade(Some("1.36.2"), &v("1.37.0")));
+    assert!(!is_major_upgrade(Some("2.0.0"), &v("2.1.0")));
   }
 
   #[test]

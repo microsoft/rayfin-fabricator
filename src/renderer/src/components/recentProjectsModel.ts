@@ -115,9 +115,9 @@ export function projectLinks(project: StudioProject): { app?: string; portal?: s
 /**
  * The Rayfin version a project could update to, or `null`: the release
  * Fabricator recommends, the newest the local backend runs that isn't newer
- * than Rayfin's latest, so the app keeps running on this computer (a team app
- * too). A newer release, such as a preview, is offered only in the app, with
- * a warning. Nothing while either version isn't known.
+ * than Rayfin's latest, of the app's major version, so the app keeps running
+ * on this computer (a team app too). A newer release, such as a preview or
+ * another major version, is offered only in the app, with a warning. Nothing while either version isn't known.
  */
 export function rayfinUpdate(
   project: StudioProject,
@@ -125,7 +125,13 @@ export function rayfinUpdate(
 ): string | null {
   if (!project.rayfinVersion || project.missing || !latest) return null
   const target = latest.recommended
-  return target && newerRelease(target, project.rayfinVersion) ? target : null
+  // Routine updates stay within the app's major version: another is a migration.
+  const major = (version: string): string | undefined => /^v?(\d+)\./.exec(version.trim())?.[1]
+  return target &&
+    major(target) === major(project.rayfinVersion) &&
+    newerRelease(target, project.rayfinVersion)
+    ? target
+    : null
 }
 
 /** "Opened 3 hours ago", or nothing before it's been opened since Fabricator kept track. */
