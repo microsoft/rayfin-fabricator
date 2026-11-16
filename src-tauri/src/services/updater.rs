@@ -34,11 +34,18 @@ fn info_from(update: &Update) -> UpdateInfo {
 }
 
 async fn run_check(app: &AppHandle) -> AppResult<Option<Update>> {
+  if manual_update_channel(&app.package_info().version) {
+    return Ok(None);
+  }
   let updater = app.updater().map_err(|e| AppError::Msg(e.to_string()))?;
   updater
     .check()
     .await
     .map_err(|e| AppError::Msg(e.to_string()))
+}
+
+fn manual_update_channel(version: &semver::Version) -> bool {
+  version.pre.as_str().starts_with("alpha.")
 }
 
 /// Check for a newer release without downloading. Caches the result for `download`.
@@ -109,6 +116,17 @@ pub async fn install(app: &AppHandle, state: &UpdaterState) -> AppResult<()> {
 mod tests {
   use tauri_plugin_updater::{Config, RemoteRelease};
 
+  #[test]
+  fn review_alphas_never_check_the_stable_updater_endpoint() {
+    for (version, manual) in [
+      ("1.55.0-alpha.21426985", true),
+      ("1.55.0", false),
+      ("1.55.0-beta.1", false),
+    ] {
+      assert_eq!(super::manual_update_channel(&version.parse().unwrap()), manual);
+    }
+  }
+
   /// The manifest `release.yml` publishes as `latest.json` (step "Generate and upload
   /// updater manifest"), copied from v1.16.1 with shorter notes and placeholder
   /// signatures. Installed apps parse it with whatever updater plugin they shipped, so
@@ -152,8 +170,10 @@ mod tests {
     let endpoints: Vec<&str> = config.endpoints.iter().map(|url| url.as_str()).collect();
     assert_eq!(
       endpoints,
-      ["https://github.com/spatney/rayfin-fabricator/releases/latest/download/latest.json"]
+      ["https://github.com/microsoft/rayfin-fabricator/releases/latest/download/latest.json"]
     );
     assert!(!config.pubkey.is_empty());
+    assert_eq!(config.pubkey.trim(), include_str!("../../updater.pub").trim());
+    assert!(config.require_signed_version);
   }
 }
