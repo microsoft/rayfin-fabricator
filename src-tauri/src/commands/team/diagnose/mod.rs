@@ -44,7 +44,8 @@ const ANALYSIS_TIMEOUT_MS: u64 = 5 * 60_000;
 
 /// Documentation the session may fetch: Microsoft Learn (Entra ID, Fabric and
 /// AADSTS error references), GitHub Docs, Rayfin's docs and Fabricator's own.
-const DOC_HOSTS: &[&str] = &["learn.microsoft.com", "docs.github.com", "rayfin.ai", "www.rayfin.ai", "spatney.github.io"];
+const DOC_HOSTS: &[&str] =
+  &["learn.microsoft.com", "docs.github.com", "rayfin.ai", "www.rayfin.ai", crate::distribution::DOCS_HOST];
 
 /// Read-only and documentation-only, with no MCP: an MCP server would receive
 /// the tenant details this session holds.

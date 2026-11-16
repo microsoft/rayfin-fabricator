@@ -74,18 +74,15 @@ pub const STOPPED: &str = "Stopped.";
 
 /// Documentation hosts the assistant may fetch when the local mirror is stale.
 const ALLOWED_URL_HOSTS: &[&str] = &[
-  "spatney.github.io",
+  DOCS_HOST,
   "rayfin.ai",
   "www.rayfin.ai",
 ];
 
-/// Where Fabricator's documentation lives on `spatney.github.io`, which hosts
-/// many unrelated projects. A link there must be inside this project.
-const DOCS_PATH_PREFIX: &str = "/rayfin-fabricator";
-
-/// Where Fabricator's releases are published on `github.com`, which hosts
-/// everyone's projects. These pages are the only ones reachable there.
-const RELEASES_PATH: &str = "/spatney/rayfin-fabricator/releases";
+// Where Fabricator's documentation and releases live (`distribution.json`).
+// `github.com` hosts everyone's projects, so its release pages are the only
+// ones reachable there; a shared docs host is limited to the docs' path.
+use crate::distribution::{in_docs, DOCS_HOST, RELEASES_PATH};
 
 /// Built-in tools the assistant must not use. The permission policy enforces
 /// read-only regardless; excluding them stops the model from trying.
@@ -196,7 +193,7 @@ pub(super) fn docs_url_allowed(url: &str) -> bool {
     return false;
   };
   match host.as_str() {
-    "spatney.github.io" => path == DOCS_PATH_PREFIX || path.starts_with(&format!("{DOCS_PATH_PREFIX}/")),
+    h if h == DOCS_HOST => in_docs(&path),
     "rayfin.ai" | "www.rayfin.ai" => true,
     _ => false,
   }
@@ -205,10 +202,7 @@ pub(super) fn docs_url_allowed(url: &str) -> bool {
 /// [`docs_url_allowed`], restricted to Fabricator's own documentation. Used by
 /// the `open-docs` action, which must not send the user to Rayfin's site.
 pub(super) fn fabricator_docs_url(url: &str) -> bool {
-  split_https(url).is_some_and(|(host, path)| {
-    host == "spatney.github.io"
-      && (path == DOCS_PATH_PREFIX || path.starts_with(&format!("{DOCS_PATH_PREFIX}/")))
-  })
+  split_https(url).is_some_and(|(host, path)| host == DOCS_HOST && in_docs(&path))
 }
 
 /// Whether `path` sits inside any readable root and outside every denied
@@ -738,6 +732,15 @@ fn compose(ctx: &HelpContext, question: &str, attachments: &[String], history: &
 mod tests {
   use super::*;
 
+  /// `url` with the upstream repository and docs site these tests were written
+  /// against swapped for the ones `distribution.json` configures.
+  fn at(url: &str) -> String {
+    url
+      .replace("https://spatney.github.io/rayfin-fabricator", crate::distribution::DOCS_BASE)
+      .replace("spatney.github.io", crate::distribution::DOCS_HOST)
+      .replace("spatney/rayfin-fabricator", crate::distribution::REPOSITORY)
+  }
+
   /// The fixtures are written as Windows paths; elsewhere `C:\a\b` becomes `/a/b`, so
   /// the policy's path checks mean the same on every OS the tests run on.
   fn native(path: &str) -> String {
@@ -843,10 +846,10 @@ mod tests {
 
   #[test]
   fn only_documentation_hosts_are_fetchable() {
-    assert!(policy().permits(&url_request("https://spatney.github.io/rayfin-fabricator/docs")));
+    assert!(policy().permits(&url_request(&at("https://spatney.github.io/rayfin-fabricator/docs"))));
     assert!(policy().permits(&url_request("https://rayfin.ai/docs")));
     assert!(!policy().permits(&url_request("https://example.com/")));
-    assert!(!policy().permits(&url_request("http://spatney.github.io/")), "https only");
+    assert!(!policy().permits(&url_request(&at("http://spatney.github.io/"))), "https only");
   }
 
   #[test]
@@ -854,18 +857,18 @@ mod tests {
     // These all *start with* an allowed host but are served by another one.
     assert!(!url_allowed("https://rayfin.ai.evil.example/docs"));
     assert!(!url_allowed("https://rayfin.ai@evil.example/docs"));
-    assert!(!url_allowed("https://spatney.github.io.evil.example/rayfin-fabricator"));
+    assert!(!url_allowed(&at("https://spatney.github.io.evil.example/rayfin-fabricator")));
     assert!(!url_allowed("https://evil.example/?x=https://rayfin.ai"));
   }
 
   #[test]
   fn a_citation_must_be_a_page_we_publish() {
-    assert!(docs_url_allowed("https://spatney.github.io/rayfin-fabricator"));
-    assert!(docs_url_allowed("https://spatney.github.io/rayfin-fabricator/docs/ship/deploy"));
+    assert!(docs_url_allowed(&at("https://spatney.github.io/rayfin-fabricator")));
+    assert!(docs_url_allowed(&at("https://spatney.github.io/rayfin-fabricator/docs/ship/deploy")));
     assert!(docs_url_allowed("https://rayfin.ai/docs/reference/cli"));
     // github.io hosts many projects; a citation must stay inside ours.
-    assert!(!docs_url_allowed("https://spatney.github.io/some-other-project/docs"));
-    assert!(!docs_url_allowed("https://spatney.github.io/rayfin-fabricator-evil/docs"));
+    assert!(!docs_url_allowed(&at("https://spatney.github.io/some-other-project/docs")));
+    assert!(!docs_url_allowed(&at("https://spatney.github.io/rayfin-fabricator-evil/docs")));
     // The lookalikes above must not pass here either.
     assert!(!docs_url_allowed("https://rayfin.ai.evil.example/docs"));
     assert!(!docs_url_allowed("https://rayfin.ai@evil.example/docs"));
@@ -874,9 +877,9 @@ mod tests {
 
   #[test]
   fn open_docs_never_leaves_fabricators_own_documentation() {
-    assert!(fabricator_docs_url("https://spatney.github.io/rayfin-fabricator/docs/ship/deploy"));
+    assert!(fabricator_docs_url(&at("https://spatney.github.io/rayfin-fabricator/docs/ship/deploy")));
     assert!(!fabricator_docs_url("https://rayfin.ai/docs"), "that is Rayfin's site, not ours");
-    assert!(!fabricator_docs_url("https://spatney.github.io/other/docs"));
+    assert!(!fabricator_docs_url(&at("https://spatney.github.io/other/docs")));
     assert!(
       !fabricator_docs_url(&grounding::release_page("1.14.0")),
       "release notes are cited, not opened as docs"
@@ -887,8 +890,8 @@ mod tests {
   fn a_backslash_cannot_disguise_the_host() {
     // Browsers treat `\` as `/`, so each of these opens evil.example.
     assert!(!url_allowed("https://evil.example\\@rayfin.ai/docs"));
-    assert!(!docs_url_allowed("https://evil.example\\@spatney.github.io/rayfin-fabricator/docs"));
-    assert!(!release_notes_url("https://evil.example\\@github.com/spatney/rayfin-fabricator/releases"));
+    assert!(!docs_url_allowed(&at("https://evil.example\\@spatney.github.io/rayfin-fabricator/docs")));
+    assert!(!release_notes_url(&at("https://evil.example\\@github.com/spatney/rayfin-fabricator/releases")));
   }
 
   #[test]
@@ -896,11 +899,11 @@ mod tests {
     for url in [
       grounding::RELEASES_URL.to_string(),
       grounding::release_page("1.14.0"),
-      "https://github.com/spatney/rayfin-fabricator/releases/".to_string(),
-      "https://github.com/spatney/rayfin-fabricator/releases/latest".to_string(),
-      "https://github.com/spatney/rayfin-fabricator/releases/tag/v1.3.4-experimental.mac-sso.1".to_string(),
-      "https://github.com/spatney/rayfin-fabricator/releases?page=2".to_string(),
-      "https://github.com/spatney/rayfin-fabricator/releases/tag/v1.14.0#see-every-step-of-a-deploy".to_string(),
+      at("https://github.com/spatney/rayfin-fabricator/releases/"),
+      at("https://github.com/spatney/rayfin-fabricator/releases/latest"),
+      at("https://github.com/spatney/rayfin-fabricator/releases/tag/v1.3.4-experimental.mac-sso.1"),
+      at("https://github.com/spatney/rayfin-fabricator/releases?page=2"),
+      at("https://github.com/spatney/rayfin-fabricator/releases/tag/v1.14.0#see-every-step-of-a-deploy"),
     ] {
       assert!(release_notes_url(&url), "{url} is one of our release pages");
       assert!(policy().permits(&url_request(&url)), "{url} can be fetched");
@@ -910,21 +913,21 @@ mod tests {
   #[test]
   fn nothing_else_on_github_is_reachable() {
     for url in [
-      "https://github.com/spatney/rayfin-fabricator",
-      "https://github.com/spatney/rayfin-fabricator/issues/new",
-      "https://github.com/spatney/rayfin-fabricator/releases/download/v1.14.0/latest.json",
-      "https://github.com/spatney/rayfin-fabricator-evil/releases",
-      "https://github.com/spatney/rayfin-fabricator/releasesx",
+      &at("https://github.com/spatney/rayfin-fabricator"),
+      &at("https://github.com/spatney/rayfin-fabricator/issues/new"),
+      &at("https://github.com/spatney/rayfin-fabricator/releases/download/v1.14.0/latest.json"),
+      &at("https://github.com/spatney/rayfin-fabricator-evil/releases"),
+      &at("https://github.com/spatney/rayfin-fabricator/releasesx"),
       "https://github.com/someone/else/releases",
-      "https://github.com/spatney/rayfin-fabricator/releases/tag/../../../evil/phish",
-      "https://github.com/spatney/rayfin-fabricator/releases/tag/v1.14.0/../../../../evil",
-      "https://github.com/spatney/rayfin-fabricator/releases/tag/%2e%2e/%2e%2e",
-      "https://github.com/spatney/rayfin-fabricator/releases/tag/.",
-      "https://github.com/spatney/rayfin-fabricator/releases/tag/",
-      "https://github.com.evil.example/spatney/rayfin-fabricator/releases",
-      "https://github.com@evil.example/spatney/rayfin-fabricator/releases",
-      "https://api.github.com/repos/spatney/rayfin-fabricator/releases",
-      "http://github.com/spatney/rayfin-fabricator/releases",
+      &at("https://github.com/spatney/rayfin-fabricator/releases/tag/../../../evil/phish"),
+      &at("https://github.com/spatney/rayfin-fabricator/releases/tag/v1.14.0/../../../../evil"),
+      &at("https://github.com/spatney/rayfin-fabricator/releases/tag/%2e%2e/%2e%2e"),
+      &at("https://github.com/spatney/rayfin-fabricator/releases/tag/."),
+      &at("https://github.com/spatney/rayfin-fabricator/releases/tag/"),
+      &at("https://github.com.evil.example/spatney/rayfin-fabricator/releases"),
+      &at("https://github.com@evil.example/spatney/rayfin-fabricator/releases"),
+      &at("https://api.github.com/repos/spatney/rayfin-fabricator/releases"),
+      &at("http://github.com/spatney/rayfin-fabricator/releases"),
     ] {
       assert!(!release_notes_url(url), "{url} is not a release page of ours");
       assert!(!policy().permits(&url_request(url)), "{url} cannot be fetched");

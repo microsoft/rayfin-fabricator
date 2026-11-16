@@ -1,7 +1,8 @@
 import type { AppVersions, HelpIssueDraft, RayfinStudioApi } from '@shared/ipc'
+import distribution from '@shared/distribution.json'
 import { formatCopilotCli } from '../copilotVersion'
 
-const REPO_URL = 'https://github.com/spatney/rayfin-fabricator'
+const REPO_URL = `https://github.com/${distribution.repository}`
 
 /**
  * Build the prefilled GitHub "new issue" URL. Environment (versions + user

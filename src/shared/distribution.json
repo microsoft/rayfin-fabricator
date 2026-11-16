@@ -1,0 +1,12 @@
+{
+  "$comment": "Where this build of Fabricator is published and where it fetches from: its GitHub repository (releases, issues, source for Help), its documentation site, the auto-updater channel and signing key, and the repository rayfin-local is downloaded from. Everything reads these values from here; tauri.conf.json, .github/ISSUE_TEMPLATE/config.yml and the Advisor rules keep copies, so after editing run `node scripts/distribution/sync.mjs`.",
+  "repository": "spatney/rayfin-fabricator",
+  "docsBase": "https://spatney.github.io/rayfin-fabricator",
+  "updater": {
+    "endpoint": "https://github.com/spatney/rayfin-fabricator/releases/latest/download/latest.json",
+    "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDE4NEEyQzBFMTA1MUFCMzAKUldRd3ExRVFEaXhLR09weDZNcGk3VVkwbTI0OS9tU0RqTHd2cU82Zjk4dml5LzZOSTVjeTM5S2cK"
+  },
+  "rayfinLocal": {
+    "repository": "spatney/rayfin-local"
+  }
+}

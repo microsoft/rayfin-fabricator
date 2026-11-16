@@ -18,6 +18,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2.7", features = [] }
+serde_json = "1"
 
 [dependencies]
 # `devtools` enables the WebView2/WebKit web inspector (and `Webview::open_devtools`)

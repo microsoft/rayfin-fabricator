@@ -6,8 +6,9 @@
 //
 //   node scripts/rayfin-local/fetch.mjs [--target <triple>] [--optional] [--force]
 //
-// Downloads the release that rayfin-local.json pins, checks the archive against the pinned
-// SHA-256 and unpacks it with the system tar. A stamp file next to the binary skips the
+// Downloads the release that rayfin-local.json pins, from the repository that
+// src/shared/distribution.json names (rayfinLocal.repository), checks the archive against
+// the pinned SHA-256 and unpacks it with the system tar. A stamp file next to the binary skips the
 // download while the binary matches the pin, so a binary signed after the fetch stays signed.
 //   --target <triple>  Rust target triple. Defaults to TAURI_ENV_TARGET_TRIPLE, else rustc's host.
 //   --optional         Warn instead of failing, and skip targets rayfin-local.json doesn't pin
@@ -25,10 +26,10 @@ import { fileURLToPath } from 'node:url'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 const PIN_FILE = path.join(ROOT, 'rayfin-local.json')
+const DISTRIBUTION_FILE = path.join(ROOT, 'src', 'shared', 'distribution.json')
 const BIN_DIR = path.join(ROOT, 'src-tauri', 'binaries')
 const OVERRIDE_VAR = 'FABRICATOR_RAYFIN_LOCAL_BIN'
-const USER_AGENT =
-  'rayfin-fabricator rayfin-local fetch (https://github.com/spatney/rayfin-fabricator)'
+const USER_AGENT = 'rayfin-fabricator rayfin-local fetch'
 const USAGE =
   'Usage: node scripts/rayfin-local/fetch.mjs [--target <triple>] [--optional] [--force]'
 const SAFE_NAME = /^[\w.+-]+$/
@@ -96,22 +97,25 @@ function resolveTarget(cliTarget) {
   return triple
 }
 
-function readPin() {
-  let pin
+function readJson(file) {
   try {
-    pin = JSON.parse(fs.readFileSync(PIN_FILE, 'utf8'))
+    return JSON.parse(fs.readFileSync(file, 'utf8'))
   } catch (error) {
-    throw new Error(`Couldn't read ${rel(PIN_FILE)}: ${error.message}`, { cause: error })
+    throw new Error(`Couldn't read ${rel(file)}: ${error.message}`, { cause: error })
   }
-  const valid =
-    SAFE_NAME.test(pin?.version ?? '') &&
-    /^[\w.-]+\/[\w.-]+$/.test(pin.repository ?? '') &&
-    typeof pin.targets === 'object' &&
-    pin.targets !== null
+}
+
+function readPin() {
+  const pin = readJson(PIN_FILE)
+  const repository = readJson(DISTRIBUTION_FILE)?.rayfinLocal?.repository
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repository ?? '')) {
+    throw new Error(`${rel(DISTRIBUTION_FILE)} needs "rayfinLocal.repository" (owner/name).`)
+  }
+  const valid = SAFE_NAME.test(pin?.version ?? '') && typeof pin.targets === 'object' && pin.targets !== null
   if (!valid) {
-    throw new Error(`${rel(PIN_FILE)} needs "version", "repository" (owner/name) and "targets".`)
+    throw new Error(`${rel(PIN_FILE)} needs "version" and "targets".`)
   }
-  return pin
+  return { ...pin, repository }
 }
 
 function readStamp(file) {

@@ -83,6 +83,7 @@ rayfin-fabricator/
 ├─ src/shared/ipc.ts          Shared TypeScript IPC types
 ├─ src/shared/advisor/        Advisor rule catalog (rules.json), shared by the renderer and the Rust core
 ├─ src/shared/docs-links.json Docs pages the app links to (checked by the docs build)
+├─ src/shared/distribution.json Where Fabricator is hosted: repository, docs site, updater, rayfin-local
 ├─ website/                   Documentation site (Next.js + Fumadocs), published to GitHub Pages
 ├─ scripts/docs-screenshots/  Tooling that captures the docs site's screenshots
 ├─ scripts/videos/            Videos hosted by Ray: the landing page's intro and the Learn Rayfin with Ray lessons (Remotion + ElevenLabs)
@@ -219,6 +220,12 @@ Fabricator comes in English, Spanish (`es`), German (`de`) and Japanese (`ja`). 
 ## Vendored wry patches
 
 `src-tauri/vendor/wry` is the upstream `wry` crate plus the patches in `src-tauri/vendor/wry-patches` (WebView2 device-compliance SSO and the macOS preview position). When a Tauri upgrade moves the `wry` version, `cargo test` fails until you re-vendor it with `node scripts/wry/vendor-wry.mjs update <version>`. Change vendored files only through a patch: CI runs `npm run vendor:wry -- verify`. See `docs/VENDORED-WRY-PATCH.md` before changing Tauri or `wry`.
+
+## Hosting
+
+`src/shared/distribution.json` says where Fabricator is hosted: its GitHub repository (issues and releases), the docs site's base URL, the updater's endpoint and signing key, and the repository rayfin-local releases are downloaded from. The Rust core reads it at build time (`src-tauri/build.rs`), the renderer imports it, and `scripts/rayfin-local/fetch.mjs` and the docs build read it.
+
+A few files can't read it and keep copies: the updater settings in `src-tauri/tauri.conf.json`, the links in `.github/ISSUE_TEMPLATE/config.yml`, and the rayfin-local links in `src/shared/advisor/rules.json`. After you change `distribution.json`, run `node scripts/distribution/sync.mjs` to update them. CI runs it with `--check`, and the Rust build fails while the updater copy differs. A new updater key also needs a release signed with the old key that ships it, or existing installs can't verify the next update.
 
 ## The rayfin-local sidecar
 

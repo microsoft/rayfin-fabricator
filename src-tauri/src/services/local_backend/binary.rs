@@ -18,8 +18,7 @@ pub const BIN_ENV: &str = "FABRICATOR_RAYFIN_LOCAL_BIN";
 /// The host contract this Fabricator speaks.
 pub const CONTRACT: u64 = 1;
 /// What to do when Windows blocks the bundled binary.
-pub const BLOCKED_DOCS_URL: &str =
-  "https://spatney.github.io/rayfin-fabricator/docs/troubleshooting/preview#windows-blocked-rayfin-local";
+pub const BLOCKED_DOCS_URL: &str = crate::docs!("/docs/troubleshooting/preview#windows-blocked-rayfin-local");
 const EXE_NAME: &str = if cfg!(windows) { "rayfin-local.exe" } else { "rayfin-local" };
 const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 

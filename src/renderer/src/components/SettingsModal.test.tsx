@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import type { AppSettings, AppVersions, Language } from '@shared/ipc'
+import distribution from '@shared/distribution.json'
 import { setLanguage } from '../i18n'
 import SettingsModal from './SettingsModal'
 
@@ -142,8 +143,8 @@ describe('SettingsModal help links', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Documentation' }))
     fireEvent.click(screen.getByRole('button', { name: 'Troubleshooting' }))
     expect(api.openExternal.mock.calls).toEqual([
-      ['https://spatney.github.io/rayfin-fabricator/docs'],
-      ['https://spatney.github.io/rayfin-fabricator/docs/troubleshooting']
+      [`${distribution.docsBase}/docs`],
+      [`${distribution.docsBase}/docs/troubleshooting`]
     ])
   })
 })

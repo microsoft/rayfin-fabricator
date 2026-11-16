@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { AppVersions } from '@shared/ipc'
+import distribution from '@shared/distribution.json'
 import { buildReportIssueUrl, reportIssue } from './reportIssue'
 
 const versions: AppVersions = {
@@ -19,7 +20,7 @@ function bodyOf(url: string): string {
 describe('buildReportIssueUrl', () => {
   it('targets the rayfin-fabricator new-issue endpoint with the bug label', () => {
     const url = buildReportIssueUrl(versions, null, 'UA/1.0')
-    expect(url.startsWith('https://github.com/spatney/rayfin-fabricator/issues/new?')).toBe(true)
+    expect(url.startsWith(`https://github.com/${distribution.repository}/issues/new?`)).toBe(true)
     expect(url).toContain('labels=bug')
   })
 

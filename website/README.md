@@ -40,7 +40,7 @@ npm run build
 
 GitHub Pages deployment is handled by `.github/workflows/docs.yml` on pushes to `master` that touch the site, the root `package.json` (the documented app version comes from it), or `src/shared/docs-links.json`. Pull requests build and verify only.
 
-One-time setup: the repository's **Settings → Pages → Source** must be **GitHub Actions** (or run `gh api -X POST repos/spatney/rayfin-fabricator/pages -f build_type=workflow`). If you add a custom domain there, also update `base` in `src/shared/docs-links.json`; the workflow picks up the new URL and base path automatically.
+One-time setup: the repository's **Settings → Pages → Source** must be **GitHub Actions** (or run `gh api -X POST repos/spatney/rayfin-fabricator/pages -f build_type=workflow`). If you add a custom domain there, also update `docsBase` in `src/shared/distribution.json` (then run `node scripts/distribution/sync.mjs`); the workflow picks up the new URL and base path automatically.
 
 ## In-app links
 

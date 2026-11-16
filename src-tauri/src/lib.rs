@@ -8,6 +8,7 @@
 #[macro_use]
 mod i18n;
 mod commands;
+mod distribution;
 mod error;
 mod services;
 mod state;

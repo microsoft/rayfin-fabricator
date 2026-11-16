@@ -38,6 +38,12 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      - name: Check hosting config
+        # Copies of src/shared/distribution.json must match it.
+        run: |
+          node scripts/distribution/sync.mjs --check
+          node --test scripts/distribution/sync.test.mjs
+
       - name: Build renderer
         run: npm run build:renderer
 
