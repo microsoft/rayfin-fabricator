@@ -14,7 +14,11 @@ import {
   validateOptIn,
   verifyRelease
 } from './pr-alpha.mjs'
-import { signWindowsUpdater, verifyWindowsUpdater } from './sign-windows-updater.mjs'
+import {
+  signWindowsUpdater,
+  verifyPublishedWindowsUpdater,
+  verifyWindowsUpdater
+} from './sign-windows-updater.mjs'
 
 const commit = 'a'.repeat(40)
 function authorization() {
@@ -115,7 +119,7 @@ test('publication refuses tampered archives, wrong build/PR and unsigned metadat
   const folder = await mkdtemp(path.join(os.tmpdir(), 'fabricator-alpha-release-'))
   t.after(() => rm(folder, { recursive: true, force: true }))
   const archive = 'rayfin-fabricator-1.55.0-alpha.123-windows-x64.zip'
-  const installerName = 'Rayfin Fabricator_1.55.0-alpha.123_x64-setup.exe'
+  const installerName = 'Rayfin.Fabricator_1.55.0-alpha.123_x64-setup.exe'
   await writeFile(path.join(folder, installerName), 'test installer')
   const installerHash = await sha256(path.join(folder, installerName))
   await writeFile(path.join(folder, archive), 'test archive')
@@ -175,6 +179,7 @@ test('publication refuses tampered archives, wrong build/PR and unsigned metadat
     (data) => (data.signing.files[0].authenticode.status = 'NotSigned'),
     (data) => (data.archiveSha256 = 'tampered'),
     (data) => (data.installer.installer.sha256 = 'tampered'),
+    (data) => (data.installer.installer.path = installerName.replace('.', ' ')),
     (data) => (data.installer.installVerification.signedUninstaller = false),
     (data) => (data.installer.installer.aslr.fixups = 0),
     (data) => (data.installer.nsis.reproducible = false)
@@ -231,6 +236,34 @@ test('publication refuses tampered archives, wrong build/PR and unsigned metadat
   assert.equal(manifest.version, '1.55.0-alpha.123')
   assert.ok(manifest.platforms['windows-x86_64'].url.includes(encodeURIComponent(installerName)))
   assert.equal(await sha256(path.join(folder, installerName)), installerHash)
+  const requests = []
+  await verifyPublishedWindowsUpdater(folder, async (url, options) => {
+    requests.push([String(url), options?.method ?? 'GET'])
+    return { ok: true, json: async () => manifest }
+  })
+  assert.deepEqual(requests, [
+    [
+      'https://github.com/microsoft/rayfin-fabricator/releases/download/v1.55.0-alpha.123/latest.json',
+      'GET'
+    ],
+    [
+      'https://github.com/microsoft/rayfin-fabricator/releases/download/v1.55.0-alpha.123/Rayfin.Fabricator_1.55.0-alpha.123_x64-setup.exe',
+      'HEAD'
+    ]
+  ])
+  await assert.rejects(
+    verifyPublishedWindowsUpdater(folder, async (_url, options) =>
+      options ? { ok: false, status: 404 } : { ok: true, json: async () => manifest }
+    ),
+    /Published installer URL failed: HTTP 404/
+  )
+  await assert.rejects(
+    verifyPublishedWindowsUpdater(folder, async () => ({
+      ok: true,
+      json: async () => ({ ...manifest, version: 'wrong published version' })
+    })),
+    /Published updater manifest changed/
+  )
   const altered = structuredClone(manifest)
   altered.platforms['windows-x86_64'].url = 'https://example.invalid/another-installer.exe'
   await writeFile(path.join(folder, 'latest.json'), JSON.stringify(altered))

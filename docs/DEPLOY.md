@@ -176,6 +176,13 @@ the uninstaller or installer. Installation checks require the actual installer
 process to load at a relocated base. Mandatory Guardian/BinSkim checks remain
 enabled; no ASLR baseline or suppression is used.
 
+Public installer assets use `Rayfin.Fabricator_<version>_x64-setup.exe` consistently
+in metadata, checksums, signatures and manifest URLs. The build-local Tauri
+filename keeps its original space; packaging normalizes the release copy before
+updater signing because GitHub replaces spaces with dots on upload. After
+publication, the pipeline fetches the actual public manifest, compares it with
+the verified local manifest, and requires its installer URL to resolve.
+
 Only the separate no-checkout release job receives the updater secrets. It
 signs the final Authenticode-signed installer with pinned Tauri tooling, verifies
 the signature against the committed Microsoft public key, and binds its trusted

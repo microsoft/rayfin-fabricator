@@ -111,7 +111,7 @@ export async function verifyRelease(folder, { commit, buildId, pr }) {
   assert.equal(metadata.pullRequest, Number(pr))
   assert.match(metadata.version, new RegExp(`^\\d+\\.\\d+\\.\\d+-alpha\\.${buildId}$`))
   const archive = `rayfin-fabricator-${metadata.version}-windows-x64.zip`
-  const installerName = `Rayfin Fabricator_${metadata.version}_x64-setup.exe`
+  const installerName = `Rayfin.Fabricator_${metadata.version}_x64-setup.exe`
   assert.equal(metadata.archive, archive)
   assert.equal(await sha256(path.join(folder, archive)), metadata.archiveSha256)
   const installer = metadata.installer.installer

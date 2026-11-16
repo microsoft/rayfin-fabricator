@@ -78,7 +78,8 @@ $installerFile = Join-Path 'src-tauri/target/release/bundle/nsis' $installer.ins
 if ((Get-FileHash -Algorithm SHA256 $installerFile).Hash.ToLowerInvariant() -cne $installer.installer.sha256) {
     throw 'Verified installer changed before artifact publication.'
 }
-Copy-Item -LiteralPath $installerFile -Destination $OutputFolder
+$installer.installer.path = "Rayfin.Fabricator_$($source.version)_x64-setup.exe"
+Copy-Item -LiteralPath $installerFile -Destination (Join-Path $OutputFolder $installer.installer.path)
 @(
     "$hash  $archiveName"
     "$($installer.installer.sha256)  $($installer.installer.path)"

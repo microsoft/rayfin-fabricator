@@ -369,3 +369,9 @@ extends:
                       isPreRelease: true
                       makeLatest: 'false'
                       addChangeLog: false
+                  - pwsh: |
+                      node "$(Pipeline.Workspace)/windows-alpha/_release/sign-windows-updater.mjs" verify-published "$(Pipeline.Workspace)/windows-alpha"
+                      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                    displayName: Verify actual public updater manifest and installer URL after publication
+                    env:
+                      TEST_RELEASE_PR: ${{ parameters.testReleasePr }}

@@ -39,6 +39,17 @@ export async function verifyWindowsUpdater(folder) {
   return manifest
 }
 
+export async function verifyPublishedWindowsUpdater(folder, request = fetch) {
+  const manifest = await verifyWindowsUpdater(folder)
+  const url = manifest.platforms['windows-x86_64'].url
+  const response = await request(new URL('latest.json', url))
+  assert.ok(response.ok, `Published updater manifest failed: HTTP ${response.status}.`)
+  assert.deepEqual(await response.json(), manifest, 'Published updater manifest changed.')
+  const installer = await request(url, { method: 'HEAD' })
+  assert.ok(installer.ok, `Published installer URL failed: HTTP ${installer.status}.`)
+  return manifest
+}
+
 export async function signWindowsUpdater(folder, run) {
   const metadata = await releaseMetadata(folder)
   const pr = process.env.TEST_RELEASE_PR
@@ -96,6 +107,8 @@ if (process.argv[1] && path.resolve(process.argv[1]) === SCRIPT) {
       await run(args)
     } else if (folder === 'verify') {
       await verifyWindowsUpdater(tools)
+    } else if (folder === 'verify-published') {
+      await verifyPublishedWindowsUpdater(tools)
     } else {
       await signWindowsUpdater(folder, async (args) => {
         execFileSync(process.execPath, [SCRIPT, '--worker'], {
