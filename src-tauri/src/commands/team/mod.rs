@@ -84,19 +84,13 @@ pub(crate) fn sso_problem(step: &str, action: &str, e: &gh::GhError) -> Option<T
     return None;
   }
   let mut p = problem(step, format!("{action}: {}", e.sso_reason()));
-  let account = match gh::current_account() {
-    Some(login) => format!("signed in to github.com as {login}"),
-    None => "signed in to github.com as the account the GitHub CLI uses".to_string(),
-  };
-  let link = e.sso_session_url().map(|url| TeamLink { label: "Open single sign-on".into(), url });
-  let session = if link.is_some() {
-    "select Open single sign-on and continue with your work account"
-  } else {
-    "start a single sign-on session for the organization on github.com"
-  };
-  p.guidance = Some(format!(
-    "GitHub lets the GitHub CLI into the organization only when you sign it in during a single sign-on session. In your browser, stay {account}: {session}, then select Sign in to GitHub again and finish in the terminal and browser. Then try again."
-  ));
+  let link = e.sso_session_url().map(|url| TeamLink { label: t!("team.sso.openLink"), url });
+  p.guidance = Some(match (gh::current_account(), link.is_some()) {
+    (Some(login), true) => t!("team.sso.guidance.loginLink", login = login),
+    (Some(login), false) => t!("team.sso.guidance.login", login = login),
+    (None, true) => t!("team.sso.guidance.link"),
+    (None, false) => t!("team.sso.guidance.plain"),
+  });
   p.kind = Some("sso".into());
   p.link = link;
   Some(p)
@@ -115,12 +109,14 @@ pub(crate) fn fail_github(action: &str, e: &gh::GhError) -> TeamActionResult {
 /// GitHub's reason when it gave one, and what an owner can do.
 pub(crate) fn unstarted_message(lead: &str, reason: &str) -> String {
   let reason = reason.trim();
-  let mut text = if reason.is_empty() { lead.to_string() } else { format!("{lead}: {reason}") };
-  if !text.ends_with(['.', '!', '?']) {
-    text.push('.');
+  if reason.is_empty() {
+    return t!("team.unstarted.noReason", lead = lead);
   }
-  text.push_str(" A workspace owner can choose the runners the pipeline uses under Manage → Settings → Where the pipeline runs.");
-  text
+  let mut reason = reason.to_string();
+  if !reason.ends_with(['.', '!', '?']) {
+    reason.push('.');
+  }
+  t!("team.unstarted.withReason", lead = lead, reason = reason)
 }
 
 /// The signed-in GitHub user, cached for the session (cleared on failures).
@@ -134,7 +130,7 @@ pub(crate) async fn viewer() -> Result<gh::Viewer, String> {
   if let Some(v) = VIEWER.lock().unwrap().get(&key).cloned() {
     return Ok(v);
   }
-  let v = gh::viewer().await.map_err(|e| e.describe("Check your GitHub sign-in"))?;
+  let v = gh::viewer().await.map_err(|e| e.describe(&t!("team.actions.checkSignIn")))?;
   VIEWER.lock().unwrap().insert(key, v.clone());
   Ok(v)
 }
@@ -173,6 +169,15 @@ pub(crate) fn git_identity(v: &gh::Viewer) -> (String, String) {
   (v.name.clone().unwrap_or_else(|| v.login.clone()), naming::noreply_email(v.id, &v.login))
 }
 
+/// Whether the app's npm packages changed between two commits of its
+/// worktree, so the app on this computer needs them installed again.
+pub(crate) async fn packages_changed(project_dir: &str, before: Option<&str>, after: Option<&str>) -> bool {
+  match (before, after) {
+    (Some(before), Some(after)) => crate::commands::git::packages_changed(project_dir, before, after).await,
+    _ => false,
+  }
+}
+
 /// A folder under the projects root that doesn't exist yet.
 pub(crate) fn unique_dir(base: &str) -> PathBuf {
   let root = PathBuf::from(store::get_state().workspace_root);
@@ -194,14 +199,32 @@ pub(crate) async fn sleep_or_cancel(ms: u64, cancel: &CancelToken) -> bool {
   }
 }
 
-pub(crate) const CANCELLED: &str = "Stopped waiting. Your changes are safe; try again to continue.";
+/// What to say when the user stops waiting for a run.
+pub(crate) fn cancelled() -> String {
+  t!("team.cancelled")
+}
+
+/// A pipeline run's status (GitHub's `queued`, `in_progress`, …) as progress detail.
+pub(crate) fn run_status(status: &str) -> String {
+  match status {
+    "queued" => t!("team.runStatus.queued"),
+    "in_progress" => t!("team.runStatus.inProgress"),
+    "waiting" => t!("team.runStatus.waiting"),
+    "requested" => t!("team.runStatus.requested"),
+    "pending" => t!("team.runStatus.pending"),
+    "completed" => t!("team.runStatus.completed"),
+    other => other.replace('_', " "),
+  }
+}
 
 /// Callback for run status changes while waiting.
 pub(crate) type OnRun<'a> = &'a (dyn Fn(&gh::Run) + Send + Sync);
 
 /// Wait for the Fabricator workflow run for `sha` (triggered by `event`) to
 /// finish. A run that a newer run for the same commit cancelled is replaced by
-/// that newer run. `Ok(None)` when no run starts within three minutes.
+/// that newer run. A draft pull request's run deploys nothing, so it never
+/// counts: marking the pull request ready starts the one that does.
+/// `Ok(None)` when no run starts within three minutes.
 pub(crate) async fn wait_for_run(
   full_name: &str,
   sha: &str,
@@ -216,13 +239,13 @@ pub(crate) async fn wait_for_run(
     let mut found: Option<gh::Run> = None;
     for _ in 0..polls {
       if let Ok(runs) = gh::runs_for_sha(full_name, sha).await {
-        found = runs.into_iter().find(|r| r.event == event && r.id > after);
+        found = runs.into_iter().find(|r| r.event == event && r.id > after && !r.is_draft());
       }
       if found.is_some() {
         break;
       }
       if sleep_or_cancel(5_000, cancel).await {
-        return Err(CANCELLED.into());
+        return Err(cancelled());
       }
     }
     let Some(run) = found else { return Ok(last) };
@@ -249,13 +272,13 @@ pub(crate) async fn finish_run(
       return Ok(run);
     }
     if sleep_or_cancel(6_000, cancel).await {
-      return Err(CANCELLED.into());
+      return Err(cancelled());
     }
     if let Ok(next) = gh::run(full_name, run.id).await {
       run = next;
     }
   }
-  Err(format!("The pipeline run is taking unusually long. Follow it on GitHub: {}", run.url))
+  Err(t!("team.runTooLong", url = run.url))
 }
 
 /* ------------------------------ prerequisites ----------------------------- */
@@ -294,7 +317,7 @@ pub async fn team_env_status(account: Option<String>) -> TeamEnvStatus {
     }
     Err(e) => {
       status.gh_installed = !e.missing_cli;
-      status.error = Some(e.describe("Check your GitHub sign-in"));
+      status.error = Some(e.describe(&t!("team.actions.checkSignIn")));
     }
   }
   if let Ok((tenant, user)) = azure {
@@ -339,7 +362,7 @@ pub async fn team_github_signin(signed_in: bool, delete_repo: Option<bool>, acco
     return ProcResult {
       ok: false,
       exit_code: None,
-      error: Some("The GitHub CLI (gh) isn't installed. Install it from setup, then try again.".into()),
+      error: Some(t!("team.signin.missingCli")),
     };
   }
   forget_viewer();
@@ -365,7 +388,7 @@ pub async fn team_github_signin(signed_in: bool, delete_repo: Option<bool>, acco
   ProcResult {
     ok,
     exit_code: None,
-    error: (!ok).then(|| format!("Couldn't open a terminal. Run `{cmd}` yourself, then come back.")),
+    error: (!ok).then(|| t!("team.signin.noTerminal", command = cmd)),
   }
 }
 
@@ -376,7 +399,7 @@ pub async fn team_owners(account: Option<String>) -> TeamOwnersResult {
   gh::as_account(account, async {
     match gh::owners().await {
       Ok(owners) => TeamOwnersResult { ok: true, error: None, owners },
-      Err(e) => TeamOwnersResult { ok: false, error: Some(e.describe("List your GitHub accounts")), owners: vec![] },
+      Err(e) => TeamOwnersResult { ok: false, error: Some(e.describe(&t!("team.actions.listAccounts"))), owners: vec![] },
     }
   })
   .await
@@ -393,7 +416,7 @@ pub async fn team_repos(account: Option<String>) -> TeamReposResult {
         error: None,
         repos: repos.into_iter().map(|r| TeamRepoChoice { full_name: r.full_name, description: r.description }).collect(),
       },
-      Err(e) => TeamReposResult { ok: false, error: Some(e.describe("List your repositories")), repos: vec![] },
+      Err(e) => TeamReposResult { ok: false, error: Some(e.describe(&t!("team.actions.listRepos"))), repos: vec![] },
     }
   })
   .await
@@ -407,7 +430,7 @@ pub async fn team_capacities() -> FabricCapacitiesResult {
       ok: false,
       capacities: None,
       needs_login: e.needs_login.then_some(true),
-      error: Some(e.describe("List your Fabric capacities")),
+      error: Some(e.describe(&t!("team.actions.listCapacities"))),
     },
   }
 }

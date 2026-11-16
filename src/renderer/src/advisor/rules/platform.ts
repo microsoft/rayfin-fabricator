@@ -2,9 +2,15 @@ import type { AdvisorSeverity } from '@shared/ipc'
 import { severityRank } from '@shared/advisor/catalog'
 import { parseClasses } from '../../model/parseSchema'
 import { isUnder } from '../../model/projectLayout'
-import { matchesWorkspace, workspacePatterns, type QuickContext } from '../context'
-import type { QuickHit, QuickRuleImpl } from '../quick'
-import { listLabels } from '../quick'
+import {
+  matchesWorkspace,
+  workspacePatterns,
+  type LocalSdk,
+  type LocalSdkLine,
+  type QuickContext
+} from '../context'
+import type { QuickHit, QuickRuleImpl, Words } from '../quick'
+import { listLabels, say } from '../quick'
 import {
   compareSemver,
   importsOf,
@@ -18,7 +24,8 @@ import {
   spanIncludes,
   yamlKeyLine,
   type SemverCore,
-  type SourceFile
+  type SourceFile,
+  type VersionSpan
 } from '../source'
 import { CODE_FILE, code, lineContaining, packageLine, regexHits } from './util'
 
@@ -46,9 +53,6 @@ const LOCAL_CONNECTOR_TYPES = new Set([
   'fabric-warehouse',
   'fabric-sqlanalytics'
 ])
-/** What happens to an app with a connector the local preview can't call. */
-const FABRIC_ONLY_THEN =
-  "Until the app is published, those calls fail; after that, the preview uses the published app's backend."
 /** Ranges that let npm pick another release than the CLI's; a `~` range that keeps the minor is fine. */
 const LOOSE_RANGE = /^[\^><=*]|^(latest|preview|next|experimental)$|\.(x|\*)(\.|$)/i
 const TILDE_RANGE = /^~\s*v?\d+\.\d+(\.\d+(-[0-9A-Za-z.-]+)?)?$/
@@ -88,10 +92,40 @@ function outdatedSeverity(installed: SemverCore, latest: SemverCore): AdvisorSev
   return 'low'
 }
 
-/** A release newer than the local backend runs: no update for an app it runs, until Fabricator supports it. */
+/** The line of releases the local backend runs that `version` is on, if any. */
+function localLineOf(local: LocalSdk, version: SemverCore): LocalSdkLine | undefined {
+  return local.lines.find((line) => spanIncludes(line.span, version))
+}
+
+/** A release the local backend doesn't run: no update to it for an app it runs. */
 function beyondLocal(ctx: QuickContext, version: SemverCore): boolean {
-  const hi = ctx.localSdk?.span.hi
-  return Boolean(hi && compareSemver(version, hi) >= 0)
+  return Boolean(ctx.localSdk && !localLineOf(ctx.localSdk, version))
+}
+
+/**
+ * A release the local backend doesn't run that's newer than one it does, such
+ * as 1.37 or 2.1 while it runs 1.36 and 2.0. It runs the app anyway, and the
+ * preview says some things might not work, so that's the user's choice.
+ */
+function newerThanLocal(local: LocalSdk, version: SemverCore): boolean {
+  return !localLineOf(local, version) && compareSemver(version, local.lines[0].span.lo) > 0
+}
+
+/** The line the app's Rayfin (core, else CLI) is on, else the oldest one the local backend runs. */
+function appLine(ctx: QuickContext, local: LocalSdk): LocalSdkLine {
+  const core = semverCore(
+    ctx.packages.find((p) => p.name === '@microsoft/rayfin-core')?.installed ??
+      ctx.packages.find((p) => p.name === CLI)?.installed
+  )
+  return (core && localLineOf(local, core)) || local.lines[0]
+}
+
+/** Whether two spans share a release. */
+function overlaps(a: VersionSpan, b: VersionSpan): boolean {
+  return (
+    (a.hi === null || compareSemver(b.lo, a.hi) < 0) &&
+    (b.hi === null || compareSemver(a.lo, b.hi) < 0)
+  )
 }
 
 /** Whether a dependency spec asks the registry for a version, not a file, link, git or alias source. */
@@ -149,6 +183,17 @@ function short(name: string): string {
   return name.replace('@microsoft/', '')
 }
 
+/** The Rayfin releases Fabricator's local backend runs, as a phrase in `w`'s language. */
+function localReleases(w: Words, local: LocalSdk | null): string {
+  const lines = local ? w.list(local.lines.map((line) => line.label)) : ''
+  return w.t('platform/sdk-local-range.runs', { lines })
+}
+
+/** `first`, then `second` when there is one, in `w`'s language. */
+function thenSay(w: Words, first: string, second: string | null): string {
+  return second ? w.t('common.sentences', { first, second }) : first
+}
+
 /** 1-based line of a connector's entry in rayfin.yml. */
 function connectorLine(text: string, name: string): number | undefined {
   return (
@@ -174,7 +219,9 @@ export const platformRules: QuickRuleImpl[] = [
           line: packageLine(ctx, CLI),
           label: `${pkg.installed} → ${pkg.latest}`,
           severity: outdatedSeverity(installed, latest),
-          message: `The Rayfin CLI is on ${pkg.installed}; ${pkg.latest} is the latest release.`
+          ...say((w) =>
+            w.t('platform/cli-outdated.hit', { installed: pkg.installed, latest: pkg.latest })
+          )
         }
       ]
     }
@@ -210,7 +257,13 @@ export const platformRules: QuickRuleImpl[] = [
           line: packageLine(ctx, lowest.name),
           label: `${lowest.version} → ${newest.version}`,
           severity: outdatedSeverity(lowest.core, newest.core),
-          message: `The Rayfin SDK is on ${lowest.version} (${short(lowest.name)}); ${newest.version} is the latest release.`
+          ...say((w) =>
+            w.t('platform/sdk-outdated.hit', {
+              installed: lowest.version,
+              package: short(lowest.name),
+              latest: newest.version
+            })
+          )
         }
       ]
     }
@@ -225,13 +278,13 @@ export const platformRules: QuickRuleImpl[] = [
       if (counts.size <= 1) return []
       const common = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0]
       const odd = installed.filter((p) => p.installed !== common)
-      const list = installed.map((p) => `${short(p.name)} ${p.installed}`).join(', ')
+      const versions = installed.map((p) => `${short(p.name)} ${p.installed}`)
       return [
         {
           file: 'package.json',
           line: packageLine(ctx, odd[0].name) ?? packageLine(ctx, installed[0].name),
           label: odd.map((p) => short(p.name)).join(', '),
-          message: `Rayfin SDK packages are installed at different versions: ${list}.`
+          ...say((w) => w.t('platform/sdk-lockstep.hit', { packages: w.join(versions) }))
         }
       ]
     }
@@ -247,21 +300,33 @@ export const platformRules: QuickRuleImpl[] = [
       if (declared.length === 0 && installed.length === 0) return 'na'
       const local = ctx.localSdk
       if (!local) return 'skipped'
-      const { span } = local
-      const runs = `Rayfin ${local.label}, the releases Fabricator runs on this computer`
-      const pinIt = local.pin ? ` Pin it to ${code(local.pin)}.` : ''
-      const classify = (spec: string): 'ok' | 'outside' | 'newer' => {
+      const home = appLine(ctx, local)
+      /** `first`, then how to keep the package on `line`, when it can be pinned. */
+      const pinIt = (w: Words, first: string, line: LocalSdkLine): string =>
+        thenSay(
+          w,
+          first,
+          line.pin ? w.t('platform/sdk-local-range.pinIt', { pin: code(line.pin) }) : null
+        )
+      /**
+       * `ok`: it stays on one line the local backend runs. `loose`: a tag, or a
+       * range that reaches past the line it's on (`line`), so npm installs the
+       * newest release it allows. `older`: it can't install a line, and is
+       * older. `newer`: it's past them, which the user chose: the app runs
+       * anyway, and the preview says some things might not work.
+       */
+      const classify = (
+        spec: string
+      ): { kind: 'ok' | 'loose' | 'older' | 'newer'; line: LocalSdkLine } => {
         const s = npmRangeSpan(spec)
-        if (
-          s &&
-          ((s.hi !== null && compareSemver(s.hi, span.lo) <= 0) ||
-            (span.hi !== null && compareSemver(s.lo, span.hi) >= 0))
-        ) {
-          return 'outside'
-        }
-        // A tag, or a range that reaches past the line: npm installs the newest release it allows.
-        if (span.hi === null) return 'ok'
-        return !s || s.hi === null || compareSemver(s.hi, span.hi) > 0 ? 'newer' : 'ok'
+        if (!s) return { kind: 'loose', line: home }
+        const on = local.lines.filter((line) => overlaps(s, line.span))
+        if (on.length === 0)
+          return { kind: newerThanLocal(local, s.lo) ? 'newer' : 'older', line: home }
+        const line = on[on.length - 1]
+        const past =
+          s.hi === null || (line.span.hi !== null && compareSemver(s.hi, line.span.hi) > 0)
+        return { kind: past ? 'loose' : 'ok', line }
       }
       // One hit per package: its most severe problem, the declaration's on a tie.
       const worst = new Map<string, QuickHit>()
@@ -271,40 +336,68 @@ export const platformRules: QuickRuleImpl[] = [
         worst.set(name, hit)
       }
       for (const d of declared) {
-        const problem = classify(d.spec)
-        if (problem === 'ok') continue
+        const { kind, line } = classify(d.spec)
+        if (kind === 'ok' || kind === 'newer') continue
         add(d.name, {
           file: d.file,
           line: jsonKeyLine(ctx.file(d.file)?.text ?? '', d.name),
           label: `${short(d.name)} ${d.spec}`,
-          severity: problem === 'outside' ? 'medium' : 'low',
-          message:
-            problem === 'outside'
-              ? `${code(d.name)} is declared as ${code(d.spec)}, which can't install ${runs}.${pinIt}`
-              : `${code(d.name)} is declared as ${code(d.spec)}, so the next install can move it past ${runs}.${pinIt}`
+          severity: kind === 'older' ? 'medium' : 'low',
+          ...say((w) => {
+            const values = { package: code(d.name), spec: code(d.spec) }
+            const first =
+              kind === 'older'
+                ? w.t('platform/sdk-local-range.older', {
+                    ...values,
+                    runs: localReleases(w, local)
+                  })
+                : w.t('platform/sdk-local-range.loose', { ...values, line: line.label })
+            return pinIt(w, first, line)
+          })
         })
       }
       for (const p of installed) {
         const core = semverCore(p.installed)
-        if (!core || spanIncludes(span, core)) continue
+        if (!core || localLineOf(local, core)) continue
         const specs = declared.filter((d) => d.name === p.name)
-        const pinned = specs.length > 0 && specs.every((d) => classify(d.spec) === 'ok')
+        const pinned = specs.length > 0 && specs.every((d) => classify(d.spec).kind === 'ok')
+        if (!pinned && newerThanLocal(local, core)) continue
         add(p.name, {
           file: specs[0]?.file ?? 'package.json',
           line: specs[0] ? jsonKeyLine(ctx.file(specs[0].file)?.text ?? '', p.name) : undefined,
           label: `${short(p.name)} ${p.installed}`,
           severity: 'medium',
-          message: pinned
-            ? `${code(p.name)} is installed at ${p.installed}, outside ${runs}, although it's declared as ${code(specs[0].spec)}. Run ${code('npm install')} to bring it back.`
-            : `${code(p.name)} is installed at ${p.installed}, outside ${runs}.${pinIt}`
+          ...say((w) => {
+            const values = {
+              package: code(p.name),
+              version: p.installed,
+              runs: localReleases(w, local)
+            }
+            return pinned
+              ? w.t('platform/sdk-local-range.installedPinned', {
+                  ...values,
+                  spec: code(specs[0].spec),
+                  command: code('npm install')
+                })
+              : pinIt(w, w.t('platform/sdk-local-range.installedOutside', values), home)
+          })
         })
       }
       return [...worst.values()]
     },
     summarize: (hits, ctx) => {
       const local = ctx.localSdk
-      const pin = local?.pin ? ` Pin them to ${code(local.pin)}, and reinstall.` : ''
-      return `These Rayfin packages aren't on Rayfin ${local?.label ?? ''}, the releases Fabricator runs on this computer: ${listLabels(hits)}.${pin}`
+      const pin = local ? appLine(ctx, local).pin : null
+      return say((w) =>
+        thenSay(
+          w,
+          w.t('platform/sdk-local-range.summary', {
+            runs: localReleases(w, local),
+            packages: listLabels(hits, w)
+          }),
+          pin ? w.t('platform/sdk-local-range.pinThem', { pin: code(pin) }) : null
+        )
+      )
     }
   },
   {
@@ -315,18 +408,25 @@ export const platformRules: QuickRuleImpl[] = [
       for (const p of ctx.packages) {
         if (!CONNECTOR_PACKAGE.test(p.name) || !p.declared) continue
         const range = p.declared.trim()
-        let problem: string | undefined
+        let problem: 'range' | 'installed' | undefined
         if (range.startsWith('~') ? !TILDE_RANGE.test(range) : LOOSE_RANGE.test(range)) {
-          problem = `is declared as ${code(range)}, which can install a different release than the CLI's`
+          problem = 'range'
         } else if (cli && p.installed && p.installed !== cli) {
-          problem = `is installed at ${p.installed} while the CLI is ${cli}`
+          problem = 'installed'
         }
         if (!problem) continue
         hits.push({
           file: 'package.json',
           line: packageLine(ctx, p.name),
           label: short(p.name),
-          message: `${code(p.name)} ${problem}.`
+          ...say((w) =>
+            w.t(`platform/connector-version.${problem}`, {
+              package: code(p.name),
+              range: code(range),
+              installed: p.installed,
+              cli
+            })
+          )
         })
       }
       return hits
@@ -351,7 +451,16 @@ export const platformRules: QuickRuleImpl[] = [
             file: src.path,
             line,
             label: `${src.path} (${bad.join(', ')})`,
-            message: `${code(src.path)} ${stmt.reexport ? 're-exports' : 'imports'} ${code(bad.join(', '))} as values instead of with ${code(stmt.reexport ? 'export type' : 'import type')}.`
+            ...say((w) => {
+              const values = {
+                file: code(src.path),
+                names: code(bad.join(', ')),
+                typeOnly: code(stmt.reexport ? 'export type' : 'import type')
+              }
+              return stmt.reexport
+                ? w.t('platform/connector-schema-value-import.reexports', values)
+                : w.t('platform/connector-schema-value-import.imports', values)
+            })
           })
         }
       }
@@ -374,7 +483,14 @@ export const platformRules: QuickRuleImpl[] = [
             file: src.path,
             line,
             label: `${src.path}:${line}`,
-            message: `${code(src.path)} imports ${code('ConnectorsRayfinClient')} from ${code('@microsoft/rayfin-client/experimental')} instead of ${code('@microsoft/rayfin-client')}.`
+            ...say((w) =>
+              w.t('platform/connector-client-experimental-import.hit', {
+                file: code(src.path),
+                name: code('ConnectorsRayfinClient'),
+                experimental: code('@microsoft/rayfin-client/experimental'),
+                package: code('@microsoft/rayfin-client')
+              })
+            )
           })
         }
       }
@@ -399,12 +515,20 @@ export const platformRules: QuickRuleImpl[] = [
           const moved = stmt.named.filter((n) => n.name in MOVED_EXPORTS)
           if (moved.length === 0) continue
           const line = lineOf(src, stmt.index)
-          const homes = [...new Set(moved.map((n) => MOVED_EXPORTS[n.name]))].map(code).join(' and ')
+          const homes = [...new Set(moved.map((n) => MOVED_EXPORTS[n.name]))].map(code)
           hits.push({
             file: src.path,
             line,
             label: `${src.path}:${line}`,
-            message: `${code(src.path)} imports ${moved.map((n) => code(n.name)).join(', ')} from ${code(CORE_EXPERIMENTAL)}, which no longer exports them; they're in ${homes}.`
+            ...say((w) =>
+              w.t('platform/removed-experimental-import.hit', {
+                file: code(src.path),
+                names: w.join(moved.map((n) => code(n.name))),
+                module: code(CORE_EXPERIMENTAL),
+                homes: w.list(homes),
+                count: moved.length
+              })
+            )
           })
         }
       }
@@ -425,7 +549,13 @@ export const platformRules: QuickRuleImpl[] = [
           file: ctx.yml.path,
           line: connectorLine(ctx.yml.text, name),
           label: name,
-          message: `The ${code(type)} connector ${code(name)} uses ${code('auth.type: application')}, which isn't allowed for this connector type.`
+          ...say((w) =>
+            w.t('platform/connector-app-auth.hit', {
+              type: code(type),
+              connector: code(name),
+              setting: code('auth.type: application')
+            })
+          )
         })
       }
       return hits
@@ -445,13 +575,24 @@ export const platformRules: QuickRuleImpl[] = [
           file: ctx.yml.path,
           line: connectorLine(ctx.yml.text, name),
           label: `${name} (${type})`,
-          message: `${code(name)} is a ${code(type)} connector, which runs only on Fabric, so the local preview can't call it. ${FABRIC_ONLY_THEN}`
+          ...say((w) =>
+            w.t('platform/connector-fabric-only.hit', {
+              connector: code(name),
+              type: code(type),
+              outcome: w.t('platform/connector-fabric-only.outcome')
+            })
+          )
         })
       }
       return hits
     },
     summarize: (hits) =>
-      `These connectors run only on Fabric, so the local preview can't call them: ${listLabels(hits)}. ${FABRIC_ONLY_THEN}`
+      say((w) =>
+        w.t('platform/connector-fabric-only.summary', {
+          connectors: listLabels(hits, w),
+          outcome: w.t('platform/connector-fabric-only.outcome')
+        })
+      )
   },
   {
     id: 'platform/connector-orphaned-dir',
@@ -467,7 +608,11 @@ export const platformRules: QuickRuleImpl[] = [
         .map(([dir, file]) => ({
           file,
           label: dir,
-          message: `${code(`rayfin/connectors/${dir}/`)} has no matching connector in rayfin.yml.`
+          ...say((w) =>
+            w.t('platform/connector-orphaned-dir.hit', {
+              folder: code(`rayfin/connectors/${dir}/`)
+            })
+          )
         }))
     }
   },
@@ -485,7 +630,13 @@ export const platformRules: QuickRuleImpl[] = [
             file: src.path,
             line,
             label: `${src.path}:${line}`,
-            message: `${code(src.path)} imports ${code(wrong.map((n) => n.name).join(', '))} from ${code('@microsoft/rayfin-functions')}.`
+            ...say((w) =>
+              w.t('platform/functions-context-import.hit', {
+                file: code(src.path),
+                names: code(wrong.map((n) => n.name).join(', ')),
+                package: code('@microsoft/rayfin-functions')
+              })
+            )
           })
         }
       }
@@ -507,15 +658,24 @@ export const platformRules: QuickRuleImpl[] = [
             file: pkg.path,
             line: jsonKeyLine(pkg.text, 'mssql'),
             label: `mssql ${range}`,
-            message: `${code(pkg.path)} pins ${code(`mssql@${range}`)}, below 12.6.0.`
+            ...say((w) =>
+              w.t('platform/functions-mssql.pinned', {
+                file: code(pkg.path),
+                dependency: code(`mssql@${range}`)
+              })
+            )
           })
         }
       }
       hits.push(
-        ...regexHits(
-          functionsCode(ctx),
-          /encrypt\s*:\s*['"]strict['"]/,
-          (src) => `${code(src.path)} connects with ${code("encrypt: 'strict'")} instead of ${code('encrypt: true')}.`
+        ...regexHits(functionsCode(ctx), /encrypt\s*:\s*['"]strict['"]/, (src) =>
+          say((w) =>
+            w.t('platform/functions-mssql.strictEncrypt', {
+              file: code(src.path),
+              strict: code("encrypt: 'strict'"),
+              encrypt: code('encrypt: true')
+            })
+          )
         )
       )
       return hits
@@ -525,10 +685,13 @@ export const platformRules: QuickRuleImpl[] = [
     id: 'platform/functions-removed-audience',
     run: (ctx) => {
       if (!onRayfin136(ctx)) return 'na'
-      return regexHits(
-        functionsCode(ctx),
-        REMOVED_AUDIENCE,
-        (src, m) => `${code(src.path)} uses ${code(`AudienceType.${m[1]}`)}, which Rayfin 1.36 removed.`
+      return regexHits(functionsCode(ctx), REMOVED_AUDIENCE, (src, m) =>
+        say((w) =>
+          w.t('platform/functions-removed-audience.hit', {
+            file: code(src.path),
+            audience: code(`AudienceType.${m[1]}`)
+          })
+        )
       )
     }
   },
@@ -536,11 +699,14 @@ export const platformRules: QuickRuleImpl[] = [
     id: 'platform/functions-legacy-context-api',
     run: (ctx) => {
       if (!onRayfin136(ctx)) return 'na'
-      return regexHits(
-        functionsCode(ctx),
-        /\bctx\.(getToken|getSecret)\s*\(/,
-        (src, m) =>
-          `${code(src.path)} calls ${code(`ctx.${m[1]}()`)} instead of ${code(m[1] === 'getToken' ? 'ctx.Tokens.<Audience>' : 'ctx.Secrets.<NAME>')}.`
+      return regexHits(functionsCode(ctx), /\bctx\.(getToken|getSecret)\s*\(/, (src, m) =>
+        say((w) =>
+          w.t('platform/functions-legacy-context-api.hit', {
+            file: code(src.path),
+            call: code(`ctx.${m[1]}()`),
+            replacement: code(m[1] === 'getToken' ? 'ctx.Tokens.<Audience>' : 'ctx.Secrets.<NAME>')
+          })
+        )
       )
     }
   },
@@ -553,7 +719,7 @@ export const platformRules: QuickRuleImpl[] = [
           file: ctx.yml.path,
           line: yamlKeyLine(ctx.yml.text, ['services', 'functions']),
           label: 'functions',
-          message: `The ${code('functions')} service is enabled; it isn't available in every Fabric region or tenant.`
+          ...say((w) => w.t('platform/functions-availability.hit', { service: code('functions') }))
         }
       ]
     }
@@ -567,7 +733,7 @@ export const platformRules: QuickRuleImpl[] = [
           file: ctx.yml.path,
           line: yamlKeyLine(ctx.yml.text, ['services', 'storage']),
           label: 'storage',
-          message: `The experimental ${code('storage')} service is enabled.`
+          ...say((w) => w.t('platform/experimental-services.hit', { service: code('storage') }))
         }
       ]
     }
@@ -575,19 +741,25 @@ export const platformRules: QuickRuleImpl[] = [
   {
     id: 'platform/deprecated-fabric-callback',
     run: (ctx) => {
-      const hits = regexHits(
-        ctx.frontend,
-        /\bbridgeFabricCallback\s*\(/,
-        (src) => `${code(src.path)} calls the deprecated ${code('bridgeFabricCallback()')}.`
+      const hits = regexHits(ctx.frontend, /\bbridgeFabricCallback\s*\(/, (src) =>
+        say((w) =>
+          w.t('platform/deprecated-fabric-callback.bridge', {
+            file: code(src.path),
+            function: code('bridgeFabricCallback()')
+          })
+        )
       )
       const usesProvider = ctx.frontend.filter((src) =>
         importsOf(src.masked).some((s) => s.from === FABRIC_PROVIDER)
       )
       hits.push(
-        ...regexHits(
-          usesProvider,
-          /\bcallbackUrl\s*:/,
-          (src) => `${code(src.path)} passes the deprecated ${code('callbackUrl')} option.`
+        ...regexHits(usesProvider, /\bcallbackUrl\s*:/, (src) =>
+          say((w) =>
+            w.t('platform/deprecated-fabric-callback.callbackUrl', {
+              file: code(src.path),
+              option: code('callbackUrl')
+            })
+          )
         )
       )
       return hits
@@ -601,7 +773,9 @@ export const platformRules: QuickRuleImpl[] = [
       return [
         {
           label: '.agents/skills/rayfin/SKILL.md',
-          message: `${code('.agents/skills/rayfin/SKILL.md')} isn't installed, so coding agents don't get version-matched Rayfin guidance.`
+          ...say((w) =>
+            w.t('platform/ai-files-missing.hit', { file: code('.agents/skills/rayfin/SKILL.md') })
+          )
         }
       ]
     }

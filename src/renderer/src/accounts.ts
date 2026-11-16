@@ -1,4 +1,5 @@
 import type { AuthStatus } from '@shared/ipc'
+import { translator } from './i18n'
 
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -28,7 +29,10 @@ export function tenantLabel(
 ): string | undefined {
   const id = tenant?.trim()
   if (!id) return undefined
-  return tenantName(id, ...known) ?? (GUID.test(id) ? `Tenant ${id.slice(0, 8)}…` : id)
+  return (
+    tenantName(id, ...known) ??
+    (GUID.test(id) ? translator('accounts')('tenantShort', { id: id.slice(0, 8) }) : id)
+  )
 }
 
 /** Fabric and the Azure CLI are both signed in, to different tenants. */

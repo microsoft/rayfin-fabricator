@@ -128,7 +128,7 @@ const INSTALLED: AdvisorPackage[] = [
 ]
 
 /** The Rayfin releases the bundled local backend runs, as `rayfin-local.json` says. */
-export const LOCAL_SDK_RANGE = '>=1.36.0 <1.37.0'
+export const LOCAL_SDK_RANGE = '>=1.36.0-0 <1.37.0 || >=2.0.0-0 <2.1.0'
 
 export function versionInfo(installed = '1.36.2', latest = '1.36.2'): RayfinVersionInfo {
   const pkg = (name: string, kind: 'cli' | 'sdk'): RayfinPackageVersion => ({
@@ -158,7 +158,7 @@ export interface FixtureOptions {
   listed?: string[]
   packages?: AdvisorPackage[]
   isGitRepo?: boolean
-  /** The local backend's supported range (default {@link LOCAL_SDK_RANGE}); `null` for an app it doesn't run, such as a team app. */
+  /** The local backend's supported range (default {@link LOCAL_SDK_RANGE}); `null` for an app it doesn't run. */
   localSdkRange?: string | null
 }
 

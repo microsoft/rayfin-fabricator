@@ -26,10 +26,6 @@ pub struct AppState {
   explain_cancels: Mutex<HashMap<String, CancelToken>>,
   /// Active Advisor verify cancel tokens, keyed by `projectId` (one verify per project).
   verify_cancels: Mutex<HashMap<String, CancelToken>>,
-  /// Goals runs checking an app against its goals, keyed by `projectId` (one per project).
-  goals_cancels: Mutex<HashMap<String, CancelToken>>,
-  /// Copilot drafting an app's goals, keyed by `projectId` (one per project).
-  goals_draft_cancels: Mutex<HashMap<String, CancelToken>>,
   /// Long team operations (publish, setup verification), keyed by project or workspace id.
   team_cancels: Mutex<HashMap<String, CancelToken>>,
   /// Report migrations gathering their material in the background, keyed by `projectId`.
@@ -212,6 +208,28 @@ impl PlanGate {
       .map(|p| (p.request_id.clone(), p.allow_freeform))
   }
 
+  /// Like [`Self::register_pending_question`], but only while no other question
+  /// awaits an answer for this session, so it never displaces one (an `ask_user`
+  /// card, say): `None` while one does. A question nobody waits for anymore
+  /// doesn't count.
+  pub fn try_register_pending_question(
+    &self,
+    session_id: &str,
+    request_id: &str,
+    allow_freeform: bool,
+  ) -> Option<oneshot::Receiver<Option<UserInputResponse>>> {
+    let mut pending = self.pending_questions.lock().unwrap();
+    if pending.get(session_id).is_some_and(|p| !p.tx.is_closed()) {
+      return None;
+    }
+    let (tx, rx) = oneshot::channel();
+    pending.insert(
+      session_id.to_string(),
+      PendingQuestion { request_id: request_id.to_string(), allow_freeform, tx },
+    );
+    Some(rx)
+  }
+
   /// Resolve a pending question by its request id with an answer (or `None`
   /// for "no answer available"). Returns `true` when a matching prompt was
   /// found and answered.
@@ -289,14 +307,18 @@ impl AppState {
     self.chat_cancels.lock().unwrap().contains_key(project_id)
   }
 
+  /// The cancel token of the project's chat turn in flight, if any, so work a
+  /// tool does for the turn stops with it.
+  pub fn chat_token(&self, project_id: &str) -> Option<CancelToken> {
+    self.chat_cancels.lock().unwrap().get(project_id).cloned()
+  }
+
   pub fn is_copilot_busy(&self) -> bool {
     !self.chat_cancels.lock().unwrap().is_empty()
       || !self.advisor_cancels.lock().unwrap().is_empty()
       || !self.suggest_cancels.lock().unwrap().is_empty()
       || !self.explain_cancels.lock().unwrap().is_empty()
       || !self.verify_cancels.lock().unwrap().is_empty()
-      || !self.goals_cancels.lock().unwrap().is_empty()
-      || !self.goals_draft_cancels.lock().unwrap().is_empty()
   }
 
   /// Register a fresh advisor-run cancel token for a project only if none is
@@ -520,79 +542,6 @@ impl AppState {
   pub fn migration_running(&self, project_id: &str) -> bool {
     self.migration_cancels.lock().unwrap().contains_key(project_id)
   }
-
-  /// Start a Goals run for a project, unless one is running or still stopping (then `None`).
-  pub fn try_begin_goals(&self, project_id: &str) -> Option<CancelToken> {
-    begin_in(&self.goals_cancels, project_id)
-  }
-
-  /// Release a Goals run's slot, only when it still holds `token`.
-  pub fn end_goals(&self, project_id: &str, token: &CancelToken) {
-    end_in(&self.goals_cancels, project_id, token);
-  }
-
-  /// A Goals run is going (or still stopping) for a project.
-  pub fn goals_running(&self, project_id: &str) -> bool {
-    self.goals_cancels.lock().unwrap().contains_key(project_id)
-  }
-
-  /// Stop a Goals run. Its slot stays taken until the run has stopped its
-  /// copy of the app and removed it ([`Self::end_goals`]), so a new run can't
-  /// start beside it. Returns true when one was running.
-  pub fn cancel_goals(&self, project_id: &str) -> bool {
-    signal_in(&self.goals_cancels, project_id)
-  }
-
-  /// Start drafting a project's goals, unless a draft is running (then `None`).
-  pub fn try_begin_goals_draft(&self, project_id: &str) -> Option<CancelToken> {
-    begin_in(&self.goals_draft_cancels, project_id)
-  }
-
-  /// Release a draft's slot, only when it still holds `token`.
-  pub fn end_goals_draft(&self, project_id: &str, token: &CancelToken) {
-    end_in(&self.goals_draft_cancels, project_id, token);
-  }
-
-  /// Stop drafting a project's goals. Returns true when a draft was running.
-  pub fn cancel_goals_draft(&self, project_id: &str) -> bool {
-    signal_in(&self.goals_draft_cancels, project_id)
-  }
-
-  /// Stop every Goals run and draft (Fabricator's window closed).
-  pub fn cancel_all_goals(&self) {
-    for map in [&self.goals_cancels, &self.goals_draft_cancels] {
-      for token in map.lock().unwrap().values() {
-        token.cancel();
-      }
-    }
-  }
-}
-
-fn begin_in(map: &Mutex<HashMap<String, CancelToken>>, key: &str) -> Option<CancelToken> {
-  let mut map = map.lock().unwrap();
-  if map.contains_key(key) {
-    return None;
-  }
-  let token = CancelToken::new();
-  map.insert(key.to_string(), token.clone());
-  Some(token)
-}
-
-fn end_in(map: &Mutex<HashMap<String, CancelToken>>, key: &str, token: &CancelToken) {
-  let mut map = map.lock().unwrap();
-  if map.get(key).is_some_and(|t| t.same(token)) {
-    map.remove(key);
-  }
-}
-
-fn signal_in(map: &Mutex<HashMap<String, CancelToken>>, key: &str) -> bool {
-  match map.lock().unwrap().get(key) {
-    Some(token) => {
-      token.cancel();
-      true
-    }
-    None => false,
-  }
 }
 
 #[cfg(test)]
@@ -675,6 +624,24 @@ mod tests {
     let _rx = gate.register_pending_question("sess-1", "q-1", false);
     let owner = gate.question_owner("q-1").expect("owner");
     assert!(!owner.allow_freeform);
+  }
+
+  #[test]
+  fn a_question_that_waits_its_turn_never_displaces_another() {
+    let gate = PlanGate::default();
+    gate.set_route("sess-1", route("proj-1", "turn-1", false));
+    let mut asked = gate.register_pending_question("sess-1", "q-1", true);
+    assert!(gate.try_register_pending_question("sess-1", "q-2", false).is_none());
+    assert_eq!(gate.pending_question("sess-1"), Some(("q-1".to_string(), true)));
+
+    assert!(gate.resolve_question("q-1", Some(UserInputResponse { answer: "yes".into(), was_freeform: true })));
+    assert_eq!(asked.try_recv().expect("resolved").expect("answered").answer, "yes");
+    let next = gate.try_register_pending_question("sess-1", "q-2", false).expect("its turn");
+    assert_eq!(gate.pending_question("sess-1"), Some(("q-2".to_string(), false)));
+
+    // A question nobody waits for anymore doesn't hold up the next one.
+    drop(next);
+    assert!(gate.try_register_pending_question("sess-1", "q-3", false).is_some());
   }
 
   #[test]

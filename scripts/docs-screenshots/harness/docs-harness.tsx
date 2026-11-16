@@ -20,8 +20,6 @@ import type {
   FileNode,
   GalleryApp,
   GalleryStatus,
-  GoalResult,
-  GoalsSnapshot,
   LocalColumn,
   LocalEntity,
   LocalIdentity,
@@ -75,6 +73,7 @@ import AccountMenu from './components/AccountMenu'
 import AccountsModal from './components/AccountsModal'
 import SettingsModal from './components/SettingsModal'
 import ChatDefaultsModal from './components/ChatDefaultsModal'
+import CustomInstructionsModal from './components/CustomInstructionsModal'
 import BlueprintTab from './components/blueprint/BlueprintTab'
 import { ModelPicker } from './components/models/ModelPicker'
 import { AddMenu, PluginsMenu } from './components/chat/ComposerMenus'
@@ -85,14 +84,17 @@ import MigrateReportScreen from './components/migrate/MigrateReportScreen'
 import MigrationCard from './components/migrate/MigrationCard'
 import AppGalleryView from './components/gallery/AppGalleryView'
 import McpServersModal from './components/mcp/McpServersModal'
-import GoalsView from './components/goals/GoalsView'
-import type { GoalsController } from './goals/store'
-import { AUTO_SELECTION } from './modelSelection'
 import Spotlight from './components/spotlight/Spotlight'
 import { workbenchSearch } from './components/spotlight/workbenchSearch'
 import type { DataSource } from './fabricData'
 import type { ModelSelection } from './modelSelection'
+import { PickTray } from './pick/PickTray'
+import { readFabricatorTheme } from './pick/hostTheme'
+import type { PickedElement, TouchUp } from './pick/useTouchUp'
+import { ImageMarkup } from './components/chat/ImageMarkup'
 import './components/chat/chat.css'
+// Touch Up's agent, the one the preview injects, run in the sample app's frame.
+import pickAgent from '../../../src-tauri/src/services/pick_agent.js?raw'
 // Search floats over the app: the workbench screenshot is the app behind it.
 import workbenchDark from '../../../website/public/screenshots/workbench.webp'
 import workbenchLight from '../../../website/public/screenshots/workbench.light.webp'
@@ -1351,7 +1353,8 @@ function installApi(): void {
     },
     // What the app reads at launch: the sample settings.
     settings: {
-      get: () => Promise.resolve(sampleSettings())
+      get: () => Promise.resolve(sampleSettings()),
+      systemLanguage: () => Promise.resolve('en')
     },
     projects: {
       // Settings shows where new projects go.
@@ -1463,13 +1466,29 @@ const project: StudioProject = {
 const teamStatus: TeamSessionStatus = {
   ok: true,
   branch: 'fabricator/averychen/trips-20261003-225801',
+  // Published and waiting for a teammate's approval: the pull request is ready
+  // for review, so its preview is deployed for the latest save.
+  pr: {
+    number: 42,
+    url: 'https://example.invalid/pull/42',
+    draft: false,
+    state: 'open',
+    title: 'Trips: Add a trip budget',
+    author: 'averychen',
+    headSha: 'a1b2c3d',
+    approvals: 0
+  },
   unpublished: 2,
   dirty: false,
   behind: 1,
   conflicted: false,
   requireReview: true,
-  view: 'preview',
-  preview: { environment: 'preview/trips/averychen', state: 'success', url: 'https://example.invalid/trips' },
+  preview: {
+    environment: 'preview/trips/averychen',
+    state: 'success',
+    url: 'https://example.invalid/trips',
+    sha: 'a1b2c3d'
+  },
   production: { environment: 'production/trips', state: 'success', url: 'https://example.invalid/trips' }
 } as TeamSessionStatus
 
@@ -1515,6 +1534,7 @@ function SearchShot(): JSX.Element {
     theme: light ? 'light' : 'dark',
     uiScale: 1,
     fabricSignedIn: true,
+    canSignInToFabric: true,
     modKey: 'Ctrl',
     deployFailed: false,
     advisorIssues: 0,
@@ -1699,14 +1719,14 @@ function Steps({ clicks, children }: { clicks: string[]; children: ReactNode }):
 /** The Build chat's composer, chat-wide beside an empty preview, with its plugins and model
  *  picker (and any Fabric data waiting to go with the next message, or a banner above it, such
  *  as a report migration's card). `plugins` are on; `workIq` offers Work IQ, as its experiment does,
- *  and `servers` are the MCP servers the MCP servers experiment offers. */
+ *  and `servers` are the MCP servers the user added. */
 function ComposerPicker({
   value,
   data,
   banner,
   plugins = [],
   workIq = false,
-  servers,
+  servers = [],
   project = 'Contoso Expenses'
 }: {
   value: ModelSelection
@@ -1742,13 +1762,13 @@ function ComposerPicker({
               <div className="composer-left">
                 <AddMenu attaching={false} onImage={noop} onConnectData={noop} onBrowse={noop} />
                 <PluginsMenu
-                  plugins={offeredPlugins({ workIq, mcpServers: Boolean(servers) })}
+                  plugins={offeredPlugins({ workIq })}
                   servers={servers}
                   on={on}
                   onToggle={(id, value) =>
                     setOn((ids) => (value ? [...ids, id] : ids.filter((i) => i !== id)))
                   }
-                  onManageServers={servers ? noop : undefined}
+                  onManageServers={noop}
                   onLearnMore={noop}
                 />
                 <ModelPicker value={selection} disabled={false} onChange={setSelection} tiers onManageKeys={noop} />
@@ -1827,141 +1847,11 @@ function SettingsShot({ experiments = false }: { experiments?: boolean }): JSX.E
       onClose={noop}
       onManageAccounts={noop}
       onManageKeys={noop}
+      onManageMcpServers={noop}
       onManageChatDefaults={noop}
+      onManageCustomInstructions={noop}
       onReviewSetup={noop}
     />
-  )
-}
-
-/**
- * The sample app's Goals tab after a run: three checks passed, one failed and one not proven.
- * The failed one is open on what Copilot found and the calls it made: Report allows anonymous
- * reads in the sample's data model, so signed out the app lists every report.
- */
-function GoalsShot(): JSX.Element {
-  const ranAt = new Date(Date.now() - 6 * 60_000).toISOString()
-  const checks = [
-    {
-      id: 'g1',
-      text: 'An employee can add an expense with an amount, date and category, then find it in their list.'
-    },
-    { id: 'g2', text: 'Someone who isn’t signed in can’t see any expenses, receipts or reports.' },
-    { id: 'g3', text: 'Employees see and change only their own expenses.' },
-    { id: 'g4', text: 'An employee can file an expense in a report, then find it there.' },
-    { id: 'g5', text: 'An employee can attach a photo of the receipt to an expense.' }
-  ]
-  const result = (
-    checkId: string,
-    status: GoalResult['status'],
-    summary: string,
-    evidence: string[] = [],
-    calls: string[] = []
-  ): GoalResult => ({
-    checkId,
-    check: checks.find((c) => c.id === checkId)?.text ?? '',
-    status,
-    summary,
-    calls,
-    evidence,
-    ranAt,
-    fingerprint: 'sample',
-    stale: false
-  })
-  const snapshot: GoalsSnapshot = {
-    exists: true,
-    purpose:
-      'Employees log what they spend for work, with a photo of each receipt, and file their expenses in reports such as October travel. Each employee sees and changes only their own expenses.',
-    checks,
-    results: [
-      result(
-        'g1',
-        'passed',
-        'Jordan added a $42.50 Meals expense for October 14, and it came back first in his list with its category.'
-      ),
-      result(
-        'g2',
-        'failed',
-        'Signed out, the app listed all 3 reports with their titles. Expenses and receipts were refused.',
-        [
-          'Signed out, reports returned October travel, Team offsite and Q4 software.',
-          "Report allows anonymous reads: @anonymous('read') in rayfin/data/Report.ts.",
-          'Expenses and receipts refused the same call: Not authorized.'
-        ],
-        [
-          'as anonymous (signed out): query { reports { items { title } } } → 200 {"data":{"reports":{"items":[{"title":"October travel"},{"title":"Team offsite"},{"title":"Q4 software"}]}}}',
-          'as anonymous (signed out): query { expenses { items { id amount } } } → 200 GraphQL error: Not authorized. (AUTH_NOT_AUTHORIZED)',
-          'as anonymous (signed out): query { receipts { items { id fileName } } } → 200 GraphQL error: Not authorized. (AUTH_NOT_AUTHORIZED)'
-        ]
-      ),
-      result(
-        'g3',
-        'passed',
-        'As Jordan, none of Avery’s expenses came back, and changing one of them by its ID was refused.'
-      ),
-      result(
-        'g4',
-        'passed',
-        'Jordan filed his expense in Team offsite, and it then came back with the report’s expenses.'
-      ),
-      result(
-        'g5',
-        'not-proven',
-        'Receipt photos go to the app’s file storage, which Copilot can’t reach by calling the app.'
-      )
-    ],
-    lastRun: {
-      ranAt,
-      durationMs: 228_000,
-      summary:
-        'Expenses stay with the employee who logged them, and adding and filing them works. Reports don’t: Report allows anonymous reads, so anyone with the app’s address can list every report’s title. Receipt photos go to file storage, which the calls can’t reach.',
-      checkIds: checks.map((c) => c.id),
-      all: true,
-      complete: true
-    },
-    allPassed: false,
-    cannotRun: null,
-    running: false
-  }
-  const goals: GoalsController = {
-    projectId: 'p2',
-    loading: false,
-    loadError: null,
-    snapshot,
-    run: {
-      running: false,
-      adopted: false,
-      startedAt: 0,
-      checkIds: null,
-      phase: null,
-      activity: [],
-      results: [],
-      stopping: false
-    },
-    runError: null,
-    dismissRunError: noop,
-    draft: { running: false, activity: [] },
-    draftError: null,
-    dismissDraftError: noop,
-    selection: AUTO_SELECTION,
-    setSelection: noop,
-    reload: () => Promise.resolve(snapshot),
-    save: noopAsync,
-    startRun: noop,
-    cancelRun: noop,
-    startDraft: () => Promise.resolve(null),
-    cancelDraft: noop
-  }
-  return (
-    <Steps clicks={['.gl-check--failed .gl-check-btn']}>
-      <GoalsView
-        project={{ ...project, id: 'p2', name: 'Contoso Expenses', team: undefined }}
-        goals={goals}
-        visible
-        chatBusy={false}
-        onFix={noop}
-        onOpenFile={noop}
-      />
-    </Steps>
   )
 }
 
@@ -1991,6 +1881,7 @@ function AccountsShot({ providers = false }: { providers?: boolean }): JSX.Eleme
         signingIn: false,
         signingOut: false,
         canRefresh: !providers,
+        canSignIn: true,
         onSignIn: noop,
         onSignOut: noop,
         onRefresh: noop
@@ -2184,6 +2075,7 @@ function Deployments(): JSX.Element {
               signingOut={false}
               refreshing={false}
               canRefresh
+              canSignIn
               onSignIn={noop}
               onSignOut={noop}
               onRefresh={noop}
@@ -2231,6 +2123,7 @@ function AccountMenuShot(): JSX.Element {
                 signingOut={false}
                 refreshing={false}
                 canRefresh
+                canSignIn
                 onSignIn={noop}
                 onSignOut={noop}
                 onRefresh={noop}
@@ -2273,8 +2166,9 @@ function Blueprint({ view = 'architecture' }: { view?: 'architecture' | 'data' |
 
 /**
  * The preview of the sample app running on this computer, in a preview-sized frame: its
- * toolbar with Local and Published, and the running local backend, whose output is open unless
- * `output` is false.
+ * toolbar with Local and Published, and the running local backend, with Output selected
+ * unless `output` is false. Output itself opens in the terminal panel, which this frame
+ * leaves out.
  */
 function LocalPreview({ output = true }: { output?: boolean }): JSX.Element {
   const local = useLocalBackend(expensesApp.id)
@@ -2310,8 +2204,404 @@ function LocalPreview({ output = true }: { output?: boolean }): JSX.Element {
   )
 }
 
+/** The sample app's dashboard, as the preview shows it, in the capture's theme. */
+function sampleAppPage(light: boolean): string {
+  const c = light
+    ? {
+        bg: '#f4f5f7',
+        card: '#ffffff',
+        line: '#e2e5ea',
+        txt: '#1b1e24',
+        dim: '#5d6573',
+        tile: '#e8eef8'
+      }
+    : {
+        bg: '#1c1e23',
+        card: '#23262c',
+        line: '#383c44',
+        txt: '#f1f3f6',
+        dim: '#a3a9b4',
+        tile: '#2c3038'
+      }
+  const bar = (name: string, pct: number, color: string, amount: string): string =>
+    `<div class="bar"><span>${name}</span><div class="track"><i style="width:${pct}%;background:${color}"></i></div><b>${amount}</b></div>`
+  return `<!doctype html><html><head><style>
+    html{overflow:hidden}
+    body{margin:0;font:14px/1.45 "Segoe UI",system-ui,sans-serif;background:${c.bg};color:${c.txt}}
+    header{display:flex;align-items:center;gap:14px;padding:16px 22px;border-bottom:1px solid ${c.line}}
+    .logo{width:40px;height:40px;border-radius:8px;background:#1f6fd1;color:#fff;display:grid;place-items:center;font-size:18px}
+    .name{font-size:20px;font-weight:600}.who{color:${c.dim};font-size:13px}
+    main{padding:22px;display:grid;gap:18px}
+    .card{background:${c.card};border:1px solid ${c.line};border-radius:12px;padding:18px 22px}
+    .cap{color:${c.dim};font-size:13px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;margin-bottom:12px}
+    .total{display:flex;align-items:center;gap:16px}
+    .spark{width:50px;height:50px;border-radius:8px;background:${c.tile};color:#3b8ef0;display:grid;place-items:center;font-size:22px}
+    .amount{font-size:32px;font-weight:700;letter-spacing:.01em}.count{color:${c.dim}}
+    .bar{display:grid;grid-template-columns:76px 1fr 84px;align-items:center;gap:10px;margin:12px 0}
+    .bar span{color:${c.dim};text-align:right}.bar b{font-weight:500;font-size:13px;color:${c.dim}}
+    .track i{display:block;height:24px;border-radius:2px}
+    .row{display:flex;align-items:center;justify-content:space-between}
+    .search{flex:1;border:1px solid ${c.line};border-radius:8px;padding:9px 12px;color:${c.dim};margin-right:12px}
+    button{border:0;border-radius:8px;padding:10px 16px;background:#1f6fd1;color:#fff;font:inherit;font-weight:600}
+  </style></head><body>
+    <header><div class="logo">&#9636;</div><div><div class="name">Team Expenses</div><div class="who">avery.chen@contoso.com</div></div></header>
+    <main>
+      <section class="card"><div class="cap">Total spent · October 2026</div>
+        <div class="total"><div class="spark">&#8599;</div><div><div class="amount" id="total">$2,352.64</div><div class="count">12 expenses this month</div></div></div></section>
+      <section class="card" id="chart"><div class="cap">Spending by category · October 2026</div>
+        ${bar('Travel', 82, '#1f6fd1', '$1,652.50')}${bar('Meals', 7, '#e07b00', '$129.15')}${bar('Software', 22, '#8b5cf6', '$448.00')}${bar('Office', 6, '#16a34a', '$122.99')}</section>
+      <section class="card"><div class="cap">Recent expenses</div><div class="row"><div class="search">Search notes</div><button>Add expense</button></div></section>
+    </main></body></html>`
+}
+
+/** A small picture for a chip: `draw` paints it on a card in the capture's theme. */
+function chipPicture(
+  draw: (ctx: CanvasRenderingContext2D, ink: string) => void,
+  w = 160,
+  h = 90
+): string {
+  const light = new URLSearchParams(location.search).get('theme') === 'light'
+  const canvas = document.createElement('canvas')
+  canvas.width = w
+  canvas.height = h
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return ''
+  ctx.fillStyle = light ? '#ffffff' : '#23262c'
+  ctx.fillRect(0, 0, w, h)
+  draw(ctx, light ? '#1b1e24' : '#f1f3f6')
+  return canvas.toDataURL('image/png')
+}
+
+/** The sample app's dashboard in the preview with Touch Up on: run the real agent, pick the
+ *  total and the chart, and rest the pointer on a bar. */
+function touchUpIn(frame: HTMLIFrameElement): void {
+  type Agent = { set: (mode: string, origin: string | null, options: unknown) => void }
+  const win = frame.contentWindow as
+    (Window & typeof globalThis & { __fabricatorPick?: Agent }) | null
+  const doc = frame.contentDocument
+  if (!win || !doc) return
+  win.eval(pickAgent)
+  win.__fabricatorPick?.set('direct', null, {
+    armed: true,
+    on: true,
+    theme: readFabricatorTheme(),
+    picks: []
+  })
+  const at = (el: Element | null, type: string): void => {
+    if (!el) return
+    const r = el.getBoundingClientRect()
+    el.dispatchEvent(
+      new win.PointerEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        button: 0,
+        clientX: r.left + r.width / 2,
+        clientY: r.top + r.height / 2
+      })
+    )
+  }
+  at(doc.getElementById('total'), 'pointerdown')
+  at(doc.getElementById('chart'), 'pointerdown')
+  at(doc.querySelector('#chart .bar:nth-of-type(3)'), 'pointermove')
+  // The capture shows where things land, not a badge popping in or the outline on its way.
+  const shadow = (
+    win.__fabricatorPick as unknown as { __test?: { shadow: () => ShadowRoot | null } }
+  )?.__test?.shadow()
+  const still = doc.createElement('style')
+  still.textContent = '*{animation:none!important;transition:none!important}'
+  shadow?.appendChild(still)
+}
+
+/** The sample app in a frame laid over the preview's body, where the native surface would be. */
+function SampleAppOverPreview({
+  onReady
+}: {
+  onReady: (frame: HTMLIFrameElement) => void
+}): JSX.Element | null {
+  const light = new URLSearchParams(location.search).get('theme') === 'light'
+  const [box, setBox] = useState<DOMRect | null>(null)
+  // Headless Edge lays the page out smaller than the window it captures, then grows it.
+  useEffect(() => {
+    const measure = (): void => {
+      const body = document.querySelector('.preview-body')
+      if (body) setBox(body.getBoundingClientRect())
+    }
+    const id = window.setTimeout(measure, 300)
+    window.addEventListener('resize', measure)
+    return () => {
+      window.clearTimeout(id)
+      window.removeEventListener('resize', measure)
+    }
+  }, [])
+  if (!box) return null
+  return (
+    <iframe
+      title="Team Expenses"
+      srcDoc={sampleAppPage(light)}
+      onLoad={(event) => onReady(event.currentTarget)}
+      style={{
+        position: 'fixed',
+        left: box.left,
+        top: box.top,
+        width: box.width,
+        height: box.height,
+        border: 0
+      }}
+    />
+  )
+}
+
+/**
+ * Touch Up on the sample app running on this computer: two picks in the preview and in the
+ * composer, with a clip beside them and a request typed, and the pointer resting on a bar.
+ */
+function TouchUpShot(): JSX.Element {
+  const local = useLocalBackend(expensesApp.id)
+  const [selection, setSelection] = useState<ModelSelection>({
+    model: 'claude-opus-5.5',
+    effort: 'high',
+    autoTier: '',
+    contextTier: ''
+  })
+  const [pictures] = useState(() => ({
+    total: chipPicture((ctx, ink) => {
+      ctx.fillStyle = ink
+      ctx.font = 'bold 30px Segoe UI'
+      ctx.fillText('$2,352.64', 12, 56)
+    }),
+    chart: chipPicture((ctx) => {
+      ;[
+        ['#1f6fd1', 120],
+        ['#e07b00', 18],
+        ['#8b5cf6', 40],
+        ['#16a34a', 14]
+      ].forEach(([color, w], i) => {
+        ctx.fillStyle = String(color)
+        ctx.fillRect(20, 10 + i * 19, Number(w), 13)
+      })
+    }),
+    clip: chipPicture((ctx, ink) => {
+      ctx.globalAlpha = 0.25
+      ctx.fillStyle = ink
+      ctx.fillRect(10, 12, 140, 22)
+      ctx.globalAlpha = 1
+      ctx.fillStyle = '#1f6fd1'
+      ctx.fillRect(112, 50, 38, 26)
+    })
+  }))
+  const picks: PickedElement[] = [
+    {
+      id: 'k1',
+      n: 1,
+      target: {
+        label: 'Text · $2,352.64',
+        role: 'text',
+        tag: 'div',
+        selector: '#total',
+        route: '/',
+        box: { w: 160, h: 46 }
+      },
+      shot: { path: 'C:/tmp/k1.png', thumb: pictures.total }
+    },
+    {
+      id: 'k2',
+      n: 2,
+      target: {
+        label: 'Card · Spending by category · October 2026',
+        role: 'card',
+        tag: 'section',
+        selector: '#chart',
+        route: '/',
+        box: { w: 720, h: 230 }
+      },
+      shot: { path: 'C:/tmp/k2.png', thumb: pictures.chart }
+    }
+  ]
+  const touchUp: TouchUp = {
+    available: true,
+    on: true,
+    picks,
+    toggle: noop,
+    stop: noop,
+    remove: noop,
+    focus: noop,
+    setShot: noop,
+    buildTurn: () => Promise.resolve(null),
+    finishSend: noop
+  }
+  const note = 'Make the total in 1 larger, and sort the bars in 2 from highest to lowest'
+  return (
+    // A fixed width: headless Edge lays the page out narrower than the window it captures, and the
+    // frame over the preview keeps the size it was measured at. Crop to the two columns.
+    <div style={{ flex: 1, display: 'grid', gridTemplateColumns: '600px 810px', minHeight: 0 }}>
+      <div className="chat" style={{ justifyContent: 'flex-end' }}>
+        <div className="composer">
+          <div className="composer-box">
+            <PickTray picks={picks} onRemove={noop} onOpen={noop} />
+            <div className="chat-attachments">
+              <div className="chat-attachment">
+                <button type="button" className="chat-attachment-open">
+                  <img src={pictures.clip} alt="Screenshot to send" />
+                </button>
+              </div>
+            </div>
+            <div className="composer-input-sizer" data-replicated-value={note}>
+              <div className="composer-highlight" aria-hidden="true">
+                {note}{' '}
+              </div>
+              <textarea className="composer-input" rows={1} value={note} readOnly />
+            </div>
+            <div className="composer-actions">
+              <div className="composer-left">
+                <AddMenu attaching={false} onImage={noop} onConnectData={noop} onBrowse={noop} />
+                <ModelPicker
+                  value={selection}
+                  disabled={false}
+                  onChange={setSelection}
+                  tiers
+                  onManageKeys={noop}
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          minHeight: 0,
+          borderLeft: '1px solid var(--border)'
+        }}
+      >
+        <PreviewPane
+          project={expensesApp}
+          deploy={undefined}
+          local={local}
+          view="local"
+          onViewChange={noop}
+          onDiagnoseLocal={noop}
+          onSendToChat={noop}
+          focused={false}
+          onToggleFocus={noop}
+          touchUp={touchUp}
+        />
+        <SampleAppOverPreview onReady={touchUpIn} />
+      </div>
+    </div>
+  )
+}
+
+/** The workbench screenshot's preview: the published sample app, below its toolbar. */
+function sampleAppClip(source: string): Promise<string> {
+  return new Promise((resolve) => {
+    const img = new Image()
+    img.onload = () => {
+      const w = img.naturalWidth
+      const h = img.naturalHeight
+      const [x, y, cw, ch] = [w * 0.503, h * 0.095, w * 0.487, h * 0.6]
+      const canvas = document.createElement('canvas')
+      canvas.width = Math.round(cw)
+      canvas.height = Math.round(ch)
+      canvas.getContext('2d')?.drawImage(img, x, y, cw, ch, 0, 0, canvas.width, canvas.height)
+      resolve(canvas.toDataURL('image/png'))
+    }
+    img.src = source
+  })
+}
+
+/**
+ * Drawing on a clip of the sample app: an arrow at the month's total, a box round the Meals
+ * bar and a yellow underline, drawn with the pointer as a person would.
+ */
+function TouchUpDrawShot(): JSX.Element {
+  const light = new URLSearchParams(location.search).get('theme') === 'light'
+  const [clip, setClip] = useState<string | null>(null)
+  useEffect(() => {
+    void sampleAppClip(light ? workbenchLight : workbenchDark).then(setClip)
+  }, [light])
+  useEffect(() => {
+    if (!clip) return
+    let alive = true
+    const wait = (ms: number): Promise<void> =>
+      new Promise((resolve) => window.setTimeout(resolve, ms))
+    const draw = async (): Promise<void> => {
+      await wait(900)
+      const ink = document.querySelector('.markup-ink')
+      if (!ink || !alive) return
+      const r = ink.getBoundingClientRect()
+      const point = (fx: number, fy: number): { clientX: number; clientY: number } => ({
+        clientX: r.left + r.width * fx,
+        clientY: r.top + r.height * fy
+      })
+      const key = async (k: string): Promise<void> => {
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true }))
+        await wait(120)
+      }
+      const stroke = async (path: [number, number][]): Promise<void> => {
+        const [first, ...rest] = path
+        ink.dispatchEvent(
+          new PointerEvent('pointerdown', {
+            bubbles: true,
+            button: 0,
+            pointerId: 1,
+            ...point(...first)
+          })
+        )
+        for (const p of rest)
+          ink.dispatchEvent(
+            new PointerEvent('pointermove', { bubbles: true, pointerId: 1, ...point(...p) })
+          )
+        const last = rest[rest.length - 1] ?? first
+        ink.dispatchEvent(
+          new PointerEvent('pointerup', { bubbles: true, pointerId: 1, ...point(...last) })
+        )
+        await wait(120)
+      }
+      // An arrow at the month's total, a box round the Meals bar, and a yellow underline.
+      await key('a')
+      await stroke([
+        [0.7, 0.2],
+        [0.55, 0.26],
+        [0.37, 0.325]
+      ])
+      await key('b')
+      await stroke([
+        [0.06, 0.685],
+        [0.2, 0.72],
+        [0.3, 0.748]
+      ])
+      await key('p')
+      await key('2')
+      const wave: [number, number][] = []
+      for (let i = 0; i <= 24; i++) wave.push([0.14 + i * 0.0088, 0.44 + Math.sin(i / 2) * 0.004])
+      await stroke(wave)
+      ;(document.activeElement as HTMLElement | null)?.blur()
+    }
+    void draw()
+    return () => {
+      alive = false
+    }
+  }, [clip])
+  return (
+    <>
+      <img
+        src={light ? workbenchLight : workbenchDark}
+        alt=""
+        style={{ position: 'fixed', inset: 0, width: '100%', height: '100%', objectFit: 'cover' }}
+      />
+      {clip && <ImageMarkup src={clip} label="Screenshot" onDone={noop} onCancel={noop} />}
+    </>
+  )
+}
+
 function Shot({ id }: { id: string | null }): JSX.Element {
   switch (id) {
+    case 'touch-up':
+      return <TouchUpShot />
+    case 'touch-up-draw':
+      return <TouchUpDrawShot />
     case 'local-data':
       return <Blueprint view="local-data" />
     case 'preview-local':
@@ -2337,7 +2627,6 @@ function Shot({ id }: { id: string | null }): JSX.Element {
               onUpdate={noop}
               onCombine={noop}
               onDiscard={noop}
-              onSetView={noop}
               onViewLogs={noop}
               onRefresh={noop}
             />
@@ -2488,7 +2777,7 @@ function Shot({ id }: { id: string | null }): JSX.Element {
     case 'connect-data':
       return <ConnectDataShot />
     case 'mcp-plugins':
-      // The MCP servers experiment is on: Charts is on in the sample app's chat, beside Fabric IQ.
+      // Charts is on in the sample app's chat, beside Fabric IQ.
       return (
         <Steps clicks={['.plugins-menu button']}>
           <ComposerPicker
@@ -2522,19 +2811,33 @@ function Shot({ id }: { id: string | null }): JSX.Element {
       return <SettingsShot />
     case 'settings-experiments':
       return <SettingsShot experiments />
-    case 'goals':
-      return <GoalsShot />
     case 'chat-defaults':
       // The sample user's new apps start on Claude Opus 5.5 with Fabric IQ and Charts on.
       return (
         <Unfocused>
           <ChatDefaultsModal
             defaults={{ model: 'claude-opus-5.5', effort: 'high', plugins: ['fabric-iq', 'mcp:charts'] }}
-            experiments={{ workIq: true, mcpServers: true }}
+            experiments={{ workIq: true }}
             onChange={noop}
             onClose={noop}
             onManageKeys={noop}
             onManageMcpServers={noop}
+          />
+        </Unfocused>
+      )
+    case 'custom-instructions':
+      // The sample user's rules for every app they build.
+      return (
+        <Unfocused>
+          <CustomInstructionsModal
+            instructions={[
+              'Use the system’s light or dark theme by default.',
+              'Use sentence case for headings, labels and buttons.',
+              'Show amounts in US dollars and dates like 5 Mar 2026.',
+              'Put the main action of each page at the top right.'
+            ].join('\n')}
+            onSave={noop}
+            onClose={noop}
           />
         </Unfocused>
       )

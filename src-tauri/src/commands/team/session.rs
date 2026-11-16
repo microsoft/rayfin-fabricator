@@ -29,7 +29,7 @@ pub(crate) fn summary(message: &str, fallback: &str) -> String {
 
 fn pr_body(project_name: &str) -> String {
   format!(
-    "Changes to **{project_name}**, made in Fabricator.\n\nEach push deploys a personal preview of the app. Fabricator publishes by merging this pull request, and the team pipeline then deploys the published app."
+    "Changes to **{project_name}**, made in Fabricator, which runs the app on its author's computer while they work.\n\nWhile this pull request is a draft, nothing deploys. Publishing in Fabricator marks it ready for review, which deploys a personal preview of the app (and each push after that deploys it again), then merges it; the team pipeline then deploys the published app."
   )
 }
 
@@ -44,19 +44,14 @@ pub(crate) async fn save_and_share(project_id: &str, message: &str) -> Result<St
   let me = viewer().await?;
   let (name, email) = git_identity(&me);
   repo::set_identity(&tp.workspace, &name, &email).await?;
-  let branch = repo::current_branch(&wt)
-    .await
-    .ok_or("This app's working branch is missing. Reopen the app from Home.")?;
+  let branch = repo::current_branch(&wt).await.ok_or_else(|| t!("team.branchMissing"))?;
 
   // A merge with teammates' changes is concluded only once nothing is left unresolved.
   if repo::in_merge(&wt).await {
     let unmerged = repo::conflicted_files(&wt).await;
     let marked = repo::files_with_markers(&wt, &unmerged);
     if !marked.is_empty() {
-      return Err(format!(
-        "Some conflicts with your teammates' changes are still unresolved: {}. Ask Copilot to finish resolving them.",
-        marked.join(", ")
-      ));
+      return Err(t!("team.session.unresolved", files = marked.join(", ")));
     }
   }
   let message = summary(message, &format!("Update {}", tp.project.name));
@@ -83,7 +78,7 @@ pub(crate) async fn save_and_share(project_id: &str, message: &str) -> Result<St
         let title = format!("{}: {message}", tp.project.name);
         gh::create_pr(&full, &branch, &title, &pr_body(&tp.project.name))
           .await
-          .map_err(|e| e.describe("Open the pull request"))?
+          .map_err(|e| e.describe(&t!("team.actions.openPr")))?
       }
     };
     pr_number = Some(pr.number);
@@ -93,15 +88,12 @@ pub(crate) async fn save_and_share(project_id: &str, message: &str) -> Result<St
     b.branch = Some(branch.clone());
     b.pr_number = pr_number;
     b.pr_url = pr_url.clone();
-    if pr_number.is_some() {
-      b.view = Some("preview".into());
-    }
   });
-  team::apply_view(project_id).ok_or_else(|| "Project not found.".to_string())
+  team::apply_view(project_id).ok_or_else(|| t!("team.services.projectNotFound"))
 }
 
 /// After a chat turn: save the app's changes to its working branch on GitHub
-/// (which deploys your preview).
+/// (its draft pull request, which deploys nothing until you publish).
 #[tauri::command]
 pub async fn team_sync(app: AppHandle, project_id: String, message: String) -> TeamActionResult {
   let account = super::project_account(&project_id);
@@ -120,7 +112,7 @@ pub async fn team_sync(app: AppHandle, project_id: String, message: String) -> T
       }
     }
   }));
-  task.await.unwrap_or_else(|e| fail(format!("Saving to GitHub failed: {e}")))
+  task.await.unwrap_or_else(|e| fail(t!("team.session.saveFailed", error = e)))
 }
 
 /// Latest deployment records, keeping the previous value when GitHub can't be reached.
@@ -140,8 +132,9 @@ async fn refresh_records(
 }
 
 /// The pipeline run for `sha` (from `event`), with the steps of this app's job.
+/// A draft pull request's run deploys nothing, so it isn't one.
 pub(crate) async fn run_status(full: &str, sha: &str, event: &str, kind: &str, folder: &str) -> Option<TeamRunStatus> {
-  let run = gh::runs_for_sha(full, sha).await.ok()?.into_iter().find(|r| r.event == event)?;
+  let run = gh::runs_for_sha(full, sha).await.ok()?.into_iter().find(|r| r.event == event && !r.is_draft())?;
   Some(run_status_for(full, run, kind, folder).await)
 }
 
@@ -199,7 +192,6 @@ async fn session_status(project_id: String, refresh: bool) -> TeamSessionStatus 
   let full = tp.workspace.repo.clone();
   let mut status = TeamSessionStatus {
     ok: true,
-    view: tp.binding.view.clone().unwrap_or_else(|| "preview".into()),
     require_review: tp.workspace.manifest.as_ref().is_some_and(|m| m.settings.require_review),
     publish: tp.binding.publish.clone(),
     preview: tp.binding.preview.clone(),
@@ -300,6 +292,7 @@ pub async fn team_update(app: AppHandle, project_id: String, keep_conflicts: boo
     if let Err(e) = repo::fetch(&tp.workspace).await {
       return fail(e);
     }
+    let before = repo::head(&wt).await;
     match repo::merge_main(&wt, keep_conflicts, &name, &email).await {
       Ok(repo::MergeOutcome::UpToDate) => with_project(store::find_project(&project_id)),
       Ok(repo::MergeOutcome::Merged) => {
@@ -311,11 +304,14 @@ pub async fn team_update(app: AppHandle, project_id: String, keep_conflicts: boo
             }
           }
         }
-        with_project(store::find_project(&project_id))
+        let mut result = with_project(store::find_project(&project_id));
+        result.packages_changed =
+          super::packages_changed(&tp.project.path, before.as_deref(), repo::head(&wt).await.as_deref()).await;
+        result
       }
       Ok(repo::MergeOutcome::Conflicts(files)) => TeamActionResult {
         ok: false,
-        error: Some("Your teammates changed some of the same files as you.".into()),
+        error: Some(t!("team.session.conflicts")),
         conflicts: Some(files),
         project: store::find_project(&project_id),
         ..Default::default()
@@ -323,7 +319,7 @@ pub async fn team_update(app: AppHandle, project_id: String, keep_conflicts: boo
       Err(e) => fail(e),
     }
   }));
-  task.await.unwrap_or_else(|e| fail(format!("Updating failed: {e}")))
+  task.await.unwrap_or_else(|e| fail(t!("team.session.updateFailed", error = e)))
 }
 
 /// Throw away your unpublished changes: close the pull request, delete the
@@ -348,6 +344,7 @@ pub async fn team_discard(app: AppHandle, project_id: String) -> TeamActionResul
     };
     let full = tp.workspace.repo.clone();
     let old = repo::current_branch(&wt).await;
+    let before = repo::head(&wt).await;
     if let Some(n) = tp.binding.pr_number {
       let _ = gh::close_pr(&full, n).await;
     }
@@ -369,23 +366,14 @@ pub async fn team_discard(app: AppHandle, project_id: String) -> TeamActionResul
       b.branch = Some(fresh.clone());
       b.pr_number = None;
       b.pr_url = None;
-      b.view = Some("production".into());
       b.publish = None;
     });
-    with_project(team::apply_view(&project_id))
+    let mut result = with_project(team::apply_view(&project_id));
+    result.packages_changed =
+      super::packages_changed(&tp.project.path, before.as_deref(), repo::head(&wt).await.as_deref()).await;
+    result
   }));
-  task.await.unwrap_or_else(|e| fail(format!("Discarding failed: {e}")))
-}
-
-/// Show your preview ("preview") or the published app ("production").
-#[tauri::command]
-pub fn team_set_view(project_id: String, view: String) -> TeamActionResult {
-  if let Err(e) = team::team_project(&project_id) {
-    return fail(e);
-  }
-  let view = if view == "production" { "production" } else { "preview" };
-  team::save_binding(&project_id, |b| b.view = Some(view.to_string()));
-  with_project(team::apply_view(&project_id))
+  task.await.unwrap_or_else(|e| fail(t!("team.session.discardFailed", error = e)))
 }
 
 /// The log of a pipeline run (failed steps first), for "View logs".
@@ -394,7 +382,7 @@ pub async fn team_run_log(project_id: String, run_id: u64) -> Result<String, Str
   let tp = team::team_project(&project_id)?;
   gh::as_account(tp.workspace.account.clone(), gh::run_log(&tp.workspace.repo, run_id, 40_000))
     .await
-    .map_err(|e| e.describe("Read the pipeline log"))
+    .map_err(|e| e.describe(&t!("team.actions.readLog")))
 }
 
 #[cfg(test)]

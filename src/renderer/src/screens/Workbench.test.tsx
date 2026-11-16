@@ -18,8 +18,6 @@ import type {
   ChatTurnResult,
   DeployResult,
   DevServerResult,
-  GoalResult,
-  GoalsSnapshot,
   LocalReady,
   LocalStatus,
   PortConflict,
@@ -27,6 +25,7 @@ import type {
   ProcResult,
   ProjectsState,
   RayfinStudioApi,
+  RayfinVersionInfo,
   SavedTurn,
   StudioProject
 } from '@shared/ipc'
@@ -39,7 +38,6 @@ import { DEPLOY_QUESTION } from '../components/help/parts'
 import type PreviewPane from '../components/PreviewPane'
 import type ChatPanel from '../components/ChatPanel'
 import type AdvisorView from '../components/advisor/AdvisorView'
-import type GoalsView from '../components/goals/GoalsView'
 import type DeploymentsControl from '../components/DeploymentsControl'
 import type MigrateReportScreen from '../components/migrate/MigrateReportScreen'
 import type AppGalleryView from '../components/gallery/AppGalleryView'
@@ -54,7 +52,6 @@ import Workbench from './Workbench'
 const chatProps = vi.hoisted(() => vi.fn<(props: ComponentProps<typeof ChatPanel>) => void>())
 const previewProps = vi.hoisted(() => vi.fn<(props: ComponentProps<typeof PreviewPane>) => void>())
 const advisorProps = vi.hoisted(() => vi.fn<(props: ComponentProps<typeof AdvisorView>) => void>())
-const goalsProps = vi.hoisted(() => vi.fn<(props: ComponentProps<typeof GoalsView>) => void>())
 const deploymentsProps = vi.hoisted(() =>
   vi.fn<(props: ComponentProps<typeof DeploymentsControl>) => void>()
 )
@@ -98,12 +95,6 @@ vi.mock('../components/advisor/AdvisorView', () => ({
 }))
 vi.mock('../advisor/store', () => ({
   useAdvisor: () => ({ derived: advisorMock.derived, handOff: advisorMock.handOff })
-}))
-vi.mock('../components/goals/GoalsView', () => ({
-  default: (props: ComponentProps<typeof GoalsView>) => {
-    goalsProps(props)
-    return null
-  }
 }))
 vi.mock('../components/GitControl', () => ({
   default: (props: ComponentProps<typeof GitControl>) => {
@@ -341,7 +332,15 @@ function installApi(active = false) {
       saveHistory: vi.fn().mockResolvedValue(undefined)
     },
     rayfin: { versions: vi.fn().mockResolvedValue(null) },
-    preview: { onAgentPreview: vi.fn(() => () => {}) },
+    preview: {
+      onAgentPreview: vi.fn(() => () => {}),
+      pick: {
+        set: vi.fn(() => Promise.resolve(undefined)),
+        poll: vi.fn(() => Promise.resolve(null)),
+        command: vi.fn(() => Promise.resolve(undefined))
+      },
+      releaseFocus: vi.fn(() => Promise.resolve(undefined))
+    },
     dev: {
       plan: vi.fn<RayfinStudioApi['dev']['plan']>().mockResolvedValue({}),
       start: vi.fn<RayfinStudioApi['dev']['start']>().mockResolvedValue({
@@ -472,7 +471,6 @@ beforeEach(() => {
   chatProps.mockClear()
   previewProps.mockClear()
   advisorProps.mockClear()
-  goalsProps.mockClear()
   deploymentsProps.mockClear()
   helpProps.mockClear()
   searchProps.mockClear()
@@ -676,13 +674,14 @@ describe('Workbench authentication recovery', () => {
   it.each(['login', 'verification'])(
     'reports rejected Fabric %s without leaving buttons busy',
     async (failure) => {
-      const api = installApi()
+      const api = installApi(true)
       const onAuthChanged = vi.fn().mockResolvedValue(undefined)
       if (failure === 'login')
         api.auth.loginRayfin.mockRejectedValueOnce('Sign-in service unavailable')
       else onAuthChanged.mockRejectedValueOnce('Sign-in service unavailable')
       const props = makeProps({ auth: { ...auth, rayfin: { signedIn: false } }, onAuthChanged })
       render(<Workbench {...props} />, { wrapper: Wrapper })
+      await screen.findByLabelText('Chat draft')
       fireEvent.click(screen.getByRole('button', { name: 'Sign in to Fabric' }))
 
       expect((await screen.findByRole('alert')).textContent).toContain(
@@ -696,11 +695,12 @@ describe('Workbench authentication recovery', () => {
   )
 
   it('does not allow sign-out to race a pending sign-in when auth props change', async () => {
-    const api = installApi()
+    const api = installApi(true)
     const login = deferred<ProcResult>()
     api.auth.loginRayfin.mockReturnValueOnce(login.promise)
     const props = makeProps({ auth: { ...auth, rayfin: { signedIn: false } } })
     const view = render(<Workbench {...props} />, { wrapper: Wrapper })
+    await screen.findByLabelText('Chat draft')
     fireEvent.click(screen.getByRole('button', { name: 'Sign in to Fabric' }))
     view.rerender(<Workbench {...props} auth={auth} />)
     const signOut = accountAction('Sign out')
@@ -842,6 +842,40 @@ describe('Workbench app bar', () => {
     expect(within(dialog).getByText('dev@example.com')).toBeTruthy()
     expect(within(dialog).getByText('octocat')).toBeTruthy()
   })
+
+  it.each<[string, StudioProject[], boolean]>([
+    ['no project', [], false],
+    ['only a project whose folder is gone', [{ ...project, missing: true }], false],
+    ['a project, even with none open', [project], true]
+  ])(
+    'offers Fabric sign-in only with a project to sign in with: %s',
+    async (_, projects, ready) => {
+      const api = installApi()
+      api.projects.state.mockResolvedValue({
+        workspaceRoot: 'C:\\projects',
+        activeProjectId: null,
+        projects
+      })
+      render(<Workbench {...makeProps({ auth: { ...auth, rayfin: { signedIn: false } } })} />, {
+        wrapper: Wrapper
+      })
+      await waitFor(() =>
+        expect(homeProps.mock.lastCall?.[0].projects).toHaveLength(projects.length)
+      )
+
+      const signIn = screen.getByRole('button', { name: 'Sign in to Fabric' }) as HTMLButtonElement
+      expect(signIn.disabled).toBe(!ready)
+      fireEvent.click(screen.getByRole('button', { name: 'Settings and accounts' }))
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Manage accounts…' }))
+      const dialog = await screen.findByRole('dialog', { name: 'Accounts' })
+      const fabric = within(dialog).getByRole('region', { name: 'Microsoft Fabric' })
+      const dialogSignIn = within(fabric).getByRole('button', {
+        name: 'Sign in to Microsoft Fabric'
+      })
+      expect((dialogSignIn as HTMLButtonElement).disabled).toBe(!ready)
+      await waitFor(() => expect(api.github.accounts).toHaveBeenCalled())
+    }
+  )
   it('puts the project, its views, deploys and the account on one bar without the brand', async () => {
     installApi(true)
     const { container } = render(<Workbench {...makeProps()} />, { wrapper: Wrapper })
@@ -1552,14 +1586,13 @@ describe('Workbench live preview on the published backend, for an app this compu
     }
   )
 
-  it('enables the chat and Design submission interlocks during deployment without a preview flag', async () => {
+  it('enables the chat submission interlock during deployment without a preview flag', async () => {
     const { api, dev } = await mount()
     const deploying = deferred<DeployResult>()
     api.deploy.run.mockReturnValueOnce(deploying.promise)
     fireEvent.click(screen.getByRole('button', { name: 'Test deploy' }))
     await waitFor(() => expect(chatProps.mock.lastCall?.[0].deploying).toBe(true))
     expect(chatProps.mock.lastCall?.[0].blockSubmitWhileDeploying).toBe(true)
-    expect(previewProps.mock.lastCall?.[0].designSendBlocked).toMatch(/^Publishing/)
 
     const { turn } = await beginTurn()
     await act(async () => turn)
@@ -1568,7 +1601,6 @@ describe('Workbench live preview on the published backend, for an app this compu
 
     await act(async () => deploying.resolve({ ok: true, outcome: 'success' }))
     await waitFor(() => expect(chatProps.mock.lastCall?.[0].deploying).toBe(false))
-    expect(previewProps.mock.lastCall?.[0].designSendBlocked).toBeNull()
     dev.plan.mockResolvedValue({ port: 5174 })
     const next = await beginTurn()
     await act(async () => next.turn)
@@ -1682,7 +1714,7 @@ describe('Workbench live preview on the published backend, for an app this compu
     expect(reloads(), 'a stopped turn that changed files').toBe(1)
   })
 
-  it('tells the preview while a turn runs, so Design waits for it on the local preview', async () => {
+  it('tells the preview while a turn runs, so the local preview knows Copilot is changing it', async () => {
     await mountManual()
     expect(previewProps.mock.lastCall?.[0].turnRunning).toBe(false)
     const setPending = (pending: boolean): void =>
@@ -1884,7 +1916,7 @@ describe('Workbench local backend', () => {
     expect(api.local.stop, 'the one you came from keeps running').not.toHaveBeenCalled()
   })
 
-  it('never starts a team app’s local backend', async () => {
+  it('runs a team app on its local backend, like any app', async () => {
     const api = installApi(true)
     const teamApp: StudioProject = {
       ...project,
@@ -1900,10 +1932,9 @@ describe('Workbench local backend', () => {
     api.deploy.reconcile.mockResolvedValue(state)
     render(<Workbench {...makeProps({ settings: defaultSettings })} />, { wrapper: Wrapper })
     await screen.findByLabelText('Chat draft')
-    await act(async () => {})
-    expect(api.local.status).not.toHaveBeenCalled()
-    expect(api.local.start).not.toHaveBeenCalled()
-    expect(preview().local).toBeUndefined()
+    await waitFor(() => expect(api.local.start).toHaveBeenCalledWith(teamApp.id, undefined))
+    expect(preview().local).toBeDefined()
+    expect(preview().fallbackReason).toBeNull()
   })
 
   it('reloads the page once the backend rebuilds what it uses, after the turn that changed it', async () => {
@@ -2090,6 +2121,44 @@ describe('Workbench local backend', () => {
     expect(api.dev.stop).toHaveBeenCalledWith(project.id)
   })
 
+  it('checks again once an update changes the app’s Rayfin version, reported or not', async () => {
+    const api = installApi(true)
+    nextLocal(project.id, tooOld)
+    api.dev.plan.mockResolvedValue({ port: 5174 })
+    const installed = (version: string): RayfinVersionInfo => ({
+      version,
+      latest: '1.36.2',
+      upgradeAvailable: version !== '1.36.2',
+      packages: [
+        {
+          name: '@microsoft/rayfin-core',
+          kind: 'sdk',
+          installed: version,
+          latest: '1.36.2',
+          upgradable: false
+        }
+      ]
+    })
+    api.rayfin.versions.mockResolvedValue(installed('1.35.1'))
+    render(<Workbench {...makeProps({ settings: manualSettings })} />, { wrapper: Wrapper })
+    await screen.findByLabelText('Chat draft')
+    await waitFor(() => expect(preview().localPreviewUrl).toBe('http://localhost:5174'))
+    expect(api.local.start, 'the same version still can’t run here').not.toHaveBeenCalled()
+
+    // The update turn ran npm, which Copilot doesn't report as a change.
+    api.rayfin.versions.mockResolvedValue(installed('1.36.2'))
+    await act(async () => completeTurn({ ok: true, filesModified: [], ranDeploy: false }))
+    await waitFor(() => expect(api.local.start).toHaveBeenCalledWith(project.id))
+    expect(preview().fallbackReason, 'the preview stays put while it checks').toContain(
+      'Rayfin 1.35.1'
+    )
+
+    emitLocal({ state: 'running', ready: localReady })
+    await waitFor(() => expect(preview().local?.state).toBe('running'))
+    expect(preview().fallbackReason).toBeNull()
+    expect(api.local.start).toHaveBeenCalledTimes(1)
+  })
+
   it('runs an unpublished app here even when it can’t fully, with nothing to fall back to', async () => {
     const api = installApi(true)
     const fresh = { ...project, lastDeploy: undefined }
@@ -2244,81 +2313,6 @@ describe('Workbench Advisor fixes', () => {
   })
 })
 
-describe('Workbench Goals', () => {
-  const goalsSettings: AppSettings = { theme: 'system', experiments: { goals: true } }
-  const failed: GoalResult = {
-    checkId: 'a',
-    check: 'Approvers see only their team’s requests',
-    status: 'failed',
-    summary: 'An approver saw another team’s request.',
-    calls: [],
-    evidence: [],
-    ranAt: '2026-11-01T10:00:00Z',
-    fingerprint: 'f1',
-    stale: false
-  }
-  const goals: GoalsSnapshot = {
-    exists: true,
-    purpose: 'Expense approvals for Contoso',
-    checks: [
-      { id: 'a', text: 'Approvers see only their team’s requests' },
-      { id: 'b', text: 'Totals match the line items' }
-    ],
-    results: [failed],
-    lastRun: null,
-    allPassed: false,
-    cannotRun: null,
-    running: false
-  }
-
-  function installGoals(api: ReturnType<typeof installApi>) {
-    const goalsApi = {
-      load: vi.fn<RayfinStudioApi['goals']['load']>().mockResolvedValue(goals),
-      run: vi.fn<RayfinStudioApi['goals']['run']>(() => new Promise(() => {})),
-      onEvent: vi.fn<RayfinStudioApi['goals']['onEvent']>(() => () => {}),
-      draftCancel: vi.fn<RayfinStudioApi['goals']['draftCancel']>().mockResolvedValue(false)
-    }
-    Object.assign(api, { goals: goalsApi })
-    return goalsApi
-  }
-
-  it('offers to run the checks this version hasn’t had before a publish', async () => {
-    const api = installApi(true)
-    const goalsApi = installGoals(api)
-    render(<Workbench {...makeProps({ settings: goalsSettings })} />, { wrapper: Wrapper })
-    const tab = await screen.findByRole('tab', { name: /^Goals/ })
-    expect(await within(tab).findByLabelText('1 failing check')).toBeTruthy()
-
-    fireEvent.click(screen.getByRole('button', { name: 'Test deploy' }))
-    const gate = await screen.findByRole('dialog', { name: 'Run your app’s checks first?' })
-    expect(gate.textContent).toContain('1 check failed and 1 hasn’t run on the app as it is now.')
-    fireEvent.click(within(gate).getByRole('button', { name: 'Run 1 check' }))
-
-    expect(goalsApi.run).toHaveBeenCalledWith(
-      project.id,
-      expect.objectContaining({ checkIds: ['b'] })
-    )
-    expect(goalsProps.mock.lastCall?.[0].visible).toBe(true)
-    expect(api.deploy.run).not.toHaveBeenCalled()
-  })
-
-  it('publishes anyway when asked', async () => {
-    const api = installApi(true)
-    installGoals(api)
-    render(<Workbench {...makeProps({ settings: goalsSettings })} />, { wrapper: Wrapper })
-    await screen.findByLabelText('Chat draft')
-
-    fireEvent.click(screen.getByRole('button', { name: 'Test deploy' }))
-    const gate = await screen.findByRole('dialog', { name: 'Run your app’s checks first?' })
-    fireEvent.click(within(gate).getByRole('button', { name: 'Publish anyway' }))
-
-    await waitFor(() =>
-      expect(api.deploy.run).toHaveBeenCalledWith(project.id, undefined, undefined)
-    )
-    expect(screen.queryByRole('dialog')).toBeNull()
-  })
-})
-
 describe('Workbench chat history', () => {
   it('keeps the Fabric data a message added when it saves the transcript', async () => {
     const api = installApi(true)
@@ -2388,12 +2382,12 @@ describe('Workbench team workspaces', () => {
   }
   const teamSettings: AppSettings = { theme: 'system', experiments: { teamWorkspaces: true } }
 
-  function installTeamApi() {
+  function installTeamApi(app: StudioProject = teamProject) {
     const api = installApi(true)
     const state = {
       workspaceRoot: 'C:\\projects',
-      activeProjectId: teamProject.id,
-      projects: [teamProject],
+      activeProjectId: app.id,
+      projects: [app],
       teamWorkspaces: [
         {
           id: 'w1',
@@ -2411,13 +2405,12 @@ describe('Workbench team workspaces', () => {
     const team = {
       status: vi.fn().mockResolvedValue({
         ok: true,
-        branch: teamProject.team?.branch,
+        branch: app.team?.branch,
         unpublished: 2,
         dirty: false,
         behind: 0,
         conflicted: false,
-        requireReview: false,
-        view: 'preview'
+        requireReview: false
       }),
       sync: vi.fn().mockResolvedValue({ ok: true }),
       publish: vi.fn().mockResolvedValue({ ok: true }),
@@ -2479,20 +2472,64 @@ describe('Workbench team workspaces', () => {
     expect(deploymentsProps, 'team apps have no deployment panel, or its switch').not.toHaveBeenCalled()
   })
 
-  it('keeps a team local preview while its saved turn waits for the pipeline', async () => {
+  it('runs a team app’s turns on its local backend, with no live preview on Fabric', async () => {
     const { api, team } = installTeamApi()
     api.dev.plan.mockResolvedValue({ port: 5174 })
     render(<Workbench {...makeProps({ settings: teamSettings })} />, { wrapper: Wrapper })
     await screen.findByLabelText('Chat draft')
+    await waitFor(() => expect(api.local.start).toHaveBeenCalledWith(teamProject.id, undefined))
     const { turn } = await beginTurn()
     await act(async () => turn)
-    expect(api.dev.start).toHaveBeenCalledWith(teamProject.id, 5174)
-
     await act(async () => completeTurn())
     expect(team.sync).toHaveBeenCalledWith(teamProject.id, '')
-    expect(api.dev.stop).not.toHaveBeenCalled()
-    expect(previewProps.mock.lastCall?.[0].localPreviewUrl).toBe('http://localhost:5174')
+    expect(api.dev.start).not.toHaveBeenCalled()
+    expect(previewProps.mock.lastCall?.[0].local).toBeDefined()
     expect(api.deploy.run).not.toHaveBeenCalled()
+  })
+
+  it('falls back to the team’s deployment when this computer can’t run the app, and keeps that preview between turns', async () => {
+    const deployed: StudioProject = {
+      ...teamProject,
+      lastDeploy: { url: 'https://team-app.example', status: 'success' },
+      team: {
+        ...(teamProject.team as NonNullable<StudioProject['team']>),
+        production: {
+          environment: 'production/team-app',
+          state: 'success',
+          url: 'https://team-app.example',
+          itemId: 'item',
+          workspaceId: 'ws'
+        }
+      }
+    }
+    const { api, team } = installTeamApi(deployed)
+    api.dev.plan.mockResolvedValue({ port: 5174 })
+    render(<Workbench {...makeProps({ settings: teamSettings })} />, { wrapper: Wrapper })
+    await screen.findByLabelText('Chat draft')
+    await waitFor(() => expect(api.local.start).toHaveBeenCalledTimes(1))
+    emitLocal(
+      {
+        state: 'running',
+        ready: {
+          ...localReady,
+          features: {
+            ...localReady.features,
+            connectors: [{ name: 'logs', type: 'kusto', supported: false }]
+          }
+        }
+      },
+      deployed.id
+    )
+    const reason =
+      'The logs connector runs only on Fabric, so the preview uses the team’s deployment of it in Fabric.'
+    expect(previewProps.mock.lastCall?.[0].fallbackReason).toBe(reason)
+    await waitFor(() => expect(api.local.stop).toHaveBeenCalledWith(deployed.id))
+    // Its turns never publish, so the live preview on that deployment runs while it's open.
+    emitLocal({ state: 'stopped' }, deployed.id)
+    await waitFor(() => expect(api.dev.start).toHaveBeenCalledWith(deployed.id, 5174))
+    await act(async () => completeTurn())
+    expect(team.sync).toHaveBeenCalledWith(deployed.id, '')
+    expect(api.dev.stop).not.toHaveBeenCalled()
   })
 
   it('replaces the deployments control with Publish', async () => {

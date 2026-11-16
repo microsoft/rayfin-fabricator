@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import { AI_RULES, CATEGORIES, QUICK_RULES, RULES } from '@shared/advisor/catalog'
+import { setLanguage } from '../i18n'
 import { localSdkOf, matchesWorkspace } from './context'
 import { QUICK_IMPLS } from './rules'
 import { npmRangeSpan } from './source'
@@ -56,13 +57,24 @@ describe('npm ranges', () => {
     expect(span('latest')).toBeNull()
   })
 
-  it('names the line of releases the local backend runs and its pin', () => {
-    expect(localSdkOf('>=1.36.0 <1.37.0')).toMatchObject({ label: '1.36.x', pin: '~1.36.0' })
+  it('names the lines of releases the local backend runs and their pins', () => {
+    expect(localSdkOf('>=1.36.0 <1.37.0')).toMatchObject({
+      label: '1.36.x',
+      lines: [{ label: '1.36.x', pin: '~1.36.0' }]
+    })
+    expect(localSdkOf('>=2.0.0-0 <2.1.0 || >=1.36.0-0 <1.37.0')).toMatchObject({
+      label: '1.36.x and 2.0.x',
+      lines: [
+        { span: { lo: [1, 36, 0], hi: [1, 37, 0] }, pin: '~1.36.0' },
+        { span: { lo: [2, 0, 0], hi: [2, 1, 0] }, pin: '~2.0.0' }
+      ]
+    })
     expect(localSdkOf('>=1.36.2 <1.38.0')).toMatchObject({
       label: '>=1.36.2 <1.38.0',
-      pin: '~1.36.2'
+      lines: [{ pin: '~1.36.2' }]
     })
     expect(localSdkOf(undefined)).toBeNull()
+    expect(localSdkOf('>=1.36.0 || latest')).toBeNull()
   })
 })
 
@@ -199,7 +211,7 @@ describe('access and policy rules', () => {
     expect((await check(files)).finding('policy/anonymous-grant')!.detail).toBe(
       '`Todo` allows anonymous reads. They work in the local preview, but publishing fails unless your tenant admin has turned on anonymous data access for Fabric apps.'
     )
-    // A team app has no local preview.
+    // An app the local backend doesn't run has no local preview.
     expect((await check(files, { localSdkRange: null })).finding('policy/anonymous-grant')!.detail).toBe(
       '`Todo` allows anonymous reads, which Fabric refuses unless your tenant admin has turned on anonymous data access for Fabric apps.'
     )
@@ -588,14 +600,14 @@ describe('config rules', () => {
 
 describe('platform rules', () => {
   it('grades outdated versions by how far behind they are', async () => {
-    // A team app, which the local backend doesn't run: every newer release counts.
-    const team = { localSdkRange: null }
-    const minor = await check({}, { ...team, versions: versionInfo('1.33.2', '1.35.1') })
+    // An app the local backend doesn't run: every newer release counts.
+    const notLocal = { localSdkRange: null }
+    const minor = await check({}, { ...notLocal, versions: versionInfo('1.33.2', '1.35.1') })
     expect(minor.finding('platform/cli-outdated')!.severity).toBe('medium')
     expect(minor.finding('platform/sdk-outdated')!.severity).toBe('medium')
-    const major = await check({}, { ...team, versions: versionInfo('1.35.1', '2.0.0') })
+    const major = await check({}, { ...notLocal, versions: versionInfo('1.35.1', '2.0.0') })
     expect(major.finding('platform/cli-outdated')!.severity).toBe('high')
-    const patch = await check({}, { ...team, versions: versionInfo('1.35.0', '1.35.1') })
+    const patch = await check({}, { ...notLocal, versions: versionInfo('1.35.0', '1.35.1') })
     expect(patch.finding('platform/cli-outdated')!.severity).toBe('low')
     const offline = await check({}, { versions: null })
     expect(offline.status('platform/cli-outdated')).toBe('skipped')
@@ -622,7 +634,7 @@ describe('platform rules', () => {
     const loose = caret.finding('platform/sdk-local-range')!
     expect(loose.severity).toBe('low')
     expect(loose.detail).toBe(
-      '`@microsoft/rayfin-core` is declared as `^1.36.0`, so the next install can move it past Rayfin 1.36.x, the releases Fabricator runs on this computer. Pin it to `~1.36.0`.'
+      '`@microsoft/rayfin-core` is declared as `^1.36.0`, so the next install can move it past Rayfin 1.36.x, to a release Fabricator may not run on this computer. Pin it to `~1.36.0`.'
     )
     expect(loose.line).toBe(
       manifest.split('\n').findIndex((l) => l.includes('"@microsoft/rayfin-core"')) + 1
@@ -637,7 +649,7 @@ describe('platform rules', () => {
     const both = outside.finding('platform/sdk-local-range')!
     expect(both.severity).toBe('medium')
     expect(both.detail).toBe(
-      "These Rayfin packages aren't on Rayfin 1.36.x, the releases Fabricator runs on this computer: rayfin-client ~1.35.0, rayfin-core latest. Pin them to `~1.36.0`, and reinstall."
+      "These Rayfin packages aren't pinned to the Rayfin releases Fabricator runs on this computer (1.36.x and 2.0.x): rayfin-client ~1.35.0, rayfin-core latest. Pin them to `~1.36.0`, and reinstall."
     )
 
     // Installed outside the line, though declared right: reinstall.
@@ -660,12 +672,56 @@ describe('platform rules', () => {
       'rayfin/functions/package.json'
     )
 
-    // Team apps don't run on the local backend.
+    // Not for an app the local backend doesn't run.
     expect(
       (await check({ 'package.json': manifest }, { localSdkRange: null })).status(
         'platform/sdk-local-range'
       )
     ).toBe('na')
+  })
+
+  it('accepts every line the local backend runs, and leaves newer releases to the user', async () => {
+    const pkg = JSON.parse(GOOD_PROJECT['package.json'])
+    const rayfinAt = (deps: Record<string, string> = {}, range: string) =>
+      Object.fromEntries(
+        Object.entries(deps).map(([name, spec]) => [
+          name,
+          name.startsWith('@microsoft/rayfin-') ? range : spec
+        ])
+      )
+    const app = (range: string, installed: string) =>
+      check(
+        {
+          'package.json': JSON.stringify({
+            ...pkg,
+            dependencies: rayfinAt(pkg.dependencies, range),
+            devDependencies: rayfinAt(pkg.devDependencies, range)
+          })
+        },
+        {
+          packages: ['@microsoft/rayfin-cli', '@microsoft/rayfin-core'].map((name) => ({
+            name,
+            installed,
+            declared: range
+          }))
+        }
+      )
+    expect((await app('~2.0.0', '2.0.0')).status('platform/sdk-local-range')).toBe('pass')
+    expect((await app('2.0.0', '2.0.0')).status('platform/sdk-local-range')).toBe('pass')
+    // A caret range on 2.0 can move past it, so it's pinned to 2.0.
+    const caret = (await app('^2.0.0', '2.0.0')).finding('platform/sdk-local-range')!
+    expect(caret.severity).toBe('low')
+    expect(caret.detail).toContain('Pin them to `~2.0.0`')
+    // A newer release than the local backend runs, chosen on purpose, runs with
+    // the preview's warning: nothing to pin back.
+    expect((await app('~2.1.0', '2.1.0')).status('platform/sdk-local-range')).toBe('pass')
+    expect(
+      (await app('~1.37.0-alpha', '1.37.0-alpha.2159')).status('platform/sdk-local-range')
+    ).toBe('pass')
+    // An older one can't run here properly.
+    expect((await app('~1.35.0', '1.35.1')).finding('platform/sdk-local-range')!.severity).toBe(
+      'medium'
+    )
   })
 
   it('accepts `~` pins for connector packages but not caret ranges', async () => {
@@ -697,9 +753,9 @@ describe('platform rules', () => {
       "`logs` is a `kusto` connector, which runs only on Fabric, so the local preview can't call it. Until the app is published, those calls fail; after that, the preview uses the published app's backend."
     )
     expect(f.line).toBe(yml.split('\n').indexOf('  - name: logs') + 1)
-    // A team app previews on Fabric, where the connector runs.
-    const team = await check({ 'rayfin/rayfin.yml': yml }, { localSdkRange: null })
-    expect(team.status('platform/connector-fabric-only')).toBe('na')
+    // An app the local backend doesn't run previews on Fabric, where the connector runs.
+    const notLocal = await check({ 'rayfin/rayfin.yml': yml }, { localSdkRange: null })
+    expect(notLocal.status('platform/connector-fabric-only')).toBe('na')
   })
 
   it('flags SDK packages installed at different versions', async () => {
@@ -909,5 +965,51 @@ describe('accessibility rules', () => {
     const f = out.finding('accessibility/img-alt')!
     expect(f.line).toBe(3)
     expect(f.locations).toHaveLength(0)
+  })
+})
+
+describe('quick checks in another language', () => {
+  afterEach(async () => {
+    await setLanguage('en')
+  })
+
+  const anonymousRead = {
+    'rayfin/data/Todo.ts': TODO.replace('@entity()', "@entity()\n@anonymous('read')")
+  }
+
+  it('keep the English detail for Copilot and add one in the interface’s language', async () => {
+    await setLanguage('de')
+    const f = (await check(anonymousRead)).finding('policy/anonymous-grant')!
+    expect(f.detail).toBe(
+      '`Todo` allows anonymous reads. They work in the local preview, but publishing fails unless your tenant admin has turned on anonymous data access for Fabric apps.'
+    )
+    expect(f.detailText).toBe(
+      '`Todo` erlaubt anonyme Lesezugriffe. Sie funktionieren in der lokalen Vorschau, aber die Veröffentlichung schlägt fehl, sofern dein Mandantenadministrator den anonymen Datenzugriff für Fabric-Apps nicht eingeschaltet hat.'
+    )
+  })
+
+  it('sum up several places in the interface’s language', async () => {
+    await setLanguage('de')
+    const todo = TODO.replace(/@text\(\{ max: \d+ \}\)/g, '@text()')
+    const out = await check({ 'rayfin/data/Todo.ts': todo })
+    const noMax = out.finding('data-model/text-without-max')!
+    expect(noMax.detail).toBe('2 text fields have no maximum length: Todo.title, Todo.user_id.')
+    expect(noMax.detailText).toBe(
+      '2 Textfelder haben keine maximale Länge: Todo.title, Todo.user_id.'
+    )
+    const connectors = YML.replace('services:\n', 'services:\n  connectors:\n    enabled: true\n')
+    const yml = connectors.replace('folder: dist', 'anonymousAccess: true\n    folder: dist')
+    const old = (await check({ 'rayfin/rayfin.yml': yml })).finding('config/deprecated-yml-keys')!
+    expect(old.detail).toBe(
+      'Found in 2 places: services.connectors.enabled, services.staticHosting.anonymousAccess.'
+    )
+    expect(old.detailText).toBe(
+      'An 2 Stellen gefunden: services.connectors.enabled, services.staticHosting.anonymousAccess.'
+    )
+  })
+
+  it('add nothing in English', async () => {
+    const f = (await check(anonymousRead)).finding('policy/anonymous-grant')!
+    expect(f).not.toHaveProperty('detailText')
   })
 })

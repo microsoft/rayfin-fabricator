@@ -25,6 +25,10 @@ pub struct AppVersions {
   /// determined (e.g. the platform isn't bundled).
   #[serde(skip_serializing_if = "Option::is_none")]
   pub copilot_bundled: Option<String>,
+  /// The rayfin-local that runs apps on this computer: the version a local
+  /// backend reported this session, else the one Fabricator runs reports.
+  /// `None` when neither says.
+  pub rayfin_local: Option<String>,
 }
 
 /* ----------------------------- updates ----------------------------- */
@@ -743,6 +747,11 @@ pub struct StudioProject {
   /// Team projects never deploy from this machine: the workspace's pipeline does.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub team: Option<TeamBinding>,
+  /// The GitHub CLI account Fabricator created this project's GitHub repository
+  /// as. Getting and pushing changes use that account's sign-in, whichever
+  /// account the CLI has active (see `commands::github_repo`).
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub github_account: Option<String>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub missing: Option<bool>,
   /// The Rayfin version the project has installed (its CLI's, or else an SDK
@@ -799,22 +808,6 @@ pub struct ExperimentFlags {
   /// default); each chat still has the plugin off until it's turned on there.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub work_iq: Option<bool>,
-  /// MCP servers: Build chat offers the MCP servers the user adds (a command
-  /// Fabricator runs on this computer, or a remote server's URL) among its
-  /// plugins. Opt-in (off by default); each chat still has a server off until
-  /// it's turned on there.
-  #[serde(default, skip_serializing_if = "Option::is_none")]
-  pub mcp_servers: Option<bool>,
-  /// Export as an app: Export project also offers a `.rayfin` app file,
-  /// which Fabricator installs and runs in a window of its own. Opt-in (off by
-  /// default). It gates exporting only: `.rayfin` files open either way.
-  #[serde(default, skip_serializing_if = "Option::is_none")]
-  pub app_export: Option<bool>,
-  /// Goals: a project's Goals tab, where the user writes what the app is for
-  /// and the checks it must keep passing (`GOALS.md`), and Copilot runs them
-  /// against a fresh copy of the app before a publish. Opt-in (off by default).
-  #[serde(default, skip_serializing_if = "Option::is_none")]
-  pub goals: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -826,6 +819,11 @@ pub struct AppSettings {
   /// on large/high-DPI monitors. Clamped to 0.8–2.0 when applied.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub ui_scale: Option<f64>,
+  /// The interface's language (Settings → Appearance → Language): one of
+  /// `i18n::LANGUAGES`, or unset for the computer's. The core's own text
+  /// follows it too.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub language: Option<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub experiments: Option<ExperimentFlags>,
   /// Capture full chat diagnostics (prompt/response text + tool I/O) for bug
@@ -845,15 +843,20 @@ pub struct AppSettings {
   /// pickers show. Never holds a key (those live in the OS credential store).
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub byok: Option<ByokSettings>,
-  /// The MCP servers the user added (the MCP servers experiment). Never holds
-  /// the values of their environment variables or headers (those live in the
-  /// OS credential store).
+  /// The MCP servers the user added. Never holds the values of their
+  /// environment variables or headers (those live in the OS credential store).
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub mcp_servers: Vec<McpServerEntry>,
   /// What a new project's chat starts with (Settings → Chat defaults). Each
   /// project's chat keeps its own choice after that.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub chat_defaults: Option<ChatDefaults>,
+  /// The user's own instructions for every app (Settings → Custom
+  /// instructions), saved as `agent_skills::custom_instructions` keeps them.
+  /// Every Build chat gets them beside Fabricator's guidance, from app data:
+  /// they're never written into a project.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub custom_instructions: Option<String>,
 }
 
 /// The model and plugins a new project's chat starts with, saved as a chat
@@ -888,10 +891,10 @@ pub enum McpTransport {
   Sse,
 }
 
-/// An MCP server the user added (the MCP servers experiment), which a Build
-/// chat can turn on among its plugins. Only the names of its environment
-/// variables or headers are here: their values are kept in the OS credential
-/// store (see `services::mcp::secrets`).
+/// An MCP server the user added, which a Build chat can turn on among its
+/// plugins. Only the names of its environment variables or headers are here:
+/// their values are kept in the OS credential store (see
+/// `services::mcp::secrets`).
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct McpServerEntry {
@@ -1507,6 +1510,30 @@ pub struct GithubAccountsResult {
   pub error: Option<String>,
 }
 
+/// A GitHub repository to create for a project.
+#[derive(Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct GithubRepoRequest {
+  /// The GitHub CLI account that creates it, and that Fabricator then gets and
+  /// pushes changes as.
+  pub account: String,
+  /// Who owns it: the account itself, or one of its organizations.
+  pub owner: String,
+  pub name: String,
+  pub private: bool,
+}
+
+#[derive(Serialize, Clone, Default, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct GithubRepoResult {
+  pub ok: bool,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub error: Option<String>,
+  /// The repository's page, such as `https://github.com/contoso/sales`.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub url: Option<String>,
+}
+
 /// One repository entry from `gh repo list` (fields flattened/normalized for the UI).
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -1887,9 +1914,8 @@ pub struct TeamBinding {
   pub pr_number: Option<u64>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub pr_url: Option<String>,
-  /// Which deployment the preview shows: "preview" (yours) or "production".
-  #[serde(default, skip_serializing_if = "Option::is_none")]
-  pub view: Option<String>,
+  /// Your personal preview, which the pipeline deploys once your pull request
+  /// is ready for review (draft pull requests don't deploy).
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub preview: Option<TeamDeployRecord>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2083,6 +2109,10 @@ pub struct TeamActionResult {
   /// Set when the action stopped on merge conflicts with teammates' changes.
   #[serde(skip_serializing_if = "Option::is_none")]
   pub conflicts: Option<Vec<String>>,
+  /// The app's npm packages changed (teammates' changes came in, or yours went
+  /// away), so the app on this computer needs them installed again.
+  #[serde(skip_serializing_if = "std::ops::Not::not")]
+  pub packages_changed: bool,
 }
 
 /// Something an unfinished setup created, which abandoning it deletes.
@@ -2190,8 +2220,6 @@ pub struct TeamSessionStatus {
   pub production: Option<TeamDeployRecord>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub publish: Option<TeamPublishState>,
-  /// "preview" or "production".
-  pub view: String,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub viewer: Option<String>,
 }
@@ -2823,7 +2851,7 @@ pub struct FileContent {
 
 /* ----------------------------- chat ----------------------------- */
 
-#[derive(Serialize, Deserialize, Clone, Default)]
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ChatToolState {
   #[default]
@@ -2867,9 +2895,29 @@ pub struct ChatToolCall {
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub ended_at: Option<f64>,
   /// The name the user gave the MCP server whose tool this is, for a server
-  /// they added (the MCP servers experiment); `title` then names the tool.
+  /// they added; `title` then names the tool.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub server: Option<String>,
+  /// For a step a subagent took: the id of the main agent's step that started
+  /// that agent (or the agent above it), which the step is shown under.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub parent: Option<String>,
+  /// For a step that started a subagent: the agent, and how its run went. A
+  /// background agent keeps working after the step that started it finished.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub agent: Option<ChatAgentRun>,
+}
+
+/// A subagent that a chat step started: its name, and how its run went.
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatAgentRun {
+  pub name: String,
+  pub state: ChatToolState,
+  /// It runs in the background, so the step that started it only reports that
+  /// it started; its result goes to the main agent.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub background: bool,
 }
 
 /// One chronological slice of an assistant turn (prose, a tool call, or a
@@ -3011,11 +3059,19 @@ pub enum ChatEvent {
   /// Incremental output from a still-running tool (appended by the renderer).
   #[serde(rename = "tool-output")]
   ToolOutput { id: String, text: String },
+  /// A subagent started by the main agent's step `id` began, got its name, or
+  /// finished. Steps it takes come as tool events with that step as `parent`.
+  #[serde(rename = "agent")]
+  Agent { id: String, name: String, state: ChatToolState, background: bool },
   /// Streamed readable reasoning; `id` groups the deltas of one reasoning block.
   #[serde(rename = "reasoning")]
   Reasoning { id: String, text: String },
   #[serde(rename = "notice")]
   Notice { text: String },
+  /// Chat turned a plugin on in the project (Fabric IQ, when the user takes
+  /// Copilot up on it), so the renderer reads the project's plugins again.
+  #[serde(rename = "plugins-changed")]
+  PluginsChanged,
   /// What Copilot Fusion has chosen for the turn so far; each replaces the last.
   #[serde(rename = "fusion")]
   Fusion { fusion: ChatFusion },
@@ -3374,11 +3430,11 @@ pub struct ChatMessage {
   /// Epoch ms the message was created (shown as its timestamp).
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub created_at: Option<f64>,
-  /// The Design changes a user message carried (`ChatDesignSummary`), rendered
-  /// as a card in the transcript. Opaque to Rust; must round-trip or it is
-  /// dropped when the renderer persists history.
+  /// The elements a user message picked in the preview with Touch Up
+  /// (`ChatPickRef[]`), rendered as chips in the transcript. Opaque to Rust;
+  /// must round-trip or it is dropped when the renderer persists history.
   #[serde(default, skip_serializing_if = "Option::is_none")]
-  pub design: Option<serde_json::Value>,
+  pub picks: Option<serde_json::Value>,
   /// The Advisor findings a user message handed to Copilot (`ChatAdvisorSummary`),
   /// rendered as a card in the transcript. Opaque to Rust; must round-trip or it
   /// is dropped when the renderer persists history.
@@ -3399,9 +3455,9 @@ pub struct ChatMessage {
   /// must round-trip or it is dropped when the renderer persists history.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub migration: Option<serde_json::Value>,
-  /// The prompt Copilot received when it differs from `text` (a Design turn's
-  /// structured changes, or a hand-off's full instructions); re-sent by Retry /
-  /// Try again / Resume.
+  /// The prompt Copilot received when it differs from `text` (picked elements'
+  /// details, or a hand-off's full instructions); re-sent by Retry / Try again /
+  /// Resume.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub prompt: Option<String>,
   /// What Copilot Fusion chose for an assistant turn, shown under it.
@@ -3461,12 +3517,31 @@ pub struct RayfinVersionInfo {
   pub latest: Option<String>,
   pub upgrade_available: bool,
   pub packages: Vec<RayfinPackageVersion>,
-  /// The newest stable release npm lists within the Rayfin versions the bundled
-  /// local backend runs (`rayfin-local.json` `sdk.supported`), for the headline
-  /// package: where a personal app's upgrades stop, so it keeps running on this
-  /// computer. Absent when npm couldn't list them or none is in the range.
+  /// Where Fabricator's updates go, for the headline package (Rayfin's packages
+  /// ship in lockstep): the newest stable release the bundled local backend
+  /// runs (`rayfin-local.json` `sdk.supported`) that isn't newer than npm's
+  /// `latest`, so the app keeps running on this computer. Absent when npm
+  /// couldn't list the releases or none is.
   #[serde(skip_serializing_if = "Option::is_none")]
-  pub latest_supported_locally: Option<String>,
+  pub recommended: Option<String>,
+  /// A stable release newer than `recommended`, which Fabricator offers too,
+  /// with a warning. Absent when there's none.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub newer: Option<RayfinNewerRelease>,
+}
+
+/// A Rayfin release newer than the one Fabricator's updates go to: the newest
+/// on npm, whatever its dist-tag, such as a `preview` 2.0.0 while `latest` is
+/// 1.36.2.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RayfinNewerRelease {
+  pub version: String,
+  /// Whether it's npm's `latest`. One that isn't might be unstable.
+  pub is_latest: bool,
+  /// Whether the bundled local backend runs it. With one it doesn't, some
+  /// things might not work as expected on this computer.
+  pub runs_locally: bool,
 }
 
 /// The newest Rayfin releases, for Home: it offers an update on the projects
@@ -3474,12 +3549,12 @@ pub struct RayfinVersionInfo {
 #[derive(Serialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct RayfinLatest {
-  /// The newest stable release on npm (a team app's upgrades go here).
+  /// The newest stable release on npm: its `latest` dist-tag.
   #[serde(skip_serializing_if = "Option::is_none")]
   pub latest: Option<String>,
-  /// The newest release the bundled local backend runs (a personal app's go here).
+  /// Where every app's updates go, as [`RayfinVersionInfo::recommended`].
   #[serde(skip_serializing_if = "Option::is_none")]
-  pub latest_supported_locally: Option<String>,
+  pub recommended: Option<String>,
 }
 
 /* ----------------------------- skills ----------------------------- */
@@ -3992,160 +4067,6 @@ pub struct AdvisorEventEnvelope {
   pub event: AdvisorEvent,
 }
 
-/* -------------------------------- goals -------------------------------- */
-
-/// How a goal check came out: `passed`, `failed` or `not-proven` (Copilot
-/// couldn't show it either way by calling the app).
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum GoalStatus {
-  Passed,
-  Failed,
-  #[default]
-  NotProven,
-}
-
-/// One check in `GOALS.md`: something the app must keep doing, in plain words.
-/// `id` comes from the text, so a reworded check is a new check.
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct GoalCheck {
-  pub id: String,
-  pub text: String,
-}
-
-/// A check's last outcome on this computer (never kept in the project).
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
-#[serde(rename_all = "camelCase", default)]
-pub struct GoalResult {
-  pub check_id: String,
-  /// The check as it read when it ran.
-  pub check: String,
-  pub status: GoalStatus,
-  /// One or two plain sentences: what Copilot found.
-  pub summary: String,
-  /// The calls that show it, as Fabricator made them: who called, what they
-  /// asked and how the app answered.
-  pub calls: Vec<String>,
-  /// What Copilot saw in those answers, or what's missing, as short lines.
-  pub evidence: Vec<String>,
-  /// RFC3339.
-  pub ran_at: String,
-  /// A signature of the app's code it ran against (its backend and screens).
-  pub fingerprint: String,
-  /// The app's code changed since (set on load).
-  pub stale: bool,
-}
-
-/// The last Goals run: when, how long, on which model, and what it covered.
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
-#[serde(rename_all = "camelCase", default)]
-pub struct GoalsRunInfo {
-  pub ran_at: String,
-  pub duration_ms: u64,
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub model: Option<String>,
-  /// Copilot's summary of the run.
-  pub summary: String,
-  /// The checks it ran.
-  pub check_ids: Vec<String>,
-  /// It ran every check.
-  pub all: bool,
-  /// It got through every check it was given.
-  pub complete: bool,
-}
-
-/// An app's goals: `GOALS.md` read, with each check's last result here.
-#[derive(Serialize, Clone, Debug, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct GoalsSnapshot {
-  /// `GOALS.md` exists.
-  pub exists: bool,
-  /// What the app is for, and who for.
-  pub purpose: String,
-  pub checks: Vec<GoalCheck>,
-  /// Results of the checks as they read now.
-  pub results: Vec<GoalResult>,
-  pub last_run: Option<GoalsRunInfo>,
-  /// Every check passed, on the app's code as it is now.
-  pub all_passed: bool,
-  /// Why the checks can't run for this app, when they can't.
-  pub cannot_run: Option<String>,
-  /// A run is going for this app (set by `goals_load`).
-  pub running: bool,
-}
-
-/// Arguments of `goals_run`.
-#[derive(Deserialize, Clone, Default)]
-#[serde(rename_all = "camelCase", default)]
-pub struct GoalsRunRequest {
-  /// The checks to run; all of them when absent.
-  pub check_ids: Option<Vec<String>>,
-  pub model: Option<String>,
-  pub effort: Option<String>,
-  pub auto_tier: Option<String>,
-  pub context_tier: Option<String>,
-}
-
-/// How a `goals_run` went (as its `done` event said), and the goals and
-/// results after it.
-#[derive(Serialize, Clone, Debug, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct GoalsRunEnd {
-  pub ok: bool,
-  pub cancelled: bool,
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub error: Option<String>,
-  pub snapshot: GoalsSnapshot,
-}
-
-/// Goals Copilot drafted from the app's code, for the user to edit and save.
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
-#[serde(rename_all = "camelCase", default)]
-pub struct GoalsProposal {
-  pub purpose: String,
-  pub checks: Vec<String>,
-}
-
-/// Streamed Goals events (main -> renderer), tagged by `type`.
-#[derive(Serialize, Clone)]
-#[serde(tag = "type")]
-pub enum GoalsEvent {
-  /// A run reached a step: `preparing` (copying the app), `starting`,
-  /// `seeding`, `checking` or `finishing` (removing the copy).
-  #[serde(rename = "phase")]
-  Phase {
-    phase: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    detail: Option<String>,
-  },
-  /// A tool call a run made (sent on start and again when it ends).
-  #[serde(rename = "activity")]
-  Activity { tool: ChatToolCall },
-  /// A check's outcome, as Copilot reported it.
-  #[serde(rename = "result")]
-  Result { result: GoalResult },
-  /// A tool call a draft made.
-  #[serde(rename = "draftActivity")]
-  DraftActivity { tool: ChatToolCall },
-  /// A run ended: `ok` when every check it was given has a result, else
-  /// `cancelled`, or `error` saying why it stopped short.
-  #[serde(rename = "done")]
-  Done {
-    ok: bool,
-    cancelled: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-  },
-}
-
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct GoalsEventEnvelope {
-  pub project_id: String,
-  pub event: GoalsEvent,
-}
-
 /* --------------------------- help assistant --------------------------- */
 
 /// A safe app operation the assistant offered, rendered as a button under its
@@ -4476,7 +4397,7 @@ mod tests {
       questions: None,
       elapsed_ms: None,
       created_at: None,
-      design: None,
+      picks: None,
       advisor: None,
       data: None,
       files: None,
@@ -4518,7 +4439,7 @@ mod tests {
       }]),
       elapsed_ms: None,
       created_at: None,
-      design: None,
+      picks: None,
       advisor: None,
       data: None,
       files: None,
@@ -4549,28 +4470,25 @@ mod tests {
   }
 
   #[test]
-  fn chat_message_round_trips_a_design_summary_and_hidden_prompt() {
+  fn chat_message_round_trips_picked_elements_and_the_hidden_prompt() {
     let raw = serde_json::json!({
       "id": "u1",
       "role": "user",
-      "text": "Make it pop",
-      "attachments": 2,
-      "attachmentThumbs": ["data:image/png;base64,AA", "data:image/png;base64,BB"],
-      "design": {
-        "items": [{ "n": 1, "kind": "element", "label": "Button · Save", "summary": "Background: bg-indigo-600 → bg-indigo-700", "shot": 1 }],
-        "full": 0
-      },
-      "prompt": "Make it pop\n\n## Design changes from the live preview (1)"
+      "text": "Make it the primary action",
+      "attachments": 1,
+      "attachmentThumbs": ["data:image/png;base64,AA"],
+      "picks": [{ "n": 1, "label": "Button · Save", "shot": 0 }],
+      "prompt": "Make it the primary action\n\n## Picked in the live preview (1)"
     });
     let msg: ChatMessage = serde_json::from_value(raw.clone()).unwrap();
-    assert_eq!(msg.prompt.as_deref(), Some("Make it pop\n\n## Design changes from the live preview (1)"));
+    assert_eq!(msg.prompt.as_deref(), Some("Make it the primary action\n\n## Picked in the live preview (1)"));
     let back = serde_json::to_value(&msg).unwrap();
-    assert_eq!(back["design"], raw["design"]);
+    assert_eq!(back["picks"], raw["picks"]);
     assert_eq!(back["prompt"], raw["prompt"]);
     // Plain messages don't grow the new keys.
     let plain: ChatMessage = serde_json::from_str(r#"{"id":"m1","role":"user","text":"hi"}"#).unwrap();
     let json = serde_json::to_value(&plain).unwrap();
-    assert!(json.get("design").is_none());
+    assert!(json.get("picks").is_none());
     assert!(json.get("advisor").is_none());
     assert!(json.get("prompt").is_none());
   }
@@ -4704,6 +4622,48 @@ mod tests {
   }
 }
 
+/* -------------------------------- terminal -------------------------------- */
+// The project terminal (services/terminal): shells in pseudoterminals, started
+// in a project's folder.
+
+/// A shell a terminal can run.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalShell {
+  /// `pwsh`, `powershell`, `cmd`, `git-bash`, or a Unix shell's name (`zsh`).
+  pub id: String,
+  /// As the shell picker lists it: "PowerShell", "Command Prompt", "zsh".
+  pub name: String,
+  /// Its executable.
+  pub path: String,
+  /// What a new terminal runs unless another is chosen.
+  pub default: bool,
+}
+
+/// A terminal that started.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalInfo {
+  pub id: String,
+  pub shell_id: String,
+  pub shell_name: String,
+  /// The folder it started in: the project's.
+  pub cwd: String,
+  pub pid: Option<u32>,
+  /// Windows' build number, which decides how xterm.js treats ConPTY; `None` elsewhere.
+  pub windows_build: Option<u32>,
+}
+
+/// What a terminal streams to the renderer on its channel.
+#[derive(Serialize, Clone, Debug)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum TerminalEvent {
+  /// What the shell printed, terminal escapes and all.
+  Output { data: String },
+  /// The shell ended, after its last output; `code` when the OS reported one.
+  Exit { code: Option<u32> },
+}
+
 /* ----------------------------- local backend ----------------------------- */
 // Each personal project's whole Rayfin backend runs on this computer under
 // rayfin-local (services/local_backend). These mirror its host contract
@@ -4755,8 +4715,7 @@ pub struct LocalStartOptions {
 }
 
 /// How rayfin-local serves an app installed from a `.rayfin` file: its build,
-/// from the backend's origin, on a port that stays the same. Goals runs serve
-/// only the backend of a copy of the app.
+/// from the backend's origin, on a port that stays the same.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ServeMode {
   /// `--static`: build the app and serve it from the backend, without Vite.
@@ -4765,8 +4724,6 @@ pub struct ServeMode {
   pub reuse_build: bool,
   /// `--port`.
   pub port: Option<u16>,
-  /// `--no-frontend`: run only the backend.
-  pub no_frontend: bool,
 }
 
 /// The Rayfin SDK an app uses, and whether rayfin-local implements it.

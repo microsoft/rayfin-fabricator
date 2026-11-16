@@ -24,6 +24,7 @@ import {
   type PendingChanges,
   type PortConflict,
   type ProjectsState,
+  type RayfinNewerRelease,
   type RayfinVersionInfo,
   type StudioProject,
   type UnsupportedWorkspace
@@ -44,6 +45,7 @@ import PortConflictModal, {
 import SettingsModal from '../components/SettingsModal'
 import McpServersModal from '../components/mcp/McpServersModal'
 import ChatDefaultsModal from '../components/ChatDefaultsModal'
+import CustomInstructionsModal from '../components/CustomInstructionsModal'
 import { applyUiScale, UI_SCALES } from '../theme'
 import ChatPanel, { type UIChatMessage, type OutboundPrompt } from '../components/ChatPanel'
 import { segmentsForStorage, segmentsFromStorage } from '../components/chat/storage'
@@ -60,6 +62,9 @@ import { LOCAL_QUESTION } from '../components/local/problems'
 import {
   backendStamp,
   changesLocalSupport,
+  fallbackSdkVersion,
+  hasFabricBackend,
+  installedSdkVersion,
   isLocalBackendActive,
   localBackendStore,
   localFallbackCode,
@@ -70,7 +75,7 @@ import {
   useLocalBackend
 } from '../localBackend'
 import DeploymentsControl from '../components/DeploymentsControl'
-import { publishesAfterTurn, upgradesWithinLocalRange } from '../localDevelopment'
+import { newerRayfin, publishesAfterTurn, recommendedUpdates, updatesTo } from '../localDevelopment'
 import GitControl from '../components/GitControl'
 import TeamPublishControl from '../components/team/TeamPublishControl'
 import TeamMapView from '../components/team/map/TeamMapView'
@@ -79,7 +84,7 @@ import { withActivity } from '../components/team/appRun'
 import { useTeamWork } from '../components/team/useTeamWork'
 import ProjectDependencyGuard from '../components/ProjectDependencyGuard'
 import WorkspaceStatus from '../components/WorkspaceStatus'
-import { SuppressPreview } from '../overlay'
+import { SuppressPreview, topLayerOpen } from '../overlay'
 import RayfinVersionControl from '../components/RayfinVersionControl'
 import StatusMenu from '../components/StatusMenu'
 import AdvisorView from '../components/advisor/AdvisorView'
@@ -87,9 +92,6 @@ import { AdvisorFixContext, type AdvisorFixLinks } from '../components/advisor/A
 import { useAdvisor } from '../advisor/store'
 import { fixOutcomes } from '../advisor/lifecycle'
 import { fixPrompt, isVersionFinding } from '../advisor/prompts'
-import GoalsView from '../components/goals/GoalsView'
-import { useGoals } from '../goals/store'
-import { failingNow, gapText, goalsGap, type GoalsGap } from '../goals/model'
 import BlueprintTab from '../components/blueprint/BlueprintTab'
 import MigrationCard from '../components/migrate/MigrationCard'
 import MigrateReportScreen, { describePick, type ReportPick } from '../components/migrate/MigrateReportScreen'
@@ -115,6 +117,7 @@ import { DEPLOY_QUESTION } from '../components/help/parts'
 import Spotlight from '../components/spotlight/Spotlight'
 import { workbenchSearch } from '../components/spotlight/workbenchSearch'
 import { isMac, modKey, shortcut } from '../platform'
+import { Trans, translator, useTranslation } from '../i18n'
 import { errorMessage, setErrorProject } from '../errorReport'
 import { accountFacts, workbenchFacts } from '../helpFacts'
 import type { HelpAction, HelpIssueDraft, InstalledApp } from '@shared/ipc'
@@ -133,13 +136,18 @@ import {
 } from '../components/AppBar'
 import { DeploymentQueue } from '../deploymentQueue'
 import { refusedAfterPublish, workspaceUses } from '../fabric'
-import { useDesignSession, type DesignSurface } from '../design/useDesignSession'
+import { useTouchUp, type PickSurface } from '../pick/useTouchUp'
 import { readStoredSelection, selectionArgs, writeStoredSelection, type ModelSelection } from '../modelSelection'
 import { toProjectName } from '../projectName'
 import { ThumbnailCapture } from '../thumbnails'
+import {
+  liveCount,
+  projectTerminals,
+  terminalFocused,
+  terminalStore,
+  useTerminalState
+} from '../terminal/store'
 
-/** Where the Design bar's model is kept. */
-const DESIGN_MODEL_KEY = 'fabricator.design.model'
 /** Help's offered steps that open a browser or a folder rather than a place in the app. */
 const HELP_ACTIONS_ELSEWHERE = new Set<HelpAction['id']>([
   'open-docs',
@@ -152,9 +160,14 @@ const MIGRATION_MODEL_KEY = 'fabricator.migration.model'
 /** How long the local backend's rebuild has to settle (an analysis, then the schema
  *  and functions it leads to) before the open page loads again, once. */
 const LOCAL_RELOAD_SETTLE_MS = 500
+/** How often an app that falls back for its Rayfin version has that version read again:
+ *  a terminal can update its packages, which nothing else notices. */
+const SDK_RECHECK_MS = 15_000
 
 // Monaco is heavy (~7 MB); only load the code viewer when the Code tab is opened.
 const CodeViewer = lazy(() => import('../components/CodeViewer'))
+// xterm.js loads with the terminal the first time it's opened.
+const TerminalPanel = lazy(() => import('../components/terminal/TerminalPanel'))
 
 /** Hydrate a persisted message into a live (non-pending) UI message. */
 function toUi(m: ChatMessage): UIChatMessage {
@@ -192,7 +205,7 @@ function toStored(messages: UIChatMessage[]): ChatMessage[] {
       createdAt,
       plan,
       questions,
-      design,
+      picks,
       advisor,
       data,
       files,
@@ -207,8 +220,14 @@ function toStored(messages: UIChatMessage[]): ChatMessage[] {
         text,
         // A turn cut off mid-command leaves a tool 'running'; settle it so the
         // reloaded transcript shows a finished (errored) tile, not a spinner.
+        // A subagent still working is settled the same way.
         tools: cutOff
-          ? tools.map((t) => (t.state === 'running' ? { ...t, state: 'error' } : t))
+          ? tools.map((t) => {
+              const settled = t.state === 'running' ? { ...t, state: 'error' as const } : t
+              return t.agent?.state === 'running'
+                ? { ...settled, agent: { ...t.agent, state: 'error' as const } }
+                : settled
+            })
           : tools,
         segments: segmentsForStorage(segments),
         error,
@@ -223,7 +242,7 @@ function toStored(messages: UIChatMessage[]): ChatMessage[] {
           ? questions?.map((q) => (q.state === 'pending' ? { ...q, state: 'interrupted' } : q))
           : questions,
         interrupted: cutOff ? true : undefined,
-        design,
+        picks,
         advisor,
         data,
         files,
@@ -235,8 +254,12 @@ function toStored(messages: UIChatMessage[]): ChatMessage[] {
   )
 }
 
-/** The deployment a project's local preview takes its backend settings from. */
+/** The deployment a project's live preview on a Fabric backend takes its
+ *  backend settings from: its published app, or a team app's deployments. */
 function deploymentKey(project: StudioProject): string {
+  if (project.team) {
+    return `team|${project.team.preview?.itemId ?? ''}|${project.team.production?.itemId ?? ''}`
+  }
   return `${project.workspace ?? ''}|${project.lastDeploy?.url ?? ''}`
 }
 
@@ -246,31 +269,45 @@ function lastDeployFailed(project: StudioProject, deploy: DeployUiState | undefi
   return deploy?.result ? !deploy.result.ok : project.lastDeploy?.status === 'error'
 }
 
-/**
- * What a chat turn asked for, to name the version it saves: the user's words,
- * or the Design changes it carried when they came without a note.
- */
+/** What a chat turn asked for, to name the version it saves: the user's words. */
 function turnRequest(message: UIChatMessage | undefined): string {
-  const text = message?.text.trim() ?? ''
-  if (text || !message?.design) return text
-  const n = message.design.items.length
-  return `Apply ${n} design change${n === 1 ? '' : 's'}`
+  return message?.text.trim() ?? ''
 }
 
 /**
  * How the Rayfin upgrade hand-off tells Copilot the upgrade reaches Fabric, as
- * it's true for the app: a team app's pipeline publishes its preview; a
- * personal app is published as the turn finishes only while turns publish,
- * once it has been published before.
+ * it's true for the app: a team app's pipeline publishes it once the user
+ * publishes; a personal app is published as the turn finishes only while
+ * turns publish, once it has been published before.
  */
 function upgradeDelivery(project: StudioProject | undefined, turnsPublish: boolean): string {
   const dont = 'Do not run `rayfin up` or publish the app'
   if (project?.team) {
-    return `${dont}: Fabricator saves the change, and the team pipeline publishes the preview.`
+    return `${dont}: Fabricator runs it on this computer and saves the change, and the team pipeline publishes it when the user publishes.`
   }
   return turnsPublish && project?.lastDeploy?.url
     ? `${dont}: Fabricator runs it on this computer, and publishes it once this turn finishes.`
     : `${dont}: Fabricator runs it on this computer, and the user publishes it when they choose.`
+}
+
+/**
+ * What an update to a Rayfin release newer than the recommended one tells
+ * Copilot: why it needs care, which the user saw before choosing it.
+ */
+function newerUpdateNote(newer: RayfinNewerRelease): string {
+  const notes: string[] = []
+  if (!newer.isLatest) {
+    notes.push(
+      `Rayfin ${newer.version} isn't Rayfin's latest release yet (npm's \`latest\` tag), so it might be unstable.`
+    )
+  }
+  if (!newer.runsLocally) {
+    notes.push(
+      `Fabricator's local backend doesn't run Rayfin ${newer.version} yet, so some things might not work as expected on this computer.`
+    )
+  }
+  notes.push('I chose it anyway: make the change, and remind me of this in your summary.')
+  return notes.join(' ')
 }
 
 interface Props {
@@ -302,13 +339,14 @@ export default function Workbench({
   onSettled,
   onOpening
 }: Props): JSX.Element {
+  const { t } = useTranslation('workbench')
   const toast = useToast()
   const [versions, setVersions] = useState<AppVersions | null>(null)
   const [signingOut, setSigningOut] = useState(false)
   const [signingIn, setSigningIn] = useState(false)
   const [refreshingAuth, setRefreshingAuth] = useState(false)
   const [showAccounts, setShowAccounts] = useState(false)
-  /** The MCP servers dialog (MCP servers experiment), opened on adding a server when `adding`. */
+  /** The MCP servers dialog, opened on adding a server when `adding`. */
   const [mcpDialog, setMcpDialog] = useState<{ adding: boolean } | null>(null)
   /** The attention bar was dismissed for these problems (it returns for new ones). */
   const [dismissedAttention, setDismissedAttention] = useState<string | null>(null)
@@ -325,6 +363,8 @@ export default function Workbench({
   const [showSettings, setShowSettings] = useState(false)
   /** Chat defaults, opened from Settings or Search. */
   const [showChatDefaults, setShowChatDefaults] = useState(false)
+  /** Custom instructions, opened from Settings or Search. */
+  const [showCustomInstructions, setShowCustomInstructions] = useState(false)
   /** The full-screen Help assistant, opened from the status bar or Ctrl/Cmd+J. */
   const [showHelp, setShowHelp] = useState(false)
   /** What Help was opened to ask, such as why a deploy failed. */
@@ -385,16 +425,6 @@ export default function Workbench({
   /** Lazy-mount the Advisor view on first visit, then keep it mounted (hidden when
    * inactive) so an in-flight review's live feed/timer/results survive tab switches. */
   const [advisorMounted, setAdvisorMounted] = useState(false)
-  /** Goals mounts on first visit the same way, so its editor and open checks survive tab switches. */
-  const [goalsMounted, setGoalsMounted] = useState(false)
-  /** A user publish paused because the app's goals haven't all passed on this version. */
-  const [goalsGate, setGoalsGate] = useState<{
-    projectId: string
-    workspace?: string
-    itemName?: string
-    gap: GoalsGap
-    running: boolean
-  } | null>(null)
   /** When true, the projects launcher (HomeView) is shown ON TOP of the still-active
    * project — the project stays mounted in the background so any in-flight chat turn
    * or Advisor review keeps running. Cleared when the launcher is dismissed or a
@@ -501,15 +531,13 @@ export default function Workbench({
     localStorage.setItem('rayfin.splitFrac', '0.5')
   }
   const [chats, setChats] = useState<Record<string, UIChatMessage[]>>({})
-  useChatEventStore(setChats)
   const [deploys, setDeploys] = useState<Record<string, DeployUiState>>({})
   /** Live preview against a Fabric backend: per-project Vite dev-server state.
-   *  For team apps, and published apps their local backend can't run (other
-   *  personal apps run on their local backend, `useLocalBackend`). Present while a turn runs —
-   *  started at turn start, cleared/stopped at turn end. A team app's `lingers`
-   *  after its turn until the pipeline has published the saved change, and
-   *  while turns don't publish, the open app's preview is `kept` running while
-   *  the app is open. */
+   *  For apps their local backend can't run (see `fallsBack`): every other app,
+   *  team apps included, runs on its local backend (`useLocalBackend`). Present
+   *  while a turn runs — started at turn start, cleared/stopped at turn end.
+   *  While turns don't publish (always, for a team app), the open app's preview
+   *  is `kept` running while the app is open. */
   const [devServers, setDevServers] = useState<
     Record<
       string,
@@ -517,7 +545,6 @@ export default function Workbench({
         status: 'starting' | 'running'
         url?: string
         backend?: DevServerResult['backend']
-        lingerSince?: number
         kept?: boolean
         /** Kept on screen through the after-turn publish (beside it), and closed when it ends. */
         untilDeployed?: boolean
@@ -528,27 +555,28 @@ export default function Workbench({
   >({})
   const devServersRef = useRef(devServers)
   devServersRef.current = devServers
-  /** Published apps their local backend can't run (see `localFallbackReason`), by
-   *  project: why their preview uses the published backend instead, through the
-   *  dev server above. Kept until the local backend runs the app, so opening one
-   *  again doesn't start its backend only to stop it. */
+  /** Apps their local backend can't run (see `localFallbackReason`), by
+   *  project: why their preview uses their backend in Fabric instead, through
+   *  the dev server above. Kept until the local backend runs the app, so
+   *  opening one again doesn't start its backend only to stop it. */
   const [fallbacks, setFallbacks] = useState<Record<string, string>>({})
   const fallbacksRef = useRef(fallbacks)
   fallbacksRef.current = fallbacks
-  /** A published app its local backend can't run, so it previews on its published
-   *  backend: known, or just reported by its backend. (Called after render.) */
+  /** An app its local backend can't run, so it previews on its backend in
+   *  Fabric (its published app, or a team app's deployment): known, or just
+   *  reported by its backend. (Called after render.) */
   const fallsBack = useCallback((projectId: string): boolean => {
     if (fallbacksRef.current[projectId]) return true
-    const published = Boolean(
-      projectsRef.current?.projects.find((p) => p.id === projectId)?.lastDeploy?.url
+    const project = projectsRef.current?.projects.find((p) => p.id === projectId)
+    return (
+      hasFabricBackend(project) && localFallbackReason(localBackendStore.get(projectId)) !== null
     )
-    return published && localFallbackReason(localBackendStore.get(projectId)) !== null
   }, [])
   /** Local backends stopping (their app falls back), so a dev server waits for
    *  their ports. */
   const localStoppingRef = useRef<Map<string, Promise<unknown>>>(new Map())
-  /** Which app each published personal app's preview shows: the one on this
-   *  computer (the default) or the published one. */
+  /** Which app each published app's preview shows: the one on this computer
+   *  (the default) or the published one. */
   const [previewViews, setPreviewViews] = useState<Record<string, PreviewView>>({})
   /** Live local preview: a port conflict waiting on the user's choice. */
   const [portPrompt, setPortPrompt] = useState<{
@@ -595,6 +623,11 @@ export default function Workbench({
   projectsRef.current = projects
   /** The currently active project (or null). Declared early — effects depend on it. */
   const active = projects?.projects.find((p) => p.id === projects.activeProjectId) ?? null
+  /** The open project's terminals, in the panel under its views. */
+  const terminalState = useTerminalState()
+  const activeTerminals = projectTerminals(terminalState, active?.id)
+  /** A shell is in front in the panel, rather than the app's Output. */
+  const shellShowing = activeTerminals.open && !activeTerminals.output
   /** The project whose preview first had something to show (see onSettled). */
   const [previewSettledId, setPreviewSettledId] = useState<string | null>(null)
   const onSettledRef = useRef(onSettled)
@@ -631,25 +664,25 @@ export default function Workbench({
   const activeChatBusy = Boolean(
     active && (chats[active.id] ?? []).some((m) => m.role === 'assistant' && m.pending)
   )
-  /** The open app's Rayfin versions as the app offers them: a personal app's
-   *  upgrades stop at the newest release the local backend runs, so it keeps
-   *  running on this computer. */
-  const capVersions = Boolean(active && !active.team)
+  /** The open app's Rayfin versions as the app offers them: updates go to the
+   *  release Fabricator recommends, the newest the local backend runs that
+   *  isn't newer than Rayfin's latest, so the app keeps running on this
+   *  computer (a team app too). */
+  const projectOpen = Boolean(active)
   const versionInfo = useMemo(
-    () => (rayfinVer && capVersions ? upgradesWithinLocalRange(rayfinVer) : rayfinVer),
-    [rayfinVer, capVersions]
+    () => (rayfinVer && projectOpen ? recommendedUpdates(rayfinVer) : rayfinVer),
+    [rayfinVer, projectOpen]
   )
+  /** A newer release than that, such as a preview, offered too, with a warning. */
+  const newerVersion = useMemo(() => newerRayfin(rayfinVer), [rayfinVer])
   /** Advisor state for the active project — owned here so the tab badge stays current. */
   const advisor = useAdvisor(active, {
     refreshKey: gitRefresh,
     versions: versionInfo,
     chatBusy: activeChatBusy
   })
-  /** Goals (an experiment) for the open app; team apps don't have them. */
-  const goalsOn = Boolean(settings?.experiments?.goals && active && !active.team)
-  const goals = useGoals(active, { enabled: goalsOn, refreshKey: gitRefresh })
-  /** The preview surface Design can run on, reported by the PreviewPane. */
-  const [designSurface, setDesignSurface] = useState<DesignSurface | null>(null)
+  /** The preview surface Touch Up can run on, reported by the PreviewPane. */
+  const [pickSurface, setPickSurface] = useState<PickSurface | null>(null)
   /** Accounts opens at this section (Model providers, from a model picker). */
   const [accountsAt, setAccountsAt] = useState<'providers' | null>(null)
   const openModelProviders = useCallback((): void => {
@@ -659,25 +692,11 @@ export default function Workbench({
   useEffect(() => {
     if (!showAccounts) setAccountsAt(null)
   }, [showAccounts])
-  /** The Design bar's model, kept on this computer. Auto lets Design pick a fast model. */
-  const [designChoice, setDesignChoiceState] = useState<ModelSelection>(() =>
-    readStoredSelection(DESIGN_MODEL_KEY)
-  )
-  const setDesignChoice = useCallback((next: ModelSelection): void => {
-    setDesignChoiceState(next)
-    writeStoredSelection(DESIGN_MODEL_KEY, next)
-  }, [])
-  /** Design mode ("visual chat") for the active project. The queue is shared by
-   *  the preview (where changes are made) and the chat composer (where they're sent). */
-  const design = useDesignSession(
-    active?.id ?? null,
-    viewMode === 'build' ? designSurface : null,
-    designChoice
-  )
 
   const onDevServerError = useCallback((reason: unknown): void => {
-    toast.error(authErrorMessage(reason, 'The local preview could not be updated.'), {
-      title: 'Local preview'
+    const t = translator('workbench')
+    toast.error(authErrorMessage(reason, t('preview.updateFailed')), {
+      title: t('preview.title')
     })
   }, [toast])
 
@@ -705,20 +724,27 @@ export default function Workbench({
   const removals = useProjectRemovals({
     onSignedIn: onAuthChanged,
     // A live preview runs from the project's folder; stop it before the folder moves.
+    // So do its terminals' shells, which would keep it in use on Windows.
     beforeTrash: async (project) => {
       stopDevServer(project.id)
-      await stoppingRef.current.get(project.id)
+      const terminals = projectTerminals(terminalStore.getState(), project.id).tabs.length > 0
+      terminalStore.forget(project.id)
+      await Promise.all([
+        stoppingRef.current.get(project.id),
+        terminals ? window.api.terminal.killAll(project.id).catch(() => undefined) : undefined
+      ])
     },
     onRemoved: (project, next, appDeleted) => {
+      const t = translator('workbench')
       setProjects((current) => (current ? withoutProject(current, project.id) : next))
-      toast.success(
-        appDeleted
-          ? 'Its folder is in your system trash, and its published app is deleted.'
-          : 'Its folder is in your system trash. You can restore it from there.',
-        { title: `Removed ${project.name}` }
-      )
+      toast.success(appDeleted ? t('remove.trashedAndAppDeleted') : t('remove.trashed'), {
+        title: t('remove.removed', { name: project.name })
+      })
     },
-    onFailed: (project, error) => toast.error(error, { title: `Couldn’t remove ${project.name}` })
+    onFailed: (project, error) =>
+      toast.error(error, {
+        title: translator('workbench')('remove.failed', { name: project.name })
+      })
   })
   /** Projects being removed can't be opened or managed, so the switcher and Search leave them out. */
   const removingIds = useMemo(
@@ -751,7 +777,7 @@ export default function Workbench({
     mountedRef.current = true
     return () => {
       mountedRef.current = false
-      deployQueueRef.current.cancelPending('The workbench closed before publishing started.')
+      deployQueueRef.current.cancelPending(translator('workbench')('publish.closedBeforeStart'))
       // Nothing else closes a live preview kept while turns don't publish (or
       // kept on screen through an after-turn publish) once the workbench is gone.
       for (const [projectId, server] of Object.entries(devServersRef.current)) {
@@ -767,14 +793,36 @@ export default function Workbench({
   const addShot = useCallback((key: string, shot: PendingShot): void => {
     setShots((all) => ({ ...all, [key]: [...(all[key] ?? []), shot] }))
   }, [])
+  const shotsRef = useRef(shots)
+  shotsRef.current = shots
+  /** A staged picture was drawn on: `shot` takes the place of the one at `path`. */
+  const replaceShot = useCallback((key: string, path: string, shot: PendingShot): void => {
+    if (!(shotsRef.current[key] ?? []).some((s) => s.path === path)) {
+      // It went out with a message while the drawing was being saved.
+      void window.api.screenshot.cleanup([shot.path])
+      return
+    }
+    setShots((all) => ({
+      ...all,
+      [key]: (all[key] ?? []).map((s) => (s.path === path ? shot : s))
+    }))
+    void window.api.screenshot.cleanup([path])
+  }, [])
+  /** Touch Up for the active project: elements picked in the preview wait in
+   *  the chat composer, and regions clipped there join the next message. */
+  const touchUp = useTouchUp(active?.id ?? null, viewMode === 'build' ? pickSurface : null, addShot)
 
   const removeShot = useCallback((key: string, path: string): void => {
     setShots((all) => ({ ...all, [key]: (all[key] ?? []).filter((s) => s.path !== path) }))
     void window.api.screenshot.cleanup([path])
   }, [])
 
-  const clearShots = useCallback((key: string): void => {
-    setShots((all) => ({ ...all, [key]: [] }))
+  /** Staged pictures went out with a message: those at `paths`, or all of them. */
+  const clearShots = useCallback((key: string, paths?: readonly string[]): void => {
+    setShots((all) => ({
+      ...all,
+      [key]: paths ? (all[key] ?? []).filter((s) => !paths.includes(s.path)) : []
+    }))
   }, [])
 
   const setDraftFor = useCallback((key: string, value: string): void => {
@@ -791,6 +839,8 @@ export default function Workbench({
   const refreshProjects = useCallback(async (): Promise<void> => {
     setProjects(await window.api.projects.state())
   }, [])
+  // Chat turns Fabric IQ on when you agree: its plugins show it on.
+  useChatEventStore(setChats, () => void refreshProjects())
 
   /** Import these files, after any already waiting. */
   const queueImports = useCallback((paths: string[]): void => {
@@ -850,11 +900,16 @@ export default function Workbench({
     setViewMode('build')
     setChatOutbound({ id: `team-${Date.now()}`, projectId, display, prompt })
   }, [])
+  /** Installs a team app's packages again after git changed them (see afterGitSync, set below). */
+  const afterGitSyncRef = useRef<
+    ((projectId: string, packagesChanged?: boolean) => Promise<void>) | null
+  >(null)
   const teamWork = useTeamWork(active, {
     enabled: teamEnabled,
     toast,
     refreshProjects,
-    sendToChat: sendTeamPrompt
+    sendToChat: sendTeamPrompt,
+    onPackagesChanged: (projectId) => void afterGitSyncRef.current?.(projectId, true)
   })
   const teamWorkRef = useRef(teamWork)
   teamWorkRef.current = teamWork
@@ -862,12 +917,6 @@ export default function Workbench({
     (projectId: string): boolean =>
       Boolean(projectsRef.current?.projects.find((p) => p.id === projectId)?.team),
     []
-  )
-  /** The project previews through a dev server against a Fabric backend: a team
-   *  app, or a published app its local backend can't run. */
-  const usesDevServer = useCallback(
-    (projectId: string): boolean => isTeamProject(projectId) || fallsBack(projectId),
-    [isTeamProject, fallsBack]
   )
   const activeTeamWorkspace = active?.team
     ? projects?.teamWorkspaces?.find((w) => w.id === active.team?.workspaceId)
@@ -905,39 +954,21 @@ export default function Workbench({
   }, [])
   const closeGallery = useCallback((): void => setGallery(null), [])
 
-  const mcpServersEnabled = Boolean(settings?.experiments?.mcpServers)
   const openMcpServers = useCallback((adding = false): void => setMcpDialog({ adding }), [])
-  // The MCP servers dialog closes when its experiment is turned off.
-  useEffect(() => {
-    if (!mcpServersEnabled) setMcpDialog(null)
-  }, [mcpServersEnabled])
 
-  // A team app's live preview stays up after its turn while the change is
-  // saved and the pipeline publishes it. It ends once your preview has that
-  // change (or publishing finished with an error), when there's nothing to
-  // publish, when you leave the app, or after 20 minutes. A preview kept while
-  // turns don't publish ends when you leave the app, as does one kept on screen
-  // through an after-turn publish. A published app's ends once its local
-  // backend runs the app.
+  // A live preview on a Fabric backend kept while turns don't publish ends when
+  // you leave the app, as does one kept on screen through an after-turn
+  // publish. One ends once its local backend runs the app.
   useEffect(() => {
     for (const [projectId, server] of Object.entries(devServers)) {
-      if (!usesDevServer(projectId)) {
+      if (!fallsBack(projectId)) {
         stopDevServer(projectId)
         continue
       }
-      if ((server.kept || server.untilDeployed) && projectId !== active?.id) stopDevServer(projectId)
-      if (!server.lingerSince) continue
-      const status = teamWork.status(projectId)
-      const head = status?.pr?.headSha
-      const running = Boolean(status?.run && status.run.status !== 'completed')
-      const deploying = ['in_progress', 'queued', 'pending'].includes(status?.preview?.state ?? '')
-      const caughtUp = Boolean(head && status?.preview?.sha === head && !deploying)
-      const nothingToDeploy = Boolean(status && !status.pr && status.unpublished === 0)
-      const settled = Boolean(status && !teamWork.syncing(projectId) && !status.dirty && !running) && (caughtUp || nothingToDeploy)
-      const stale = Date.now() - server.lingerSince > 20 * 60_000
-      if (projectId !== active?.id || settled || stale) stopDevServer(projectId)
+      if ((server.kept || server.untilDeployed) && projectId !== active?.id)
+        stopDevServer(projectId)
     }
-  }, [devServers, teamWork, active?.id, stopDevServer, usesDevServer, fallbacks])
+  }, [devServers, active?.id, stopDevServer, fallsBack, fallbacks])
 
   // Showing or hiding team workspaces changes which projects the backend lists.
   // The first value seen is the one the projects were just loaded with.
@@ -954,10 +985,8 @@ export default function Workbench({
     if (!active?.team) return
     const status = teamWorkRef.current.status(active.id)
     if (status && status.unpublished > 0) {
-      toast.info(
-        `${active.name} has unpublished changes. They're saved on GitHub; publish them when you're ready.`,
-        { title: 'Not published yet' }
-      )
+      const t = translator('workbench')
+      toast.info(t('team.unpublished', { name: active.name }), { title: t('team.notPublished') })
     }
   }, [active, toast])
 
@@ -967,8 +996,9 @@ export default function Workbench({
       await onAuthChanged()
     } catch (reason) {
       if (!mountedRef.current) return
-      toast.error(authErrorMessage(reason, 'Could not verify sign-in. Please retry.'), {
-        title: 'Sign-in check failed'
+      const t = translator('workbench')
+      toast.error(authErrorMessage(reason, t('startup.verifySignIn', { ns: 'app' })), {
+        title: t('auth.verifyFailedTitle')
       })
     }
   }, [onAuthChanged, toast])
@@ -979,7 +1009,8 @@ export default function Workbench({
     // Guard against a stale response after the user switches projects.
     if (activeIdRef.current === projectId) {
       rayfinVerForRef.current = projectId
-      setRayfinVer(info)
+      // The same versions again (read now and then, see SDK_RECHECK_MS) change nothing.
+      setRayfinVer((current) => (JSON.stringify(current) === JSON.stringify(info) ? current : info))
     }
   }, [])
 
@@ -1016,7 +1047,8 @@ export default function Workbench({
           delete next[event.projectId]
           return next
         })
-        toast.error(event.error ?? 'The local preview stopped.', { title: 'Local preview stopped' })
+        const t = translator('workbench')
+        toast.error(event.error ?? t('preview.stopped'), { title: t('preview.stoppedTitle') })
       }),
     [toast]
   )
@@ -1054,9 +1086,10 @@ export default function Workbench({
 
   const executeDeploy = useCallback(
     async (projectId: string, workspace?: string, itemName?: string): Promise<DeployResult> => {
+      const t = translator('workbench')
       if (authActionRef.current) {
-        const error = 'Wait for Fabric authentication to finish, then publish again.'
-        toast.error(error, { title: 'Publishing paused' })
+        const error = t('publish.waitForAuth')
+        toast.error(error, { title: t('publish.paused') })
         return { ok: false, outcome: 'error', error }
       }
       deployingIdRef.current = projectId
@@ -1075,10 +1108,7 @@ export default function Workbench({
             if (!login.ok) {
               result = {
                 ...result,
-                error: authErrorMessage(
-                  login.error,
-                  'Fabric sign-in did not complete. Please try again.'
-                )
+                error: authErrorMessage(login.error, t('auth.fabricSignInFailed'))
               }
             } else {
               await onAuthChanged()
@@ -1092,7 +1122,7 @@ export default function Workbench({
           result = {
             ok: false,
             outcome: result.outcome,
-            error: authErrorMessage(reason, 'Publishing didn’t finish. Please try again.')
+            error: authErrorMessage(reason, t('publish.didNotFinishRetry'))
           }
         }
         // What Fabric answered, for the workspace picker: it turned the app down
@@ -1106,7 +1136,7 @@ export default function Workbench({
           (result.outcome === 'not-signed-in' || result.outcome === 'auth-cache-error')
         ) {
           // Don't open more sign-in flows for publishes queued behind a failed login.
-          deployQueueRef.current.cancelPending('Sign in to Fabric before publishing again.')
+          deployQueueRef.current.cancelPending(t('publish.signInFirst'))
         }
         // A live preview kept on screen through this publish closes with it, in
         // the same render, so the published app (now with the changes) replaces it.
@@ -1127,8 +1157,8 @@ export default function Workbench({
         // surface failures wherever they are. Success needs no toast — it's
         // already reflected in the preview pane and the publish status.
         if (!result.ok) {
-          toast.error(result.error ?? 'Publishing didn’t finish.', {
-            title: 'Couldn’t publish'
+          toast.error(result.error ?? t('publish.didNotFinish'), {
+            title: t('publish.failedTitle')
           })
         } else {
           // Draw the app again for Home and the gallery, from the published version.
@@ -1142,8 +1172,8 @@ export default function Workbench({
         try {
           await refreshProjects()
         } catch (reason) {
-          toast.error(authErrorMessage(reason, 'Could not refresh the project after publishing.'), {
-            title: 'Project refresh failed'
+          toast.error(authErrorMessage(reason, t('publish.refreshFailed')), {
+            title: t('project.refreshFailedTitle')
           })
         }
         // Failures can reveal an expired session; never leave the app bar's account stale.
@@ -1173,32 +1203,16 @@ export default function Workbench({
 
   /**
    * User-initiated publish funnel: warn first when the remote has changes the
-   * user hasn't pulled (a fast, non-fetching divergence check), then offer to
-   * run the app's Goals checks when they haven't all passed on this version,
-   * otherwise publish straight away. Automatic publishes (post-turn) call
-   * runDeploy directly and skip these guards so they never stall on a modal.
+   * user hasn't pulled (a fast, non-fetching divergence check), otherwise
+   * publish straight away. Automatic publishes (post-turn) call runDeploy
+   * directly and skip this guard so they never stall on a modal.
    */
-  const deployPastGoals = useCallback(
-    async (projectId: string, workspace?: string, itemName?: string): Promise<void> => {
-      if (goalsOn && projectId === activeIdRef.current) {
-        const snapshot = await window.api.goals.load(projectId).catch(() => null)
-        const gap = snapshot ? goalsGap(snapshot) : null
-        if (snapshot && gap && projectId === activeIdRef.current) {
-          setGoalsGate({ projectId, workspace, itemName, gap, running: snapshot.running })
-          return
-        }
-      }
-      void runDeploy(projectId, workspace, itemName)
-    },
-    [runDeploy, goalsOn]
-  )
   const requestUserDeploy = useCallback(
     async (projectId: string, workspace?: string, itemName?: string): Promise<void> => {
       // A chat turn holds the project's source until it finishes: publishing now could only fail.
       if ((chatsRef.current[projectId] ?? []).some((m) => m.role === 'assistant' && m.pending)) {
-        toast.info('Copilot is still working on this app. Publish it once the turn finishes.', {
-          title: 'Publishing waits for Copilot'
-        })
+        const t = translator('workbench')
+        toast.info(t('publish.waitForTurn'), { title: t('publish.waitForTurnTitle') })
         return
       }
       // Team apps are published by their pipeline: save to the working branch instead.
@@ -1216,9 +1230,9 @@ export default function Workbench({
       } catch {
         /* divergence is best-effort — fall through and publish */
       }
-      await deployPastGoals(projectId, workspace, itemName)
+      void runDeploy(projectId, workspace, itemName)
     },
-    [deployPastGoals, isTeamProject, toast]
+    [runDeploy, isTeamProject, toast]
   )
 
   // Switch the active Fabric deployment, then reflect the new URL/status.
@@ -1287,10 +1301,8 @@ export default function Workbench({
       const conflict = plan.conflict
       if (!conflict) return null
       if (!hasPortChoice(conflict, context)) {
-        toast.info(
-          `localhost:${conflict.port} is in use, so this turn shows your published app. Fabricator will ask again with your next message.`,
-          { title: 'Live preview skipped' }
-        )
+        const t = translator('workbench')
+        toast.info(t('port.skipped', { port: conflict.port }), { title: t('port.skippedTitle') })
         return null
       }
       portResolveRef.current?.(null)
@@ -1307,6 +1319,7 @@ export default function Workbench({
     const prompt = portPromptRef.current
     const port = prompt?.conflict.suggestedPort
     if (!prompt || port === undefined || prompt.busy) return
+    const t = translator('workbench')
     setPortPrompt((p) => p && { ...p, busy: 'register', error: null, log: [] })
     const register = (): Promise<DeployResult> => window.api.dev.registerPort(prompt.projectId, port)
     let result: DeployResult
@@ -1321,17 +1334,23 @@ export default function Workbench({
         } else {
           result = {
             ...result,
-            error: authErrorMessage(login.error, 'Fabric sign-in did not complete. Please try again.')
+            error: authErrorMessage(login.error, t('auth.fabricSignInFailed'))
           }
         }
       }
     } catch (reason) {
-      result = { ok: false, outcome: 'error', error: authErrorMessage(reason, 'The port could not be registered.') }
+      result = {
+        ok: false,
+        outcome: 'error',
+        error: authErrorMessage(reason, t('port.registerFailed'))
+      }
     }
     if (!mountedRef.current) return
     setGitRefresh((n) => n + 1)
     if (!result.ok) {
-      setPortPrompt((p) => p && { ...p, busy: null, error: result.error ?? 'The port could not be registered.' })
+      setPortPrompt(
+        (p) => p && { ...p, busy: null, error: result.error ?? t('port.registerFailed') }
+      )
       if (result.outcome === 'not-signed-in' || result.outcome === 'auth-cache-error') {
         void refreshAuthWithFeedback()
       }
@@ -1350,30 +1369,29 @@ export default function Workbench({
     const { holder, occupant, port } = prompt.conflict
     const backend = holder?.kind === 'backend' ? holder.projectId : null
     if (!backend && occupant === undefined) return
+    const t = translator('workbench')
     setPortPrompt((p) => p && { ...p, busy: 'stop', error: null })
     let freed: number | undefined = port
     try {
       if (backend) {
         await window.api.local.stop(backend)
         freed = (await replanPort(prompt.projectId)).port
-        if (freed === undefined)
-          throw new Error(`localhost:${port} is still in use. Try again, or use another address.`)
+        if (freed === undefined) throw new Error(t('port.stillInUse', { port }))
       } else if (occupant) {
         await window.api.dev.freePort(port, occupant.pid)
       }
     } catch (reason) {
       if (!mountedRef.current) return
       setPortPrompt(
-        (p) =>
-          p && { ...p, busy: null, error: authErrorMessage(reason, 'That could not be stopped.') }
+        (p) => p && { ...p, busy: null, error: authErrorMessage(reason, t('port.stopFailed')) }
       )
       return
     }
     settlePortPrompt(freed ?? port)
   }, [settlePortPrompt, replanPort])
 
-  // Kick off the live preview of an app on its published backend (a team app,
-  // or a published one its local backend can't run) when a turn starts: run the project's Vite dev server so edits
+  // Kick off the live preview of an app on a Fabric backend (one its local
+  // backend can't run) when a turn starts: run the project's Vite dev server so edits
   // show live at localhost for the turn's duration. No-op when the project has
   // no locally installed Vite, and for an app that runs on its local backend,
   // whose own Vite shows the edits. A fresh turn waits for this (ChatPanel
@@ -1382,18 +1400,18 @@ export default function Workbench({
   // pushed.
   const handleTurnStart = useCallback(
     async (projectId: string, context: PortPromptContext = 'turn'): Promise<void> => {
-      if (!usesDevServer(projectId)) return
+      if (!fallsBack(projectId)) return
       if (deployingIdRef.current === projectId) return // a publish owns the surface
       const existing = devServersRef.current[projectId]
       if (existing) {
-        // Already starting / running; a team app's lingering preview, or one
-        // kept while turns don't publish (or through an after-turn publish), carries on.
-        if (existing.lingerSince || existing.kept || existing.untilDeployed) {
+        // Already starting / running; one kept while turns don't publish (or
+        // through an after-turn publish) carries on.
+        if (existing.kept || existing.untilDeployed) {
           setDevServers((all) =>
             all[projectId]
               ? {
                   ...all,
-                  [projectId]: { ...all[projectId], lingerSince: undefined, kept: undefined, untilDeployed: undefined }
+                  [projectId]: { ...all[projectId], kept: undefined, untilDeployed: undefined }
                 }
               : all
           )
@@ -1435,8 +1453,9 @@ export default function Workbench({
           }
         }
         if (!res.ok && res.outcome !== 'unsupported') {
-          toast.error(res.error ?? 'The local Vite server could not be started.', {
-            title: 'Local preview failed'
+          const t = translator('workbench')
+          toast.error(res.error ?? t('preview.startFailed'), {
+            title: t('preview.startFailedTitle')
           })
         }
         setDevServers((all) => {
@@ -1455,7 +1474,7 @@ export default function Workbench({
         })
       })()
     },
-    [toast, resolveLocalPort, onDevServerError, usesDevServer]
+    [toast, resolveLocalPort, onDevServerError, fallsBack]
   )
 
   /** The last app and published app a kept live preview was started for. */
@@ -1466,11 +1485,11 @@ export default function Workbench({
    *  publish. */
   const [localReload, setLocalReload] = useState(0)
   /**
-   * A personal app on its published backend (a published app its local backend
-   * can't run), while turns don't publish: the published app falls behind your code, so the open app's live
-   * preview runs whenever the app is open, not only during turns. One started
-   * for another published app is stopped, and the next run starts it again with
-   * that published app's backend settings.
+   * An app on its backend in Fabric (one its local backend can't run), while
+   * turns don't publish (never, for a team app): that backend falls behind your
+   * code, so the open app's live preview runs whenever the app is open, not
+   * only during turns. One started for another published app is stopped, and
+   * the next run starts it again with that published app's backend settings.
    */
   const keepLocalPreview = useCallback(
     async (projectId: string, target: string): Promise<void> => {
@@ -1507,8 +1526,9 @@ export default function Workbench({
     async (projectId: string, packagesChanged = false): Promise<void> => {
       setGitRefresh((n) => n + 1)
       if (!packagesChanged) return
-      const notice = toast.info('Installing them and restarting your app…', {
-        title: 'Your app’s packages changed',
+      const t = translator('workbench')
+      const notice = toast.info(t('packages.installing'), {
+        title: t('packages.changedTitle'),
         duration: 0
       })
       const kept = Boolean(devServersRef.current[projectId]?.kept)
@@ -1518,11 +1538,11 @@ export default function Workbench({
       }
       try {
         await window.api.local.reinstallPackages(projectId)
-        toast.success('Your app runs on its new packages.', { title: 'Installed the packages' })
+        toast.success(t('packages.installed'), { title: t('packages.installedTitle') })
       } catch (reason) {
         const failed = toLocalBackendError(reason)
         toast.error(failed.hint ? `${failed.message} ${failed.hint}` : failed.message, {
-          title: 'Couldn’t install your app’s packages'
+          title: t('packages.failedTitle')
         })
       } finally {
         toast.dismiss(notice)
@@ -1535,26 +1555,32 @@ export default function Workbench({
     },
     [toast, stopDevServer, keepLocalPreview]
   )
+  afterGitSyncRef.current = afterGitSync
 
   // After a chat turn, persist the transcript, save what a personal app's turn
   // changed as a version, and, when chat turns publish (see
   // `publishesAfterTurn`), publish what the agent changed.
   const afterTurn = useCallback(
     async (projectId: string, result: ChatTurnResult): Promise<void> => {
+      const t = translator('workbench')
       previewSkippedRef.current.delete(projectId)
       const prompt = portPromptRef.current
       if (prompt?.projectId === projectId && prompt.context === 'plan' && !prompt.busy) settlePortPrompt(null)
       const team = isTeamProject(projectId)
-      const manual = manualDeployRef.current && !team
+      // A team app's turns never publish: its pipeline does, once you publish.
+      const manual = manualDeployRef.current || team
       const messages = [...(chatsRef.current[projectId] ?? [])].reverse()
       const lastUser = messages.find((m) => m.role === 'user')
       const answer = messages.find((m) => m.role === 'assistant')
       const projectPath = projectsRef.current?.projects.find((p) => p.id === projectId)?.path ?? ''
-      // The turn changed files: Copilot reported them, or its transcript shows
-      // the edits (the "Changed" files under the answer).
-      const changedFiles =
-        result.filesModified.length > 0 ||
-        (answer ? filesChanged(answer.tools, projectPath).length > 0 : false)
+      // The files the turn changed: what Copilot reported, and the edits its
+      // transcript shows (the "Changed" files under the answer), which can be
+      // more.
+      const turnFiles = [
+        ...result.filesModified,
+        ...(answer ? filesChanged(answer.tools, projectPath).map((file) => file.path) : [])
+      ]
+      const changedFiles = turnFiles.length > 0
       // A personal app's turn that changed files is saved as a version, named
       // after what was asked, so History goes back turn by turn: while turns
       // don't publish, nothing else saves it. (A team app saves each turn to its
@@ -1572,7 +1598,7 @@ export default function Workbench({
         projectsRef.current?.projects.find((p) => p.id === projectId)?.lastDeploy?.url
       )
       const fallback = fallsBack(projectId)
-      if (!team && !fallback) {
+      if (!fallback) {
         // It runs on its local backend: the page took the turn's edits as they
         // came, and the backend rebuilt what they changed (the page loads again
         // for that, see below). A problem in the app that stopped the open app's
@@ -1585,7 +1611,7 @@ export default function Workbench({
         // An after-turn publish may follow. It runs beside the app, so the live
         // preview, which already shows this turn's changes, stays on screen
         // until the publish ends (see executeDeploy).
-        const mayDeploy = result.ok && !manual && !team && published
+        const mayDeploy = result.ok && !manual && published
         if (devServersRef.current[projectId] && manual && activeIdRef.current === projectId) {
           // Turns don't publish: the open app's preview stays up while the app
           // is open, and reloads once when the turn changed files.
@@ -1599,27 +1625,22 @@ export default function Workbench({
               ? { ...all, [projectId]: { ...all[projectId], untilDeployed: true } }
               : all
           )
-        } else if (devServersRef.current[projectId] && !(result.ok && team)) {
+        } else if (devServersRef.current[projectId]) {
           // Stop the live preview, so the surface returns to the published app.
-          // (A team app keeps its preview while its change is saved and published.)
           stopDevServer(projectId)
         }
         // A change to its packages or rayfin.yml may let this computer run the
         // open app: its local backend starts to find out, while the preview
         // stays as it is.
-        if (
-          fallback &&
-          activeIdRef.current === projectId &&
-          changesLocalSupport(result.filesModified)
-        ) {
+        if (fallback && activeIdRef.current === projectId && changesLocalSupport(turnFiles)) {
           void window.api.local.start(projectId).catch(() => {})
         }
       }
       try {
         await refreshProjects()
       } catch (reason) {
-        toast.error(authErrorMessage(reason, 'Could not refresh the project after coding.'), {
-          title: 'Project refresh failed'
+        toast.error(authErrorMessage(reason, t('turn.refreshFailed')), {
+          title: t('project.refreshFailedTitle')
         })
       }
       // History and the published app's check read the version this turn saved.
@@ -1628,25 +1649,21 @@ export default function Workbench({
       void window.api.chat
         .saveHistory(projectId, toStored(chatsRef.current[projectId] ?? []))
         .catch((reason) => {
-          toast.error(authErrorMessage(reason, 'Could not save the conversation.'), {
-            title: 'Chat history save failed'
+          toast.error(authErrorMessage(reason, t('turn.saveChatFailed')), {
+            title: t('turn.saveChatFailedTitle')
           })
         })
       // The agent may have changed the Rayfin deps (e.g. an upgrade) — re-check.
       void refreshRayfinVer(projectId).catch((reason) => {
-        toast.error(authErrorMessage(reason, 'Could not refresh the Rayfin version.'), {
-          title: 'Version check failed'
+        toast.error(authErrorMessage(reason, t('turn.versionCheckFailed')), {
+          title: t('turn.versionCheckFailedTitle')
         })
       })
       if (!result.ok || !mountedRef.current) return
-      // Team apps: save the turn to the working branch; the pipeline publishes the preview.
+      // Team apps: save the turn to the working branch (its draft pull request,
+      // which deploys nothing until the user publishes).
       if (team) {
-        void teamWorkRef.current.afterTurn(projectId, lastUser?.text ?? '').finally(() => {
-          // The local preview stays until the pipeline has published this save.
-          setDevServers((all) =>
-            all[projectId] ? { ...all, [projectId]: { ...all[projectId], lingerSince: Date.now() } } : all
-          )
-        })
+        void teamWorkRef.current.afterTurn(projectId, lastUser?.text ?? '')
         return
       }
       // The changes stay on this computer until the user publishes them (see above
@@ -1665,8 +1682,10 @@ export default function Workbench({
         release()
         if (!mountedRef.current) return
         toast.error(
-          `${authErrorMessage(reason, 'Could not check for changes to publish.')} Select Publish to publish your changes.`,
-          { title: 'Couldn’t publish automatically' }
+          t('turn.autoPublishCheckFailed', {
+            error: authErrorMessage(reason, t('turn.changesCheckFailed'))
+          }),
+          { title: t('turn.autoPublishFailedTitle') }
         )
       }
     },
@@ -1716,41 +1735,46 @@ export default function Workbench({
 
   // Hand a Rayfin upgrade to the Copilot agent: build a precise "from X → to Y"
   // prompt and queue it into the chat (the agent edits package.json + installs).
+  // To the recommended release, or to `newer`, with why it needs care.
   // Returns false when there's nothing to upgrade.
-  const requestRayfinUpdate = useCallback((info: RayfinVersionInfo): boolean => {
-    const id = activeIdRef.current
-    if (!id) return false
-    // Connector packages version with the CLI; npm's `latest` tag for them lags.
-    const ups = info.packages.filter(
-      (p) => p.upgradable && p.installed && p.latest && !/^@microsoft\/rayfin-connector/.test(p.name)
-    )
-    if (ups.length === 0) return false
-    const project = projectsRef.current?.projects.find((p) => p.id === id)
-    const lines = ups.map((p) => `- ${p.name}: ${p.installed} → ${p.latest}`).join('\n')
-    const to = info.latest ?? ups[0].latest
-    const prompt =
-      (project?.team
-        ? "Please upgrade this app's Rayfin packages to the latest version.\n\n"
-        : "Please upgrade this app's Rayfin packages to the newest version Fabricator runs on this computer.\n\n") +
-      'Set these exact versions in package.json, then run `npm install`:\n' +
-      `${lines}\n\n` +
-      'Keep every Rayfin SDK package (`@microsoft/rayfin-core`, `-client`, `-data`, `-auth`, ' +
-      '`-auth-provider-fabric`, `-lib`, `-functions`, `-local-dev`) on the same version — they ship in lockstep. ' +
-      'If the app uses Rayfin connector packages (`@microsoft/rayfin-connector*`), pin them to the ' +
-      "new CLI version exactly (they ship in lockstep with the CLI; npm's `latest` tag lags).\n\n" +
-      'After installing, check `node_modules/@microsoft/rayfin-guide/assets/docs/deprecations.md` ' +
-      'and `known-limitations.md` for changes between these versions and update the app code so it ' +
-      `still builds and runs. ${upgradeDelivery(project, !manualDeployRef.current)}`
-    setViewMode('build')
-    setFocusPane(null)
-    setChatOutbound({
-      id: `rayfin-up-${Date.now()}`,
-      projectId: id,
-      display: `Update Rayfin to ${to}`,
-      prompt
-    })
-    return true
-  }, [])
+  const requestRayfinUpdate = useCallback(
+    (info: RayfinVersionInfo, newer?: RayfinNewerRelease): boolean => {
+      const id = activeIdRef.current
+      if (!id) return false
+      const offer = newer ? updatesTo(info, newer.version) : info
+      // Connector packages version with the CLI; npm's `latest` tag for them lags.
+      const ups = offer.packages.filter(
+        (p) =>
+          p.upgradable && p.installed && p.latest && !/^@microsoft\/rayfin-connector/.test(p.name)
+      )
+      if (ups.length === 0) return false
+      const project = projectsRef.current?.projects.find((p) => p.id === id)
+      const lines = ups.map((p) => `- ${p.name}: ${p.installed} → ${p.latest}`).join('\n')
+      const to = offer.latest ?? ups[0].latest
+      const prompt =
+        `Please upgrade this app's Rayfin packages to Rayfin ${to}.\n\n` +
+        (newer ? `${newerUpdateNote(newer)}\n\n` : '') +
+        'Set these exact versions in package.json, then run `npm install`:\n' +
+        `${lines}\n\n` +
+        'Keep every Rayfin SDK package (`@microsoft/rayfin-core`, `-client`, `-data`, `-auth`, ' +
+        '`-auth-provider-fabric`, `-lib`, `-functions`, `-local-dev`) on the same version — they ship in lockstep. ' +
+        'If the app uses Rayfin connector packages (`@microsoft/rayfin-connector*`), pin them to the ' +
+        "new CLI version exactly (they ship in lockstep with the CLI; npm's `latest` tag lags).\n\n" +
+        'After installing, check `node_modules/@microsoft/rayfin-guide/assets/docs/deprecations.md` ' +
+        'and `known-limitations.md` for changes between these versions and update the app code so it ' +
+        `still builds and runs. ${upgradeDelivery(project, !manualDeployRef.current)}`
+      setViewMode('build')
+      setFocusPane(null)
+      setChatOutbound({
+        id: `rayfin-up-${Date.now()}`,
+        projectId: id,
+        display: translator('workbench')('rayfin.updateTo', { version: to }),
+        prompt
+      })
+      return true
+    },
+    []
+  )
 
   // A Rayfin update asked for on Home goes to Copilot once the project is open
   // and its versions have been read.
@@ -1759,7 +1783,7 @@ export default function Workbench({
     if (!id || !active || active.id !== id || !versionInfo || rayfinVerForRef.current !== id) return
     pendingRayfinUpdateRef.current = null
     if (!requestRayfinUpdate(versionInfo)) {
-      toast.info(`Fabricator didn’t find a Rayfin update for ${active.name} just now.`)
+      toast.info(translator('workbench')('rayfin.noUpdate', { name: active.name }))
     }
   }, [active, versionInfo, requestRayfinUpdate, toast])
 
@@ -1782,14 +1806,6 @@ export default function Workbench({
     },
     [handOffFindings, versionInfo, requestRayfinUpdate]
   )
-  // Hand failed Goals checks to the Build chat, so Copilot can fix the app to meet them.
-  const fixGoals = useCallback((message: { display: string; prompt: string }): void => {
-    const id = activeIdRef.current
-    if (!id) return
-    setViewMode('build')
-    setFocusPane(null)
-    setChatOutbound({ id: `goals-fix-${Date.now()}`, projectId: id, ...message })
-  }, [])
   // A fix card's row opens its finding in the Advisor.
   const showAdvisorFinding = useCallback((findingId: string): void => {
     setAdvisorOpen({ id: findingId, nonce: Date.now() })
@@ -1978,6 +1994,22 @@ export default function Workbench({
     return () => window.removeEventListener('keydown', onKey, true)
   }, [])
 
+  // Ctrl+` (on macOS too, as in VS Code) shows the open project's terminal, or
+  // puts it away while it has the keyboard; Ctrl+Shift+` starts another. Not
+  // over a dialog or Search, which keep the keyboard.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent): void => {
+      if (!event.ctrlKey || event.altKey || event.metaKey || event.code !== 'Backquote') return
+      if (event.defaultPrevented || topLayerOpen()) return
+      event.preventDefault()
+      if (event.repeat) return
+      if (event.shiftKey) newTerminalRef.current()
+      else toggleTerminalRef.current()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
   // Reflect the active project in the OS window title so users running one
   // instance per project can tell them apart in the taskbar / Alt-Tab. The
   // project name leads so it stays visible when the title is truncated.
@@ -2030,16 +2062,6 @@ export default function Workbench({
   useEffect(() => {
     if (viewMode === 'advisor') setAdvisorMounted(true)
   }, [viewMode])
-  useEffect(() => {
-    if (viewMode === 'goals') setGoalsMounted(true)
-  }, [viewMode])
-  // Goals is an experiment personal apps have: leave its tab when it goes away.
-  useEffect(() => {
-    if (goalsOn) return
-    setViewMode((view) => (view === 'goals' ? 'build' : view))
-    setGoalsMounted(false)
-    setGoalsGate(null)
-  }, [goalsOn])
 
   // Re-gate per project: opening a *different* project resets to the Build view,
   // unmounts Advisor until its tab is opened again (so the opt-in stale auto-run
@@ -2049,14 +2071,13 @@ export default function Workbench({
   useEffect(() => {
     setViewMode('build')
     setAdvisorMounted(false)
-    setGoalsMounted(false)
     setAdvisorOpen(null)
     setShowHome(false)
   }, [active?.id])
 
   async function selectProject(p: StudioProject): Promise<void> {
     if (removingIds.has(p.id)) {
-      toast.info(`${p.name} is being removed.`)
+      toast.info(t('project.beingRemoved', { name: p.name }))
       return
     }
     setNotice(null)
@@ -2078,7 +2099,7 @@ export default function Workbench({
       setGallery(null)
       setShowHome(false)
       if (!requestRayfinUpdate(versionInfo)) {
-        toast.info(`Fabricator didn’t find a Rayfin update for ${p.name} just now.`)
+        toast.info(t('rayfin.noUpdate', { name: p.name }))
       }
       return
     }
@@ -2091,7 +2112,14 @@ export default function Workbench({
     try {
       setProjects(await window.api.projects.setPinned(p.id, pinned))
     } catch (reason) {
-      toast.error(errorMessage(reason, `Couldn’t ${pinned ? 'pin' : 'unpin'} ${p.name}.`))
+      toast.error(
+        errorMessage(
+          reason,
+          pinned
+            ? t('project.pinFailed', { name: p.name })
+            : t('project.unpinFailed', { name: p.name })
+        )
+      )
     }
   }
 
@@ -2100,7 +2128,7 @@ export default function Workbench({
     try {
       await window.api.projects.reveal(p.id)
     } catch (reason) {
-      toast.error(errorMessage(reason, `Couldn’t show ${p.name}’s folder.`))
+      toast.error(errorMessage(reason, t('project.revealFailed', { name: p.name })))
     }
   }
 
@@ -2122,7 +2150,7 @@ export default function Workbench({
       if (!path) return
       const result = await window.api.projects.open(path)
       if (!result.ok) {
-        setNotice(result.error ?? 'Could not open that folder.')
+        setNotice(result.error ?? t('project.openFolderFailed'))
         return
       }
       await refreshProjects()
@@ -2138,7 +2166,7 @@ export default function Workbench({
       const path = await window.api.projects.pickImport()
       if (path) queueImports([path])
     } catch (reason) {
-      setNotice(errorMessage(reason, 'Could not open that file.'))
+      setNotice(errorMessage(reason, t('project.openFileFailed')))
     }
   }
 
@@ -2146,7 +2174,9 @@ export default function Workbench({
   async function showImported(project: StudioProject): Promise<void> {
     setGallery(null)
     await refreshProjects()
-    toast.success(`It’s in ${displayPath(project.path)}.`, { title: `Imported ${project.name}` })
+    toast.success(t('project.importedWhere', { path: displayPath(project.path) }), {
+      title: t('project.imported', { name: project.name })
+    })
   }
 
   async function changeWorkspaceRoot(): Promise<void> {
@@ -2155,6 +2185,7 @@ export default function Workbench({
 
   async function removeFromList(p: StudioProject): Promise<void> {
     setProjects(await window.api.projects.remove(p.id, false))
+    terminalStore.forget(p.id)
   }
 
   /** Open Manage project, unless the project is on its way out. */
@@ -2196,13 +2227,13 @@ export default function Workbench({
   async function renameProject(p: StudioProject, name: string): Promise<string | null> {
     try {
       const result = await window.api.projects.rename(p.id, name)
-      if (!result.ok) return result.error ?? 'Could not rename the project.'
+      if (!result.ok) return result.error ?? t('project.renameFailed')
       await refreshProjects()
       return null
     } catch (error) {
       return error instanceof Error && error.message
         ? error.message
-        : 'Could not rename the project. Please try again.'
+        : t('project.renameFailedRetry')
     }
   }
 
@@ -2214,16 +2245,14 @@ export default function Workbench({
       const result = await window.api.auth.logoutRayfin()
       if (!mountedRef.current) return
       if (!result.ok) {
-        throw new Error(
-          authErrorMessage(result.error, 'Fabric sign-out did not complete. Please try again.')
-        )
+        throw new Error(authErrorMessage(result.error, t('auth.fabricSignOutFailed')))
       }
       // Stay in the workbench (and keep unsent drafts): only Fabric changed.
       await refreshAuthWithFeedback()
     } catch (reason) {
       if (!mountedRef.current) return
-      toast.error(authErrorMessage(reason, 'Fabric sign-out did not complete. Please try again.'), {
-        title: 'Sign-out failed'
+      toast.error(authErrorMessage(reason, t('auth.fabricSignOutFailed')), {
+        title: t('auth.signOutFailedTitle')
       })
       await refreshAuthWithFeedback()
     } finally {
@@ -2240,15 +2269,13 @@ export default function Workbench({
       const res = await window.api.auth.loginRayfin()
       if (!mountedRef.current) return
       if (!res.ok) {
-        throw new Error(
-          authErrorMessage(res.error, 'Fabric sign-in did not complete. Please try again.')
-        )
+        throw new Error(authErrorMessage(res.error, t('auth.fabricSignInFailed')))
       }
       await onAuthChanged()
     } catch (reason) {
       if (!mountedRef.current) return
-      toast.error(authErrorMessage(reason, 'Fabric sign-in did not complete. Please try again.'), {
-        title: 'Sign-in failed'
+      toast.error(authErrorMessage(reason, t('auth.fabricSignInFailed')), {
+        title: t('auth.signInFailedTitle')
       })
     } finally {
       authActionRef.current = false
@@ -2270,7 +2297,7 @@ export default function Workbench({
     const target = authRefreshTarget
     if (!target) return
     if (authActionRef.current || deployingIdRef.current) {
-      setAuthRefreshError('Wait for publishing or the current sign-in to finish, then retry.')
+      setAuthRefreshError(t('authRefresh.busy'))
       return
     }
     authActionRef.current = true
@@ -2281,24 +2308,15 @@ export default function Workbench({
       const result = await window.api.auth.refreshRayfin(target.projectId, target.tenant)
       if (!mountedRef.current) return
       if (!result.ok) {
-        throw new Error(
-          authErrorMessage(
-            result.error,
-            'Fabric authentication could not be refreshed. Please retry.'
-          )
-        )
+        throw new Error(authErrorMessage(result.error, t('authRefresh.failed')))
       }
       await onAuthChanged()
       if (!mountedRef.current) return
       setAuthRefreshTarget(null)
-      toast.info('Fabric authentication is verified. Publish again to retry.', {
-        title: 'Fabric authentication refreshed'
-      })
+      toast.info(t('authRefresh.verified'), { title: t('authRefresh.verifiedTitle') })
     } catch (reason) {
       if (!mountedRef.current) return
-      setAuthRefreshError(
-        authErrorMessage(reason, 'Fabric authentication could not be refreshed. Please retry.')
-      )
+      setAuthRefreshError(authErrorMessage(reason, t('authRefresh.failed')))
       await refreshAuthWithFeedback()
     } finally {
       authActionRef.current = false
@@ -2313,10 +2331,7 @@ export default function Workbench({
   async function reportIssue(): Promise<void> {
     const bundlePath = await runReportIssue(window.api, versions)
     if (bundlePath) {
-      toast.info(
-        'A diagnostics file was saved and the logs folder opened — attach it to your bug report.',
-        { title: 'Diagnostics exported' }
-      )
+      toast.info(t('diagnostics.savedForReport'), { title: t('diagnostics.exportedTitle') })
     }
   }
 
@@ -2325,18 +2340,18 @@ export default function Workbench({
   async function exportDiagnostics(): Promise<void> {
     try {
       await window.api.diagnostics.export()
-      toast.info('A diagnostics file was saved and the logs folder opened.', {
-        title: 'Diagnostics exported'
-      })
+      toast.info(t('diagnostics.saved'), { title: t('diagnostics.exportedTitle') })
     } catch (reason) {
-      toast.error(authErrorMessage(reason, 'The diagnostics file could not be written.'), {
-        title: "Couldn't export diagnostics"
+      toast.error(authErrorMessage(reason, t('diagnostics.writeFailed')), {
+        title: t('diagnostics.exportFailedTitle')
       })
     }
   }
 
   const fabricAuthBusy =
     signingIn || signingOut || refreshingAuth || Object.values(deploys).some((d) => d.running)
+  /** Fabric sign-in runs a project's Rayfin CLI, so it waits until there's a project. */
+  const canSignInToFabric = listedProjects.some((p) => !p.missing)
 
   // Open Help. The assistant needs Copilot, and being signed out is exactly the
   // kind of problem someone opens Help about — so instead of a dead end, show
@@ -2361,6 +2376,42 @@ export default function Workbench({
   }
   const toggleHelpRef = useRef(toggleHelp)
   toggleHelpRef.current = toggleHelp
+
+  /** The terminal opens on the project's own screen, not under Help or a full-screen flow. */
+  const terminalBlocked =
+    showCreate || showClone || showMigrate || signingOut || showHelp || showHelpOffline
+  /** Back to the open project's own screen, from Home or an overview, for its terminal. */
+  function showProjectScreen(): void {
+    setShowHome(false)
+    setTeamMap(null)
+    setGallery(null)
+  }
+  /**
+   * Show the open project's shells, or move the keyboard into them, or put the
+   * terminal away when a shell has it. From the app's Output, it goes to a shell.
+   */
+  function toggleTerminal(): void {
+    const id = activeIdRef.current
+    if (!id || terminalBlocked) return
+    const terminals = projectTerminals(terminalStore.getState(), id)
+    if (terminals.open && !terminals.output && terminalFocused() && onProjectScreen) {
+      terminalStore.close(id)
+      return
+    }
+    showProjectScreen()
+    terminalStore.open(id)
+  }
+  /** Start another terminal in the open project. */
+  function newTerminal(): void {
+    const id = activeIdRef.current
+    if (!id || terminalBlocked) return
+    showProjectScreen()
+    terminalStore.add(id)
+  }
+  const toggleTerminalRef = useRef(toggleTerminal)
+  toggleTerminalRef.current = toggleTerminal
+  const newTerminalRef = useRef(newTerminal)
+  newTerminalRef.current = newTerminal
 
   /** Search opens over the workbench, but not over a dialog, Help or a full-screen flow. */
   const searchBlocked = showCreate || showClone || showMigrate || signingOut
@@ -2476,10 +2527,7 @@ export default function Workbench({
     void (async () => {
       const bundlePath = await runReportIssue(window.api, versions, navigator.userAgent, issue)
       if (bundlePath) {
-        toast.info(
-          'A diagnostics file was saved and the logs folder opened — attach it to your bug report.',
-          { title: 'Diagnostics exported' }
-        )
+        toast.info(t('diagnostics.savedForReport'), { title: t('diagnostics.exportedTitle') })
       }
     })()
   }
@@ -2510,13 +2558,13 @@ export default function Workbench({
   const migrationWaiting = !active
     ? undefined
     : deploys[active.id]?.running
-      ? 'Waiting for publishing to finish.'
+      ? t('migration.waitPublish')
       : activeSyncing
-        ? 'Waiting for the save to GitHub.'
+        ? t('migration.waitSave')
         : activeChatBusy
-          ? 'Waiting for Copilot to finish.'
+          ? t('migration.waitCopilot')
           : !projectToolsReady
-            ? 'Waiting for the app’s dependencies.'
+            ? t('migration.waitDependencies')
             : undefined
   const migration = useMigration({
     enabled: migrationEnabled,
@@ -2533,7 +2581,7 @@ export default function Workbench({
         migration: turn.migration
       })
     },
-    onError: (message) => toast.error(message, { title: 'Report migration' })
+    onError: (message) => toast.error(message, { title: t('migration.title') })
   })
   migrationRef.current = migration
   /** The model a report migration uses, chosen on the New app from Power BI step. */
@@ -2547,20 +2595,21 @@ export default function Workbench({
   /** Start migrating a picked report into the project just created for it. */
   const startMigration = useCallback(
     async (projectId: string, pick: ReportPick, model: ModelSelection): Promise<void> => {
+      const t = translator('workbench')
       try {
         // The project's chat model, so its migration turns use the one chosen.
         await window.api.chat.setOptions(projectId, selectionArgs(model))
         void refreshProjects()
       } catch (reason) {
-        toast.error(authErrorMessage(reason, 'Could not set the migration’s Copilot model.'), {
-          title: 'Report migration'
+        toast.error(authErrorMessage(reason, t('migration.modelFailed')), {
+          title: t('migration.title')
         })
       }
       try {
         await window.api.migration.start(projectId, pick.source, pick.pages)
       } catch (reason) {
-        toast.error(authErrorMessage(reason, 'Could not start migrating the report.'), {
-          title: 'Report migration'
+        toast.error(authErrorMessage(reason, t('migration.startFailed')), {
+          title: t('migration.title')
         })
       }
     },
@@ -2571,72 +2620,110 @@ export default function Workbench({
   // opens, and it stays up between turns: its own Vite takes Copilot's edits as
   // they come, and the backend rebuilds the data model and functions as they
   // change. The one you came from keeps running too; the supervisor stops older
-  // ones. A published app it can't run falls back to its published backend,
-  // through the live preview team apps use.
+  // ones. Team apps run on theirs like any app. An app it can't run falls back
+  // to its backend in Fabric (its published app, or a team app's deployment),
+  // through a live preview of its own.
   const activeId = active?.id
-  const personalId = active && !active.team ? active.id : null
-  const local = useLocalBackend(personalId)
+  const localId = active ? active.id : null
+  const local = useLocalBackend(localId)
   const localRef = useRef(local)
   localRef.current = local
   const localStatus = local.status
   const localActive = isLocalBackendActive(localStatus)
-  const activePublished = Boolean(active?.lastDeploy?.url)
-  /** Why this computer can't run the open app, when its preview has a published backend to use instead. */
-  const fallbackNow = personalId && activePublished ? localFallbackReason(localStatus) : null
-  const fallbackCode = personalId && activePublished ? localFallbackCode(localStatus) : null
-  const activeFallback = personalId ? (fallbacks[personalId] ?? fallbackNow) : null
+  /** The open app has a backend in Fabric its preview could use instead. */
+  const activeFabricBackend = hasFabricBackend(active)
+  const activeTeamApp = Boolean(active?.team)
+  /** Why this computer can't run the open app, when its preview has a backend in Fabric to use instead. */
+  const fallbackNow =
+    localId && activeFabricBackend
+      ? localFallbackReason(localStatus, { team: activeTeamApp })
+      : null
+  const fallbackCode = localId && activeFabricBackend ? localFallbackCode(localStatus) : null
+  /** The same reason in English, for the journal. */
+  const fallbackLogged =
+    fallbackCode && fallbackNow
+      ? localFallbackReason(localStatus, { team: activeTeamApp, english: true })
+      : null
+  const activeFallback = localId ? (fallbacks[localId] ?? fallbackNow) : null
   /** The open app runs on its local backend. */
-  const runsLocally = Boolean(personalId) && !activeFallback
+  const runsLocally = Boolean(localId) && !activeFallback
   /** Fallbacks already journaled (and counted), once per app and session. */
   const reportedFallbacksRef = useRef(new Set<string>())
   useEffect(() => {
-    if (!personalId) return
+    if (!localId) return
     if (fallbackNow) {
       setFallbacks((all) =>
-        all[personalId] === fallbackNow ? all : { ...all, [personalId]: fallbackNow }
+        all[localId] === fallbackNow ? all : { ...all, [localId]: fallbackNow }
       )
-      if (fallbackCode && !reportedFallbacksRef.current.has(personalId)) {
-        reportedFallbacksRef.current.add(personalId)
-        void window.api.local.reportFallback(personalId, fallbackCode, fallbackNow).catch(() => {})
+      if (fallbackCode && !reportedFallbacksRef.current.has(localId)) {
+        reportedFallbacksRef.current.add(localId)
+        void window.api.local
+          .reportFallback(localId, fallbackCode, fallbackLogged ?? fallbackNow)
+          .catch(() => {})
       }
       return
     }
-    // It runs on this computer after all, or there's no published app anymore.
-    if (localStatus?.state === 'running' || !activePublished) {
+    // It runs on this computer after all, or there's no backend in Fabric anymore.
+    if (localStatus?.state === 'running' || !activeFabricBackend) {
       setFallbacks((all) => {
-        if (!(personalId in all)) return all
+        if (!(localId in all)) return all
         const next = { ...all }
-        delete next[personalId]
+        delete next[localId]
         return next
       })
     }
-  }, [personalId, fallbackNow, fallbackCode, activePublished, localStatus?.state])
+  }, [localId, fallbackNow, fallbackLogged, fallbackCode, activeFabricBackend, localStatus?.state])
   // Falling back, the local backend stops: its ports go to the live preview on
   // the published backend.
   useEffect(() => {
-    if (!personalId || !fallbackNow || !localActive || localStoppingRef.current.has(personalId))
-      return
+    if (!localId || !fallbackNow || !localActive || localStoppingRef.current.has(localId)) return
     const stopping = window.api.local
-      .stop(personalId)
+      .stop(localId)
       .catch(() => {})
-      .finally(() => localStoppingRef.current.delete(personalId))
-    localStoppingRef.current.set(personalId, stopping)
-  }, [personalId, fallbackNow, localActive])
+      .finally(() => localStoppingRef.current.delete(localId))
+    localStoppingRef.current.set(localId, stopping)
+  }, [localId, fallbackNow, localActive])
   // Start it once the app's packages are ready, unless it runs already or is
   // known to fall back. Opening the app again starts one that stopped on a problem.
   const depsReady = Boolean(active && depsReadyId === active.id)
   const localKnown = localStatus !== null
   const localStartedRef = useRef<string | null>(null)
   useEffect(() => {
-    if (!personalId) {
+    if (!localId) {
       localStartedRef.current = null
       return
     }
-    if (!depsReady || !localKnown || localStartedRef.current === personalId) return
-    localStartedRef.current = personalId
-    if (fallbacksRef.current[personalId] || fallbackNow) return
-    if (!isLocalBackendActive(localBackendStore.get(personalId))) void localRef.current.start()
-  }, [personalId, depsReady, localKnown, fallbackNow])
+    if (!depsReady || !localKnown || localStartedRef.current === localId) return
+    localStartedRef.current = localId
+    if (fallbacksRef.current[localId] || fallbackNow) return
+    if (!isLocalBackendActive(localBackendStore.get(localId))) void localRef.current.start()
+  }, [localId, depsReady, localKnown, fallbackNow])
+
+  // An app that falls back because of its Rayfin version is checked again once
+  // its packages are another version: a Rayfin update in chat, a merge, or a
+  // terminal. What the backend said stays until it starts again, so it starts,
+  // to find out, while the preview stays as it is until it runs (see above).
+  // Once per version, so a backend that reads the version differently doesn't
+  // start over and over. Turns, publishes and opening the app read the version;
+  // nothing notices a terminal's update, so it's read now and then meanwhile.
+  const rejectedSdk = localId && activeFabricBackend ? fallbackSdkVersion(localStatus) : null
+  const installedSdk = rayfinVerForRef.current === localId ? installedSdkVersion(rayfinVer) : null
+  useEffect(() => {
+    if (!localId || !rejectedSdk) return
+    const timer = window.setInterval(
+      () => void refreshRayfinVer(localId).catch(() => {}),
+      SDK_RECHECK_MS
+    )
+    return () => window.clearInterval(timer)
+  }, [localId, rejectedSdk, refreshRayfinVer])
+  const sdkRetriedRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!localId || !rejectedSdk || !installedSdk || installedSdk === rejectedSdk) return
+    const attempt = `${localId}@${installedSdk}`
+    if (localActive || sdkRetriedRef.current === attempt) return
+    sdkRetriedRef.current = attempt
+    void window.api.local.start(localId).catch(() => {})
+  }, [localId, rejectedSdk, installedSdk, localActive])
 
   // The page takes the app's code through hot updates. When the backend rebuilds
   // what the page uses (its data model, functions or services) it loads again,
@@ -2651,26 +2738,26 @@ export default function Workbench({
       : null
   useEffect(() => {
     // Not running: a page whose backend restarted loads afresh anyway (PreviewPane).
-    if (!personalId || !localRunning) {
+    if (!localId || !localRunning) {
       pageSeenRef.current = null
       return
     }
     if (pageStamp === null || activeChatBusy) return
     const seen = pageSeenRef.current
-    pageSeenRef.current = { projectId: personalId, stamp: pageStamp }
-    if (!seen || seen.projectId !== personalId || seen.stamp === pageStamp) return
+    pageSeenRef.current = { projectId: localId, stamp: pageStamp }
+    if (!seen || seen.projectId !== localId || seen.stamp === pageStamp) return
     if (reloadTimerRef.current !== null) window.clearTimeout(reloadTimerRef.current)
     reloadTimerRef.current = window.setTimeout(() => {
       reloadTimerRef.current = null
       setLocalReload((n) => n + 1)
     }, LOCAL_RELOAD_SETTLE_MS)
-  }, [personalId, localRunning, pageStamp, activeChatBusy])
+  }, [localId, localRunning, pageStamp, activeChatBusy])
   useEffect(
     () => () => {
       if (reloadTimerRef.current !== null) window.clearTimeout(reloadTimerRef.current)
       reloadTimerRef.current = null
     },
-    [personalId]
+    [localId]
   )
 
   // A data model change that would delete local data waits for the user: the
@@ -2678,8 +2765,8 @@ export default function Workbench({
   // app's own screen. Keeping the current version is remembered for that change.
   const refusal = runsLocally ? refusedSchemaLosses(localStatus) : null
   const refusalKey =
-    refusal && personalId
-      ? `${personalId}|${localStatus?.state}|${
+    refusal && localId
+      ? `${localId}|${localStatus?.state}|${
           (localStatus?.state === 'error' ? localStatus.error?.time : localStatus?.schema?.time) ??
           localStatus?.startedAt ??
           ''
@@ -2703,19 +2790,18 @@ export default function Workbench({
     ? (): void => setSchemaDialog({ key: refusalKey, tried: false })
     : undefined
 
-  // While turns don't publish, an app on its published backend keeps its live
-  // preview running (see keepLocalPreview): a published app its local backend
-  // can't run, once that has let go of the ports.
+  // While turns don't publish (never, for a team app), an app on its backend
+  // in Fabric keeps its live preview running (see keepLocalPreview): an app its
+  // local backend can't run, once that has let go of the ports.
   const activeTarget = active ? deploymentKey(active) : ''
   const activeDeploying = Boolean(activeId && deploys[activeId]?.running)
   // Re-run when the open app's preview comes or goes, or changes published app.
   const activePreviewTarget = activeId ? (devServers[activeId]?.target ?? '') : null
   const keepLocal = Boolean(
     settings &&
-    manualDeploy &&
+    (manualDeploy || activeTeamApp) &&
     projectToolsReady &&
     active &&
-    !active.team &&
     activeFallback &&
     !localActive
   )
@@ -2800,13 +2886,13 @@ export default function Workbench({
       pending: active ? (pending[active.id] ?? undefined) : undefined,
       autoDeploy: !manualDeploy,
       migrationEnabled,
-      mcpServersEnabled,
-      goalsEnabled: goalsOn,
+      terminalOpen: shellShowing && onProjectScreen,
       inGallery: Boolean(gallery),
       teamWorkspaceName: activeTeamWorkspace?.name,
       theme: settings?.theme ?? 'system',
       uiScale: settings?.uiScale ?? 1,
       fabricSignedIn: auth.rayfin.signedIn,
+      canSignInToFabric,
       modKey: modKey(),
       deployFailed: Boolean(active && lastDeployFailed(active, deploys[active.id])),
       advisorIssues: advisor.derived.badge?.count ?? 0,
@@ -2820,10 +2906,10 @@ export default function Workbench({
           window.api.openInEditor(project.id).then(
             (res) => {
               if (!res.opened) {
-                toast.info('VS Code isn’t installed, so we opened the project folder instead.')
+                toast.info(t('editor.openedFolderInstead'))
               }
             },
-            (reason) => toast.error(errorMessage(reason, 'Fabricator couldn’t open VS Code.'))
+            (reason) => toast.error(errorMessage(reason, t('editor.openFailed')))
           )
         },
         openWorkspace: (workspace) =>
@@ -2835,7 +2921,7 @@ export default function Workbench({
         openProjectById: (projectId) => {
           const project = projects?.projects.find((p) => p.id === projectId)
           if (!project) {
-            toast.error('That project isn’t in Fabricator anymore.')
+            toast.error(t('project.gone'))
             return
           }
           setTeamMap(null)
@@ -2848,6 +2934,20 @@ export default function Workbench({
         showCodeTab: (tab) => {
           toProject()
           showCodeTab(tab)
+        },
+        showTerminal: (show) => {
+          if (!active) return
+          if (show) {
+            toProject()
+            terminalStore.open(active.id)
+          } else {
+            terminalStore.close(active.id)
+          }
+        },
+        newTerminal: () => {
+          if (!active) return
+          toProject()
+          terminalStore.add(active.id)
         },
         goHome: () => {
           setTeamMap(null)
@@ -2893,6 +2993,7 @@ export default function Workbench({
         openApiKeys: openModelProviders,
         openMcpServers: () => openMcpServers(),
         openChatDefaults: () => setShowChatDefaults(true),
+        openCustomInstructions: () => setShowCustomInstructions(true),
         refreshFabricAuth: () => {
           if (active) openAuthRefresh(active)
         },
@@ -2951,17 +3052,21 @@ export default function Workbench({
           <div className="app-bar-start">
             {teamMap && !showCreate && !showClone && !showMigrate ? (
               <BackToProject
-                name={teamMap.from === 'project' && active ? active.name : 'projects'}
-                title={teamMap.from === 'project' && active ? `Return to ${active.name}` : 'Return to your projects'}
+                name={teamMap.from === 'project' && active ? active.name : undefined}
+                title={
+                  teamMap.from === 'project' && active
+                    ? t('appBar.returnTo', { name: active.name })
+                    : t('appBar.returnToProjects')
+                }
                 onClick={() => setTeamMap(null)}
               />
             ) : gallery && !showCreate && !showClone && !showMigrate ? (
               <BackToProject
-                name={gallery.from === 'project' && active ? active.name : 'projects'}
+                name={gallery.from === 'project' && active ? active.name : undefined}
                 title={
                   gallery.from === 'project' && active
-                    ? `Return to ${active.name}`
-                    : 'Return to your projects'
+                    ? t('appBar.returnTo', { name: active.name })
+                    : t('appBar.returnToProjects')
                 }
                 onClick={() => setGallery(null)}
               />
@@ -2981,12 +3086,12 @@ export default function Workbench({
                 type="button"
                 className="app-search"
                 onClick={() => setShowSearch(true)}
-                aria-label="Search"
+                aria-label={t('actions.search')}
                 aria-keyshortcuts={isMac() ? 'Meta+K' : 'Control+K'}
-                title={`Search projects, actions and docs, or ask Help (${shortcut('K')})`}
+                title={t('appBar.searchTitle', { shortcut: shortcut('K') })}
               >
                 <Codicon name="search" className="app-search-ico" />
-                <span className="app-search-label">Search</span>
+                <span className="app-search-label">{t('actions.search')}</span>
                 <span className="app-search-keys" aria-hidden="true">
                   <kbd>{modKey()}</kbd>
                   <kbd>K</kbd>
@@ -3000,7 +3105,6 @@ export default function Workbench({
                 view={viewMode}
                 onChange={setViewMode}
                 advisorBadge={advisor.derived.badge}
-                goals={goalsOn ? { failing: failingNow(goals.snapshot) } : undefined}
               />
             )}
           </div>
@@ -3016,7 +3120,6 @@ export default function Workbench({
                 onUpdate={() => teamWork.update(active.id)}
                 onCombine={() => teamWork.combineWithCopilot(active.id, [])}
                 onDiscard={() => teamWork.discard(active.id)}
-                onSetView={(view) => teamWork.setView(active.id, view)}
                 onViewLogs={(runId) => teamWork.viewLogs(active.id, runId)}
                 onDiagnose={(run) => teamWork.diagnose(active.id, run)}
                 onRefresh={() => void teamWork.refresh(active.id, true)}
@@ -3090,6 +3193,7 @@ export default function Workbench({
                 signingOut={signingOut}
                 refreshing={refreshingAuth}
                 canRefresh={Boolean(active)}
+                canSignIn={canSignInToFabric}
                 onSignIn={() => void signIn()}
                 onSignOut={() => void signOut()}
                 onRefresh={() => {
@@ -3161,6 +3265,7 @@ export default function Workbench({
           initialTeamWorkspaceId={newAppTeamId ?? undefined}
           projectsFolder={projects?.workspaceRoot}
           recentLocations={projects?.recentLocations}
+          onReviewSetup={onReviewSetup}
           onTeamCreated={(result) => {
             setShowCreate(false)
             setNewAppTeamId(null)
@@ -3171,9 +3276,13 @@ export default function Workbench({
             void refreshProjects()
             if (migrationPick && result.project) void startMigration(result.project.id, migrationPick, migrationModel)
             setMigrationPick(null)
-            if (result.error) toast.error(result.error, { title: 'Not on GitHub yet' })
+            if (result.error) toast.error(result.error, { title: t('team.notOnGitHub') })
           }}
-          source={migrationPick ? { label: 'From Power BI', detail: describePick(migrationPick) } : undefined}
+          source={
+            migrationPick
+              ? { label: t('migration.fromPowerBi'), detail: describePick(migrationPick) }
+              : undefined
+          }
           initialName={
             migrationPick
               ? toProjectName(migrationPick.source.reportName)
@@ -3190,7 +3299,13 @@ export default function Workbench({
         />
       ) : (
         <div className="workbench">
-          <main className="content">
+          <main
+            className={`content${
+              activeTerminals.open && terminalState.maximized && onProjectScreen
+                ? ' content--terminal-max'
+                : ''
+            }`}
+          >
             {notice && <div className="alert alert--error content-alert">{notice}</div>}
             {active ? (
               <ProjectDependencyGuard
@@ -3203,7 +3318,7 @@ export default function Workbench({
                   className={`project-pane${showHome || teamMap || gallery ? ' project-pane--hidden' : ''}`}
                 >
                   {viewMode === 'code' ? (
-                    <Suspense fallback={<div className="code-empty">Loading editor…</div>}>
+                    <Suspense fallback={<div className="code-empty">{t('editor.loading')}</div>}>
                       <CodeViewer
                         project={active}
                         refreshKey={gitRefresh}
@@ -3261,12 +3376,13 @@ export default function Workbench({
                             attachments={shots[active.id] ?? []}
                             onAddAttachment={(shot) => addShot(active.id, shot)}
                             onRemoveAttachment={(path) => removeShot(active.id, path)}
-                            onAttachmentsConsumed={() => clearShots(active.id)}
+                            onReplaceAttachment={(path, shot) => replaceShot(active.id, path, shot)}
+                            onAttachmentsConsumed={(paths) => clearShots(active.id, paths)}
                             onClearHistory={() => void window.api.chat.saveHistory(active.id, [])}
                             onOptionsChanged={() => void refreshProjects()}
                             onManageKeys={openModelProviders}
                             experiments={settings?.experiments}
-                            onManageMcpServers={mcpServersEnabled ? openMcpServers : undefined}
+                            onManageMcpServers={openMcpServers}
                             outbound={chatOutbound?.projectId === active.id ? chatOutbound : null}
                             onOutboundConsumed={() => setChatOutbound(null)}
                             onAdvisorRerun={rerunAdvisorFix}
@@ -3277,20 +3393,19 @@ export default function Workbench({
                               (Boolean(active.team) && teamWork.syncing(active.id))
                             }
                             blockSubmitWhileDeploying
-                            submitBlockedTitle={
-                              active.team ? 'Saving to GitHub — sending resumes in a moment' : undefined
-                            }
+                            submitBlockedTitle={active.team ? t('team.savingToGitHub') : undefined}
                             eventsManagedExternally
                             onOpenMention={openMention}
                             draft={drafts[active.id] ?? ''}
                             onDraftChange={(value) => setDraftFor(active.id, value)}
-                            designItems={design.items}
-                            designSending={design.sending}
-                            onDesignRemove={design.removeItem}
-                            onDesignFocus={design.focusItem}
-                            onDesignClear={design.clear}
-                            buildDesignTurn={design.buildTurn}
-                            onDesignSent={design.finishSend}
+                            picks={touchUp.picks}
+                            pickOn={touchUp.on}
+                            onPickRemove={touchUp.remove}
+                            onPickFocus={touchUp.focus}
+                            onPickExit={touchUp.stop}
+                            buildPickTurn={touchUp.buildTurn}
+                            onPicksSent={touchUp.finishSend}
+                            onPickShot={touchUp.setShot}
                             banner={
                               migration.state ? (
                                 <MigrationCard
@@ -3315,8 +3430,8 @@ export default function Workbench({
                           className="pane-divider"
                           role="separator"
                           aria-orientation="vertical"
-                          aria-label="Resize chat and preview"
-                          title="Drag to resize · double-click to reset"
+                          aria-label={t('divider.label')}
+                          title={t('divider.title')}
                           onMouseDown={onDividerDown}
                           onDoubleClick={resetSplit}
                         >
@@ -3330,7 +3445,6 @@ export default function Workbench({
                           team={Boolean(active.team)}
                           localBackend={devServers[active.id]?.backend}
                           teamRun={activeTeamStatus?.run}
-                          teamView={activeTeamStatus?.view ?? active.team?.view ?? 'preview'}
                           onOpenTeamMap={
                             active.team
                               ? () => openTeamMap(active.team?.workspaceId ?? '', 'project', active.team?.folder)
@@ -3359,7 +3473,7 @@ export default function Workbench({
                               ? (devServers[active.id]?.url ?? null)
                               : null
                           }
-                          manualDeploy={manualDeploy && !active.team}
+                          manualDeploy={manualDeploy || Boolean(active.team)}
                           localReload={localReload}
                           turnRunning={activeChatBusy}
                           watching={watchDeploy === active.id}
@@ -3375,32 +3489,8 @@ export default function Workbench({
                               ? thumbnailCapture.left()
                               : thumbnailCapture.appLoaded(active.id, active.thumbnailAt)
                           }
-                          design={design}
-                          designModel={{
-                            value: designChoice,
-                            onChange: setDesignChoice,
-                            onManageKeys: openModelProviders
-                          }}
-                          designSendBlocked={
-                            activeChatBusy
-                              ? 'Copilot is working — send when this turn finishes'
-                              : deploys[active.id]?.running
-                                ? 'Publishing — send when it finishes'
-                                : null
-                          }
-                          onDesignSend={() => {
-                            // Show the chat so the new turn is visible, then send
-                            // through the composer (its text becomes the note).
-                            setFocusPane((f) => (f === 'preview' ? null : f))
-                            setChatOutbound({
-                              id: `design-${Date.now()}`,
-                              projectId: active.id,
-                              display: '',
-                              prompt: '',
-                              design: true
-                            })
-                          }}
-                          onDesignSurface={setDesignSurface}
+                          touchUp={touchUp}
+                          onPickSurface={setPickSurface}
                           onLoadingChange={setPreviewLoading}
                           onSettle={() => setPreviewSettledId(active.id)}
                         />
@@ -3408,11 +3498,11 @@ export default function Workbench({
                           <div
                             className={`project-loading${previewLoading.fading ? ' project-loading--out' : ''}`}
                             role="status"
-                            aria-label="Loading project"
+                            aria-label={t('loading.label')}
                           >
                             <span className="project-loading-spinner" />
                             <span className="project-loading-label">
-                              Loading {previewLoading.name}…
+                              {t('loading.project', { name: previewLoading.name })}
                             </span>
                           </div>
                         )}
@@ -3438,21 +3528,6 @@ export default function Workbench({
                         onFix={fixFindings}
                         onOpenFile={openFileInCode}
                         openRequest={advisorOpen ?? undefined}
-                        onManageKeys={openModelProviders}
-                      />
-                    </div>
-                  )}
-                  {goalsMounted && goalsOn && (
-                    <div
-                      className={`advisor-host${viewMode === 'goals' ? '' : ' advisor-host--hidden'}`}
-                    >
-                      <GoalsView
-                        project={active}
-                        goals={goals}
-                        visible={viewMode === 'goals'}
-                        chatBusy={activeChatBusy}
-                        onFix={fixGoals}
-                        onOpenFile={openFileInCode}
                         onManageKeys={openModelProviders}
                       />
                     </div>
@@ -3493,7 +3568,7 @@ export default function Workbench({
                 onOpenProject={(projectId) => {
                   const project = projects?.projects.find((p) => p.id === projectId)
                   if (project) void selectProject(project)
-                  else toast.error('That project isn’t in Fabricator anymore.')
+                  else toast.error(t('project.gone'))
                 }}
                 onNewProject={() => {
                   setGallery(null)
@@ -3555,6 +3630,16 @@ export default function Workbench({
                 />
               </>
             ) : null}
+            {active && activeTerminals.open && (
+              <Suspense fallback={null}>
+                <TerminalPanel
+                  project={active}
+                  hidden={!onProjectScreen}
+                  onOpenFile={openFileInCode}
+                  local={runsLocally ? local : undefined}
+                />
+              </Suspense>
+            )}
           </main>
         </div>
       )}
@@ -3567,10 +3652,21 @@ export default function Workbench({
             {active.team ? (
               <span
                 className="statusbar-item team-status-item"
-                title={`Team workspace${activeTeamWorkspace ? ` ${activeTeamWorkspace.repo}` : ''}. Working branch: ${active.team.branch ?? 'none'}`}
+                title={
+                  activeTeamWorkspace
+                    ? active.team.branch != null
+                      ? t('statusBar.teamRepoBranch', {
+                          repo: activeTeamWorkspace.repo,
+                          branch: active.team.branch
+                        })
+                      : t('statusBar.teamRepoNoBranch', { repo: activeTeamWorkspace.repo })
+                    : active.team.branch != null
+                      ? t('statusBar.teamBranch', { branch: active.team.branch })
+                      : t('statusBar.teamNoBranch')
+                }
               >
                 <span className="codicon codicon-organization statusbar-ico" aria-hidden="true" />
-                {activeTeamWorkspace?.name ?? 'Team'}
+                {activeTeamWorkspace?.name ?? t('statusBar.team')}
                 {active.team.branch ? ` · ${branchLabel(active.team.branch)}` : ''}
               </span>
             ) : (
@@ -3580,10 +3676,13 @@ export default function Workbench({
                 busy={activeChatBusy}
                 onSynced={(packagesChanged) => void afterGitSync(active.id, packagesChanged)}
                 onSendToChat={sendGitToChat}
+                folderName={active.path.split(/[\\/]/).filter(Boolean).pop()}
+                onReviewSetup={onReviewSetup}
               />
             )}
             <RayfinVersionControl
               info={versionInfo}
+              newer={newerVersion}
               onUpdate={requestRayfinUpdate}
               publishes={!manualDeploy && !active.team && Boolean(active.lastDeploy?.url)}
             />
@@ -3602,8 +3701,8 @@ export default function Workbench({
               applyUiScale(uiScale)
               onSettingsChange({ uiScale })
             }}
-            title="Interface zoom — scales the whole UI (and the design tools)"
-            aria-label="Interface zoom"
+            title={t('statusBar.zoomTitle')}
+            aria-label={t('statusBar.zoom')}
           >
             {UI_SCALES.map((s) => (
               <option key={s} value={String(s)}>
@@ -3611,22 +3710,54 @@ export default function Workbench({
               </option>
             ))}
           </StatusMenu>
-          <span className="statusbar-item" title="Rayfin Fabricator version">
+          <span className="statusbar-item" title={t('statusBar.version')}>
             v{versions?.app ?? '—'}
           </span>
         </span>
 
-        {/* One action. Help is the support surface: it answers questions,
-            links the documentation, and writes a bug report when the problem
-            is ours. */}
+        {/* The actions: the open project's terminal, and Help, the support
+            surface: it answers questions, links the documentation, and writes
+            a bug report when the problem is ours. */}
         <span className="statusbar-actions">
+          {active && (
+            <button
+              className={`statusbar-report statusbar-terminal${
+                shellShowing && onProjectScreen ? ' statusbar-terminal--open' : ''
+              }`}
+              onClick={() => {
+                if (shellShowing && onProjectScreen) {
+                  terminalStore.close(active.id)
+                } else {
+                  showProjectScreen()
+                  terminalStore.open(active.id)
+                }
+              }}
+              aria-pressed={shellShowing && onProjectScreen}
+              aria-keyshortcuts="Control+`"
+              title={t('statusBar.terminalTitle', {
+                name: active.name,
+                shortcut: isMac() ? '⌃`' : `${t('keys.ctrl')}+\``
+              })}
+            >
+              <Codicon name="terminal" className="statusbar-ico" />
+              {t('statusBar.terminal')}
+              {liveCount(activeTerminals) > 0 && (
+                <span
+                  className="statusbar-count"
+                  aria-label={t('statusBar.running', { count: liveCount(activeTerminals) })}
+                >
+                  {liveCount(activeTerminals)}
+                </span>
+              )}
+            </button>
+          )}
           <button
             className="statusbar-report statusbar-help"
             onClick={() => openHelp()}
-            title="Ask Help — debug a problem, browse the docs, or report an issue (Ctrl+J)"
+            title={t('statusBar.helpTitle', { shortcut: `${t('keys.ctrl')}+J` })}
           >
             <Codicon name="comment-discussion" className="statusbar-ico" />
-            Help
+            {t('statusBar.help')}
           </button>
         </span>
       </footer>
@@ -3674,17 +3805,17 @@ export default function Workbench({
             setShowSettings(false)
             openModelProviders()
           }}
-          onManageMcpServers={
-            mcpServersEnabled
-              ? () => {
-                  setShowSettings(false)
-                  openMcpServers()
-                }
-              : undefined
-          }
+          onManageMcpServers={() => {
+            setShowSettings(false)
+            openMcpServers()
+          }}
           onManageChatDefaults={() => {
             setShowSettings(false)
             setShowChatDefaults(true)
+          }}
+          onManageCustomInstructions={() => {
+            setShowSettings(false)
+            setShowCustomInstructions(true)
           }}
           onReviewSetup={() => {
             setShowSettings(false)
@@ -3703,14 +3834,18 @@ export default function Workbench({
             setShowChatDefaults(false)
             openModelProviders()
           }}
-          onManageMcpServers={
-            mcpServersEnabled
-              ? () => {
-                  setShowChatDefaults(false)
-                  openMcpServers()
-                }
-              : undefined
-          }
+          onManageMcpServers={() => {
+            setShowChatDefaults(false)
+            openMcpServers()
+          }}
+        />
+      )}
+
+      {showCustomInstructions && settings && (
+        <CustomInstructionsModal
+          instructions={settings.customInstructions}
+          onSave={(customInstructions) => onSettingsChange({ customInstructions })}
+          onClose={() => setShowCustomInstructions(false)}
         />
       )}
 
@@ -3732,6 +3867,7 @@ export default function Workbench({
             signingIn,
             signingOut,
             canRefresh: Boolean(active),
+            canSignIn: canSignInToFabric,
             projectId: active?.id,
             onSignIn: () => void signIn(),
             onSignOut: () => void signOut(),
@@ -3761,11 +3897,14 @@ export default function Workbench({
             teamEnabled
               ? async (p, workspaceId) => {
                   const result = await window.api.team.moveProject(workspaceId, p.id)
-                  if (!result.project) return result.error ?? 'Could not move the project.'
+                  if (!result.project) return result.error ?? t('team.moveFailed')
                   setShowHome(false)
                   await refreshProjects()
-                  if (result.error) toast.error(result.error, { title: 'Not on GitHub yet' })
-                  else toast.success(`${p.name} is now in the team workspace.`, { title: 'Moved' })
+                  if (result.error) toast.error(result.error, { title: t('team.notOnGitHub') })
+                  else
+                    toast.success(t('team.moved', { name: p.name }), {
+                      title: t('team.movedTitle')
+                    })
                   return null
                 }
               : undefined
@@ -3788,12 +3927,11 @@ export default function Workbench({
           project={exporting}
           busy={
             isTurnRunning(exporting.id)
-              ? `Copilot is still working on ${exporting.name}. Export it once the turn finishes.`
+              ? t('export.waitForTurn', { name: exporting.name })
               : deploys[exporting.id]?.running
-                ? `${exporting.name} is publishing. Export it once it finishes.`
+                ? t('export.waitForPublish', { name: exporting.name })
                 : undefined
           }
-          appExport={Boolean(settings?.experiments?.appExport)}
           onClose={() => setExporting(null)}
         />
       )}
@@ -3830,7 +3968,7 @@ export default function Workbench({
           projectName={active.name}
           losses={refusal}
           atStart={localStatus?.state === 'error'}
-          published={activePublished}
+          published={Boolean(active.lastDeploy?.url)}
           busy={local.busy}
           error={schemaDialog?.tried ? (local.actionError?.message ?? null) : null}
           onApply={() => {
@@ -3850,12 +3988,12 @@ export default function Workbench({
 
       {confirmDeploy && (
         <ConfirmModal
-          title="You have changes to get first"
-          confirmLabel="Get latest first"
-          busyLabel="Getting latest…"
+          title={t('deployGuard.title')}
+          confirmLabel={t('deployGuard.getLatest')}
+          busyLabel={t('deployGuard.gettingLatest')}
           busy={deployGuardBusy}
-          secondaryLabel="Publish anyway"
-          cancelLabel="Cancel"
+          secondaryLabel={t('deployGuard.publishAnyway')}
+          cancelLabel={t('actions.cancel')}
           onConfirm={() => {
             void (async () => {
               const c = confirmDeploy
@@ -3865,18 +4003,18 @@ export default function Workbench({
               setGitRefresh((n) => n + 1)
               setDeployGuardBusy(false)
               if (!res.ok) {
-                setDeployGuardError(res.error ?? 'Could not get the latest changes.')
+                setDeployGuardError(res.error ?? t('deployGuard.pullFailed'))
                 return
               }
               setConfirmDeploy(null)
-              void deployPastGoals(c.projectId, c.workspace, c.itemName)
+              void runDeploy(c.projectId, c.workspace, c.itemName)
             })()
           }}
           onSecondary={() => {
             const c = confirmDeploy
             setConfirmDeploy(null)
             setDeployGuardError(null)
-            void deployPastGoals(c.projectId, c.workspace, c.itemName)
+            void runDeploy(c.projectId, c.workspace, c.itemName)
           }}
           onCancel={() => {
             setConfirmDeploy(null)
@@ -3885,11 +4023,12 @@ export default function Workbench({
           message={
             <>
               <p>
-                The remote has{' '}
-                <strong>
-                  {confirmDeploy.behind} change{confirmDeploy.behind === 1 ? '' : 's'}
-                </strong>{' '}
-                you haven’t downloaded yet. Publishing now sends your current version without them.
+                <Trans
+                  t={t}
+                  i18nKey="deployGuard.message"
+                  count={confirmDeploy.behind}
+                  components={{ strong: <strong /> }}
+                />
               </p>
               {deployGuardError && <p className="confirm-error">{deployGuardError}</p>}
             </>
@@ -3897,76 +4036,32 @@ export default function Workbench({
         />
       )}
 
-      {goalsGate && (
-        <ConfirmModal
-          title={
-            goalsGate.running
-              ? 'Your app’s checks are still running'
-              : goalsGate.gap.unchecked.length
-                ? 'Run your app’s checks first?'
-                : 'Your app’s checks didn’t all pass'
-          }
-          confirmLabel={
-            !goalsGate.running && goalsGate.gap.unchecked.length
-              ? `Run ${goalsGate.gap.unchecked.length} check${goalsGate.gap.unchecked.length === 1 ? '' : 's'}`
-              : 'See the checks'
-          }
-          secondaryLabel="Publish anyway"
-          cancelLabel="Cancel"
-          onConfirm={() => {
-            const gate = goalsGate
-            setGoalsGate(null)
-            if (gate.projectId !== activeIdRef.current) return
-            setViewMode('goals')
-            if (!gate.running && gate.gap.unchecked.length) goals.startRun(gate.gap.unchecked)
-          }}
-          onSecondary={() => {
-            const gate = goalsGate
-            setGoalsGate(null)
-            void runDeploy(gate.projectId, gate.workspace, gate.itemName)
-          }}
-          onCancel={() => setGoalsGate(null)}
-          message={
-            <p>
-              {goalsGate.running
-                ? 'Fabricator is checking this version against what the app is for. '
-                : `${gapText(goalsGate.gap)} `}
-              Make sure this version still does what it’s for before people use it.
-            </p>
-          }
-        />
-      )}
-
       {authRefreshTarget && (
         <ConfirmModal
-          title="Refresh Fabric authentication"
-          confirmLabel="Clear credentials and sign in"
+          title={t('authRefresh.title')}
+          confirmLabel={t('authRefresh.confirm')}
           busy={refreshingAuth}
-          busyLabel="Refreshing authentication…"
+          busyLabel={t('authRefresh.busyLabel')}
           onConfirm={() => void refreshFabricAuthentication()}
           onCancel={() => setAuthRefreshTarget(null)}
           message={
             <>
               <p>
-                Run <code>rayfin logout</code> and <code>rayfin login</code> with{' '}
-                <strong>{authRefreshTarget.name}</strong>&apos;s CLI, then verify the new Fabric credential.
-                This lets Rayfin recover stale token-cache locks and replace expired credentials.
+                <Trans
+                  t={t}
+                  i18nKey="authRefresh.message"
+                  values={{ name: authRefreshTarget.name }}
+                  components={{ code: <code />, strong: <strong /> }}
+                />
               </p>
-              <p>
-                Rayfin CLI credentials are shared across projects. This does not sign out of
-                Copilot, Azure CLI, or the preview browser, and it doesn’t publish your app again.
-                Update older projects to Rayfin 1.35.1 or newer using the Rayfin version control.
-              </p>
+              <p>{t('authRefresh.shared')}</p>
               {authRefreshError && (
                 <p className="confirm-error" role="alert">
                   {authRefreshError}
                 </p>
               )}
               {authRefreshLog.length > 0 && (
-                <pre
-                  className="deploy-log deploy-log--static"
-                  aria-label="Authentication refresh log"
-                >
+                <pre className="deploy-log deploy-log--static" aria-label={t('authRefresh.log')}>
                   {authRefreshLog.join('')}
                 </pre>
               )}
@@ -3980,7 +4075,7 @@ export default function Workbench({
           className="signout-overlay"
           role="alertdialog"
           aria-busy="true"
-          aria-label="Signing out"
+          aria-label={t('signOut.label')}
         >
           <SuppressPreview />
           <div className="signout-card">
@@ -3989,8 +4084,8 @@ export default function Workbench({
               <span className="signout-ring" />
             </div>
             <div className="signout-text">
-              <strong>Signing you out…</strong>
-              <span>Ending your Fabric session securely</span>
+              <strong>{t('signOut.title')}</strong>
+              <span>{t('signOut.detail')}</span>
             </div>
           </div>
         </div>

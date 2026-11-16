@@ -1,10 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
-import type { AppSettings, AppVersions } from '@shared/ipc'
+import type { AppSettings, AppVersions, Language } from '@shared/ipc'
+import { setLanguage } from '../i18n'
 import SettingsModal from './SettingsModal'
 
 /** Install the minimal `window.api` surface SettingsModal touches. */
-function installApi(exportImpl?: () => Promise<string>): {
+function installApi(
+  exportImpl?: () => Promise<string>,
+  systemLanguage: Language = 'en'
+): {
   export: ReturnType<typeof vi.fn>
   openLogs: ReturnType<typeof vi.fn>
   openExternal: ReturnType<typeof vi.fn>
@@ -18,6 +22,7 @@ function installApi(exportImpl?: () => Promise<string>): {
         Promise.resolve({ workspaceRoot: 'C:/ws', activeProjectId: null, projects: [] })
       )
     },
+    settings: { systemLanguage: vi.fn(() => Promise.resolve(systemLanguage)) },
     diagnostics: { export: exportFn },
     openLogs,
     openExternal
@@ -231,6 +236,9 @@ describe('SettingsModal retired controls', () => {
           localDevelopment: enabled,
           fabricIq: enabled,
           appGallery: enabled,
+          mcpServers: enabled,
+          appExport: enabled,
+          parallelUi: enabled,
           teamWorkspaces: true
         }
       }
@@ -246,56 +254,23 @@ describe('SettingsModal retired controls', () => {
         'Local development',
         'Fabric IQ',
         'App gallery',
+        'Export as an app',
         'Performance',
         'Ray',
-        'Check for updates'
+        'Check for updates',
+        'Parallel UI builder'
       ]) {
         expect(screen.queryByText(label)).toBeNull()
       }
       expect(screen.queryByRole('dialog', { name: 'Restart required' })).toBeNull()
-      expect(screen.getAllByRole('checkbox')).toHaveLength(7)
+      expect(screen.queryByRole('checkbox', { name: /MCP servers/ })).toBeNull()
+      expect(screen.getAllByRole('checkbox')).toHaveLength(4)
       expect(screen.getByText('Team workspaces')).toBeTruthy()
       expect(screen.getByText('Migrate Power BI reports')).toBeTruthy()
       expect(screen.getByText('Work IQ')).toBeTruthy()
-      expect(screen.getByText('MCP servers')).toBeTruthy()
-      expect(screen.getByText('Export as an app')).toBeTruthy()
       expect(screen.getByText('Full diagnostics')).toBeTruthy()
-      expect(screen.getByText('Goals')).toBeTruthy()
     }
   )
-})
-
-describe('SettingsModal Export as an app experiment', () => {
-  it('is off by default and turns on through its own flag', async () => {
-    installApi()
-    const { onChange } = await renderModal()
-    fireEvent.click(screen.getByRole('button', { name: /Experiments/ }))
-    const checkbox = screen.getByRole('checkbox', { name: /Export as an app/ }) as HTMLInputElement
-    expect(checkbox.checked).toBe(false)
-    fireEvent.click(checkbox)
-    expect(onChange).toHaveBeenCalledWith({ experiments: { appExport: true } })
-  })
-
-  it('reflects the persisted flag', async () => {
-    installApi()
-    await renderModal({ settings: { theme: 'system', experiments: { appExport: true } } })
-    fireEvent.click(screen.getByRole('button', { name: /Experiments/ }))
-    expect(
-      (screen.getByRole('checkbox', { name: /Export as an app/ }) as HTMLInputElement).checked
-    ).toBe(true)
-  })
-})
-
-describe('SettingsModal Goals experiment', () => {
-  it('turns on through its own flag', async () => {
-    installApi()
-    const { onChange } = await renderModal()
-    fireEvent.click(screen.getByRole('button', { name: /Experiments/ }))
-    const checkbox = screen.getByRole('checkbox', { name: /Goals/ }) as HTMLInputElement
-    expect(checkbox.checked).toBe(false)
-    fireEvent.click(checkbox)
-    expect(onChange).toHaveBeenCalledWith({ experiments: { goals: true } })
-  })
 })
 
 describe('SettingsModal API keys', () => {
@@ -319,17 +294,18 @@ describe('SettingsModal chat defaults', () => {
   })
 })
 
-describe('SettingsModal MCP servers', () => {
-  it('turns the experiment on, and offers managing servers only while it’s on', async () => {
+describe('SettingsModal custom instructions', () => {
+  it('opens Custom instructions', async () => {
     installApi()
-    const onChange = vi.fn()
-    await renderModal({ onChange })
-    expect(screen.queryByRole('button', { name: 'Manage MCP servers' })).toBeNull()
-    fireEvent.click(screen.getByRole('button', { name: /Experiments/ }))
-    fireEvent.click(screen.getByRole('checkbox', { name: /MCP servers/ }))
-    expect(onChange).toHaveBeenLastCalledWith({ experiments: { mcpServers: true } })
+    const onManageCustomInstructions = vi.fn()
+    await renderModal({ onManageCustomInstructions })
+    fireEvent.click(screen.getByRole('button', { name: 'Edit instructions' }))
+    expect(onManageCustomInstructions).toHaveBeenCalledOnce()
+  })
+})
 
-    cleanup()
+describe('SettingsModal MCP servers', () => {
+  it('opens MCP servers', async () => {
     installApi()
     const onManageMcpServers = vi.fn()
     await renderModal({ onManageMcpServers })
@@ -344,7 +320,8 @@ describe('SettingsModal About', () => {
     tauri: '2.12.3',
     webview2: '155.0.4283.45',
     copilot: '1.0.98',
-    copilotBundled: '1.0.96'
+    copilotBundled: '1.0.96',
+    rayfinLocal: '0.2.8'
   }
   const originalClipboard = (navigator as unknown as { clipboard?: unknown }).clipboard
 
@@ -360,14 +337,22 @@ describe('SettingsModal About', () => {
     const about = screen.getByRole('region', { name: 'About' })
     expect(within(about).getByText('Version 1.18.0')).toBeTruthy()
     expect(within(about).getByText('1.0.98 (bundled 1.0.96)')).toBeTruthy()
+    expect(within(about).getByText('rayfin-local').nextElementSibling?.textContent).toBe('0.2.8')
 
     await act(async () => {
       fireEvent.click(within(about).getByRole('button', { name: 'Copy version info' }))
     })
     expect(writeText).toHaveBeenCalledWith(
-      'Fabricator 1.18.0\nTauri 2.12.3\nWebView2 155.0.4283.45\nCopilot CLI 1.0.98 (bundled 1.0.96)'
+      'Fabricator 1.18.0\nTauri 2.12.3\nWebView2 155.0.4283.45\nCopilot CLI 1.0.98 (bundled 1.0.96)\nrayfin-local 0.2.8'
     )
     expect(within(about).getByText('Copied')).toBeTruthy()
+  })
+
+  it('says when the rayfin-local version is unknown', async () => {
+    installApi()
+    await renderModal({ versions: { ...versions, rayfinLocal: null } })
+    const about = screen.getByRole('region', { name: 'About' })
+    expect(within(about).getByText('rayfin-local').nextElementSibling?.textContent).toBe('unknown')
   })
 
   it('lists no versions until they load', async () => {
@@ -376,5 +361,37 @@ describe('SettingsModal About', () => {
     const about = screen.getByRole('region', { name: 'About' })
     expect(within(about).queryByRole('button', { name: 'Copy version info' })).toBeNull()
     expect(within(about).getByRole('button', { name: 'Documentation' })).toBeTruthy()
+  })
+})
+
+describe('SettingsModal language', () => {
+  afterEach(async () => {
+    await act(() => setLanguage('en'))
+    localStorage.clear()
+  })
+
+  it('names the computer’s language and switches to the one picked', async () => {
+    installApi(undefined, 'ja')
+    const { onChange } = await renderModal()
+    const picker = screen.getByRole('combobox', { name: 'Language' }) as HTMLSelectElement
+    expect(picker.value).toBe('system')
+    expect(within(picker).getByRole('option', { name: 'System (日本語)' })).toBeTruthy()
+    expect(within(picker).getByRole('option', { name: 'Deutsch' }).getAttribute('lang')).toBe('de')
+
+    await act(async () => {
+      fireEvent.change(picker, { target: { value: 'de' } })
+    })
+    expect(onChange).toHaveBeenCalledWith({ language: 'de' })
+    expect(await screen.findByRole('heading', { name: 'Einstellungen' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Fertig' })).toBeTruthy()
+    expect(document.documentElement.lang).toBe('de')
+  })
+
+  it('shows a chosen language as chosen', async () => {
+    installApi()
+    await renderModal({ settings: { ...settings, language: 'es' } })
+    expect((screen.getByRole('combobox', { name: 'Language' }) as HTMLSelectElement).value).toBe(
+      'es'
+    )
   })
 })

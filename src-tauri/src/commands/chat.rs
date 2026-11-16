@@ -74,10 +74,14 @@ const LOCAL_UNPUBLISHED_NOTE: &str = "[Fabricator: this app runs on this compute
 const FALLBACK_NOTE: &str = "[Fabricator: this app's backend runs on Microsoft Fabric, because the local backend can't run all of it. The preview shows your frontend changes against the published backend. Publish after each chat turn is off, so changes to data, permissions or functions reach that backend only once the user publishes. End by saying what to try in the preview and whether it needs a publish first.]";
 /// A published app the local backend can't run all of, published after each turn.
 const FALLBACK_AUTO_PUBLISH_NOTE: &str = "[Fabricator: this app's backend runs on Microsoft Fabric, because the local backend can't run all of it. Publish after each chat turn is on, so Fabricator publishes the app when this turn ends, and the preview then shows the result.]";
+/// While the user has custom instructions: a reminder on each message, since
+/// instructions alone are easy to miss among Fabricator's and the project's own.
+const CUSTOM_INSTRUCTIONS_NOTE: &str = "[Fabricator: the user's custom instructions are part of this message too. Follow them in what you build and change, and call fabricator_followed_instruction for each one that shapes your work.]";
 
 /// The text sent to Copilot for a chat message in `project`, with the note on
-/// how its changes go live, and on the Fabric IQ and Work IQ servers (`iq`) and
-/// the user's own MCP servers (`mcp`) it can use.
+/// how its changes go live, on the Fabric IQ and Work IQ servers (`iq`) and the
+/// user's own MCP servers (`mcp`) it can use, and on the user's custom
+/// instructions when they have some.
 fn turn_text(
   project: &StudioProject,
   text: &str,
@@ -85,11 +89,14 @@ fn turn_text(
   manual_publish: bool,
   iq: &iq::Prepared,
   mcp: &mcp::Prepared,
+  custom_instructions: bool,
 ) -> String {
-  let notes: Vec<String> = [iq.note(), mcp.note()].into_iter().flatten().collect();
+  let custom = custom_instructions.then(|| CUSTOM_INSTRUCTIONS_NOTE.to_string());
+  let notes: Vec<String> = [iq.note(), mcp.note(), custom].into_iter().flatten().collect();
   let text = if notes.is_empty() { text.to_string() } else { format!("{}\n\n{text}", notes.join("\n\n")) };
   if project.team.is_some() {
-    return crate::services::team::chat_text(&project.id, &text);
+    let note = crate::services::team::chat_note(guidance == Guidance::FabricBacked);
+    return format!("{note}\n\n{text}");
   }
   let note = match (guidance, manual_publish) {
     (Guidance::Local, true) => LOCAL_NOTE,
@@ -143,10 +150,11 @@ async fn prepare_mcp(
   mcp::prepare(session, servers, &ui, &mcp::MEMORY, cancel, mcp::Waits::default()).await
 }
 
-/// Stderr signatures that indicate a transient, safe-to-retry failure.
+/// Stderr signatures that indicate a transient, safe-to-retry failure. Status
+/// codes count only as whole numbers: "15003 tokens" is no server error.
 static TRANSIENT_RE: Lazy<Regex> = Lazy::new(|| {
   Regex::new(
-    r"(?i)rate.?limit|too many requests|temporar|timeout|etimedout|econnreset|enotfound|socket hang up|network error|503|502|500|overloaded|service unavailable|try again",
+    r"(?i)rate.?limit|too many requests|temporar|timeout|etimedout|econnreset|enotfound|socket hang up|network error|\b50[023]\b|overloaded|service unavailable|try again",
   )
   .unwrap()
 });
@@ -290,11 +298,17 @@ struct ToolCallAcc {
   name: String,
   ok: Option<bool>,
   output: Option<String>,
+  /// The files the call writes, as it named them: the turn changed them once
+  /// it succeeds.
+  writes: Vec<String>,
 }
 
 /// Per-attempt accumulator for a single turn.
 struct TurnCtx {
+  /// The project files the turn changed, relative to `cwd`, each once.
   files_modified: Vec<String>,
+  /// The project's folder, which the agent's file paths are under.
+  cwd: String,
   ran_deploy: bool,
   /// Set once the session signalled turn end (`session.idle`).
   saw_result: bool,
@@ -312,6 +326,9 @@ struct TurnCtx {
   /// message mid-turn we insert a blank line, so consecutive messages don't run
   /// together (e.g. "…the implementation.Now let me…").
   cur_msg: Option<String>,
+  /// The main agent replied since its last step the work log shows, so the
+  /// chat already has the turn's answer (the prose after the last step).
+  answered: bool,
   /// When true, capture content (assistant text + tool output) for full
   /// diagnostics. Off by default — only cheap metadata is accumulated.
   capture_full: bool,
@@ -334,12 +351,44 @@ struct TurnCtx {
   mcp_servers: Vec<(String, String)>,
   /// What Copilot Fusion chose for the turn so far, on a Fusion tier.
   fusion: Option<ChatFusion>,
+  /// Where each subagent's steps go, by the subagent's id.
+  agents: HashMap<String, AgentLink>,
+  /// The group of each step a subagent took, by its call id: an agent that
+  /// step starts joins the same group.
+  agent_steps: HashMap<String, String>,
+}
+
+/// Where a subagent's steps go in the work log, and how its run is going.
+struct AgentLink {
+  /// The main agent's step that started this agent, or the agent above it.
+  group: String,
+  /// The agent's name, as the work log shows it.
+  name: String,
+  /// The main agent started it, so the group is its own.
+  top: bool,
+  /// It runs in the background.
+  background: bool,
+  /// How its run is going, as the work log last showed it.
+  state: ChatToolState,
+}
+
+impl AgentLink {
+  /// The work log's view of this agent's run.
+  fn event(&self) -> ChatEvent {
+    ChatEvent::Agent {
+      id: self.group.clone(),
+      name: self.name.clone(),
+      state: self.state.clone(),
+      background: self.background,
+    }
+  }
 }
 
 impl TurnCtx {
   fn new(capture_full: bool) -> Self {
     TurnCtx {
       files_modified: vec![],
+      cwd: String::new(),
       ran_deploy: false,
       saw_result: false,
       saw_activity: false,
@@ -348,6 +397,7 @@ impl TurnCtx {
       reasoning_streamed: HashMap::new(),
       live_output: HashMap::new(),
       cur_msg: None,
+      answered: false,
       capture_full,
       tool_calls: vec![],
       response: None,
@@ -357,6 +407,8 @@ impl TurnCtx {
       provider: None,
       mcp_servers: vec![],
       fusion: None,
+      agents: HashMap::new(),
+      agent_steps: HashMap::new(),
     }
   }
 
@@ -374,13 +426,15 @@ impl TurnCtx {
     Some((name.clone(), tool.to_string()))
   }
 
-  /// Record the start of a tool call (metadata always; cheap).
-  fn tool_start(&mut self, id: &str, name: &str) {
+  /// Record the start of a tool call (metadata always; cheap), with the files
+  /// it writes.
+  fn tool_start(&mut self, id: &str, name: &str, writes: Vec<String>) {
     self.tool_calls.push(ToolCallAcc {
       id: id.to_string(),
       name: name.to_string(),
       ok: None,
       output: None,
+      writes,
     });
   }
 
@@ -389,14 +443,33 @@ impl TurnCtx {
     self.tool_calls.iter().rev().find(|t| t.id == id).map(|t| t.name.as_str())
   }
 
-  /// Record a tool call's outcome; capture its output only in full mode.
+  /// Record a tool call's outcome, and the files it changed when it
+  /// succeeded; capture its output only in full mode.
   fn tool_end(&mut self, id: &str, ok: bool, output: Option<&str>) {
     let full = self.capture_full;
+    let mut changed = Vec::new();
     if let Some(tc) = self.tool_calls.iter_mut().rev().find(|t| t.id == id) {
       tc.ok = Some(ok);
       if full {
         tc.output = output.map(|s| s.to_string());
       }
+      if ok {
+        changed = std::mem::take(&mut tc.writes);
+      }
+    }
+    for path in changed {
+      self.file_changed(&path);
+    }
+  }
+
+  /// Record a file the turn changed, by its path in the project. One outside
+  /// the project, such as Copilot's own plan file, isn't the app's.
+  fn file_changed(&mut self, path: &str) {
+    let Some(path) = chat_tools::project_relative(path, &self.cwd).filter(|p| !p.is_empty()) else {
+      return;
+    };
+    if !self.files_modified.contains(&path) {
+      self.files_modified.push(path);
     }
   }
 
@@ -435,6 +508,166 @@ fn ensure_separator(id: &str, sink: &mut dyn FnMut(ChatEvent), ctx: &mut TurnCtx
   ctx.cur_msg = Some(id.to_string());
 }
 
+/// Steps the work log doesn't show (the renderer's `HIDDEN_TOOLS`): they don't
+/// split the reply, so prose before one of them still reads as the answer.
+const HIDDEN_STEPS: [&str; 6] = [
+  "ask_user",
+  "exit_plan_mode",
+  "report_intent",
+  "task_complete",
+  crate::services::agent_tools::CONNECT_FABRIC_IQ_TOOL,
+  crate::services::agent_tools::FOLLOWED_INSTRUCTION_TOOL,
+];
+
+/// A step starting: shown as it runs, and, for a step a subagent took, under
+/// `group`, the main agent's step that started that agent.
+fn tool_started(data: &Value, group: Option<String>, sink: &mut dyn FnMut(ChatEvent), ctx: &mut TurnCtx) {
+  let tool_name = data.get("toolName").and_then(|v| v.as_str()).unwrap_or("tool").to_string();
+  let args = data.get("arguments");
+  // A tool of a server the user added goes by its own name, with the server's.
+  let (title, server) = match ctx.mcp_tool(data, &tool_name) {
+    Some((server, tool)) => (tool, Some(server)),
+    None => (chat_tools::tool_title(&tool_name, args), None),
+  };
+  let command = args.and_then(|a| a.get("command")).and_then(|v| v.as_str()).unwrap_or("");
+  if RAYFIN_UP_RE.is_match(command) {
+    ctx.ran_deploy = true;
+  }
+  ctx.saw_activity = true;
+  // A step of the main agent that the work log shows ends the prose before it.
+  if group.is_none() && !HIDDEN_STEPS.iter().any(|hidden| hidden.eq_ignore_ascii_case(&tool_name)) {
+    ctx.answered = false;
+  }
+  let id = data
+    .get("toolCallId")
+    .and_then(|v| v.as_str())
+    .map(|s| s.to_string())
+    .unwrap_or_else(|| Uuid::new_v4().to_string());
+  let paths = chat_tools::tool_paths(&tool_name, args);
+  let writes = if chat_tools::is_mutating_tool(&tool_name) { paths.clone().unwrap_or_default() } else { Vec::new() };
+  ctx.tool_start(&id, &tool_name, writes);
+  if let Some(group) = &group {
+    ctx.agent_steps.insert(id.clone(), group.clone());
+  }
+  sink(ChatEvent::ToolStart {
+    tool: ChatToolCall {
+      id,
+      command: chat_tools::shell_command(&tool_name, args),
+      paths,
+      name: tool_name,
+      title,
+      server,
+      state: ChatToolState::Running,
+      parent: group,
+      ..Default::default()
+    },
+  });
+}
+
+/// The name the work log gives an agent, from its internal name until the
+/// runtime reports its own (`subagent.selected`).
+fn agent_label(name: &str) -> String {
+  let words = name.replace(['-', '_'], " ");
+  let mut chars = words.trim().chars();
+  match chars.next() {
+    Some(first) => first.to_uppercase().chain(chars).collect(),
+    None => "Agent".to_string(),
+  }
+}
+
+/// Set how an agent's run is going, and show it when the agent has a group of
+/// its own and that changed.
+fn set_agent_state(agent: &str, state: ChatToolState, sink: &mut dyn FnMut(ChatEvent), ctx: &mut TurnCtx) {
+  let Some(link) = ctx.agents.get_mut(agent) else { return };
+  if link.state == state {
+    return;
+  }
+  link.state = state;
+  if link.top {
+    sink(link.event());
+  }
+}
+
+/// A subagent starting, getting its name, or finishing. An agent the main
+/// agent started gets a group in the work log, under the step that started it;
+/// one a subagent started joins its starter's group.
+fn agent_lifecycle(agent: Option<&str>, event_type: &str, data: &Value, sink: &mut dyn FnMut(ChatEvent), ctx: &mut TurnCtx) {
+  let field = |key: &str| data.get(key).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty());
+  match event_type {
+    "subagent.started" => {
+      let (Some(agent), Some(step)) = (agent, field("toolCallId")) else { return };
+      let starter = ctx.agent_steps.get(step).cloned();
+      let link = AgentLink {
+        top: starter.is_none(),
+        group: starter.unwrap_or_else(|| step.to_string()),
+        name: agent_label(field("agentName").unwrap_or_default()),
+        background: field("executionMode") == Some("background"),
+        state: ChatToolState::Running,
+      };
+      if link.top {
+        sink(link.event());
+      }
+      ctx.agents.insert(agent.to_string(), link);
+    }
+    "subagent.selected" => {
+      let (Some(link), Some(name)) = (agent.and_then(|a| ctx.agents.get_mut(a)), field("agentDisplayName")) else { return };
+      if link.name != name {
+        link.name = name.to_string();
+        if link.top {
+          sink(link.event());
+        }
+      }
+    }
+    "subagent.completed" | "subagent.failed" => {
+      let step = field("toolCallId");
+      let key = agent.filter(|a| ctx.agents.contains_key(*a)).map(str::to_string).or_else(|| {
+        ctx.agents.iter().find(|(_, l)| l.top && Some(l.group.as_str()) == step).map(|(key, _)| key.clone())
+      });
+      let Some(key) = key else { return };
+      // A cancelled agent reports completion too, but didn't finish its work.
+      let cancelled = data.get("cancelled").and_then(Value::as_bool) == Some(true);
+      let state =
+        if event_type == "subagent.completed" && !cancelled { ChatToolState::Success } else { ChatToolState::Error };
+      set_agent_state(&key, state, sink, ctx);
+    }
+    _ => {}
+  }
+}
+
+/// Map one server event by whoever sent it: `agent` is a subagent's id, absent
+/// for the main agent and for events of the whole session. A subagent's steps
+/// go under the step that started it, and its own messages and reasoning stay
+/// out of the reply: the main agent reads its result and reports what matters.
+fn route_event(agent: Option<&str>, event_type: &str, data: &Value, sink: &mut dyn FnMut(ChatEvent), ctx: &mut TurnCtx) -> Flow {
+  // An empty id is the main agent's, as the SDK reads it.
+  let agent = agent.filter(|a| !a.is_empty());
+  if event_type.starts_with("subagent.") {
+    agent_lifecycle(agent, event_type, data, sink, ctx);
+    return Flow::Continue;
+  }
+  let Some(agent) = agent else {
+    return map_event(event_type, data, sink, ctx);
+  };
+  match event_type {
+    "tool.execution_start" => {
+      let group = ctx.agents.get(agent).map(|link| link.group.clone());
+      tool_started(data, group, sink, ctx);
+    }
+    "tool.execution_partial_result" | "tool.execution_complete" | "session.info" => {
+      map_event(event_type, data, sink, ctx);
+    }
+    // A background agent takes more work after its first run (`write_agent`),
+    // and the runtime reports no start or end for those runs: a message to it
+    // starts one, and a response that asks for no tool ends it.
+    "user.message" => set_agent_state(agent, ChatToolState::Running, sink, ctx),
+    "assistant.message" if data.get("toolRequests").and_then(Value::as_array).is_some_and(|r| r.is_empty()) => {
+      set_agent_state(agent, ChatToolState::Success, sink, ctx);
+    }
+    _ => {}
+  }
+  Flow::Continue
+}
+
 /// Map a single Copilot **server** event (`event_type` plus its `data` object) to
 /// ChatEvents pushed into `sink`, updating the turn accumulator. Unlike the old
 /// one-shot `-p` JSONL, server events carry `data` as the inner object directly
@@ -450,6 +683,7 @@ fn map_event(event_type: &str, data: &Value, sink: &mut dyn FnMut(ChatEvent), ct
       ctx.saw_activity = true;
       ensure_separator(&id, sink, ctx);
       *ctx.streamed.entry(id).or_insert(0) += text.chars().count();
+      ctx.answered |= !text.trim().is_empty();
       sink(ChatEvent::Delta { text: text.to_string() });
       ctx.push_response(text);
     }
@@ -463,6 +697,7 @@ fn map_event(event_type: &str, data: &Value, sink: &mut dyn FnMut(ChatEvent), ct
         ctx.saw_activity = true;
         ensure_separator(&id, sink, ctx);
         let rest: String = content.chars().skip(have).collect();
+        ctx.answered |= !rest.trim().is_empty();
         ctx.push_response(&rest);
         sink(ChatEvent::Delta { text: rest });
         ctx.streamed.insert(id, total);
@@ -492,38 +727,7 @@ fn map_event(event_type: &str, data: &Value, sink: &mut dyn FnMut(ChatEvent), ct
         sink(ChatEvent::Reasoning { id, text });
       }
     }
-    "tool.execution_start" => {
-      let tool_name = data.get("toolName").and_then(|v| v.as_str()).unwrap_or("tool").to_string();
-      let args = data.get("arguments");
-      // A tool of a server the user added goes by its own name, with the server's.
-      let (title, server) = match ctx.mcp_tool(data, &tool_name) {
-        Some((server, tool)) => (tool, Some(server)),
-        None => (chat_tools::tool_title(&tool_name, args), None),
-      };
-      let command = args.and_then(|a| a.get("command")).and_then(|v| v.as_str()).unwrap_or("");
-      if RAYFIN_UP_RE.is_match(command) {
-        ctx.ran_deploy = true;
-      }
-      ctx.saw_activity = true;
-      let id = data
-        .get("toolCallId")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| Uuid::new_v4().to_string());
-      ctx.tool_start(&id, &tool_name);
-      sink(ChatEvent::ToolStart {
-        tool: ChatToolCall {
-          id,
-          command: chat_tools::shell_command(&tool_name, args),
-          paths: chat_tools::tool_paths(&tool_name, args),
-          name: tool_name,
-          title,
-          server,
-          state: ChatToolState::Running,
-          ..Default::default()
-        },
-      });
-    }
+    "tool.execution_start" => tool_started(data, None, sink, ctx),
     "tool.execution_partial_result" => {
       let id = data.get("toolCallId").and_then(|v| v.as_str()).unwrap_or("");
       let text = data.get("partialOutput").and_then(|v| v.as_str()).unwrap_or("");
@@ -550,15 +754,28 @@ fn map_event(event_type: &str, data: &Value, sink: &mut dyn FnMut(ChatEvent), ct
       });
     }
     "session.info" => {
-      // File mutations surface as info events; collect them for `filesModified`.
-      if let Some(info_type) = data.get("infoType").and_then(|v| v.as_str()) {
-        if info_type.starts_with("file_") {
-          if let Some(path) = data.get("message").and_then(|v| v.as_str()) {
-            if !ctx.files_modified.iter().any(|p| p == path) {
-              ctx.files_modified.push(path.to_string());
-            }
-          }
+      // The runtime reports the files it creates (`file_created`). Edits
+      // aren't reported: a successful edit is recorded as its step ends.
+      if data.get("infoType").and_then(|v| v.as_str()).is_some_and(|t| t.starts_with("file_")) {
+        if let Some(path) = data.get("message").and_then(|v| v.as_str()) {
+          ctx.file_changed(path);
         }
+      }
+    }
+    // In Autopilot the agent ends by calling `task_complete`, often with its
+    // summary only there. When it said nothing after its last step, that
+    // summary is the turn's answer. A completion the runtime turned down
+    // (more work remains) isn't.
+    "session.task_complete" => {
+      let summary = data.get("summary").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty());
+      let accepted = data.get("success").and_then(Value::as_bool) != Some(false)
+        && data.get("outcome").and_then(Value::as_str) != Some("continue");
+      if let Some(summary) = summary.filter(|_| accepted && !ctx.answered) {
+        ctx.saw_activity = true;
+        ensure_separator("task_complete", sink, ctx);
+        ctx.answered = true;
+        ctx.push_response(summary);
+        sink(ChatEvent::Delta { text: summary.to_string() });
       }
     }
     "exit_plan_mode.completed" => {
@@ -624,8 +841,8 @@ fn map_event(event_type: &str, data: &Value, sink: &mut dyn FnMut(ChatEvent), ct
         .and_then(|v| v.as_str())
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .unwrap_or("Copilot reported an error.")
-        .to_string();
+        .map(str::to_string)
+        .unwrap_or_else(|| t!("commands.chat.copilotError"));
       if ctx.saw_activity || !is_recoverable_session_error(&msg) {
         // A provider's error on the user's own key, in plain language.
         let shown = ctx
@@ -769,7 +986,7 @@ pub async fn chat_send(
   tokio::spawn(async move {
     let state = app.state::<AppState>();
     run_turn(app.clone(), state.inner(), project_id, turn_id, text, attachments, mode).await
-  }).await.map_err(|e| format!("Chat task failed: {e}"))?
+  }).await.map_err(|e| t!("commands.chat.taskFailed", error = e))?
 }
 
 /// The turn engine behind `chat_send`. Drives one Copilot invocation and streams
@@ -797,22 +1014,22 @@ pub(crate) async fn run_turn(
   };
 
   let Some(project) = store::find_project(&project_id) else {
-    emit_chat_event(&app, &project_id, &turn_id, ChatEvent::Error { text: "Project not found.".into() });
+    emit_chat_event(&app, &project_id, &turn_id, ChatEvent::Error { text: t!("commands.shared.projectNotFound") });
     screenshot::cleanup(&attachments);
     return Ok(ChatTurnResult {
       ok: false,
-      error: Some("Project not found.".into()),
+      error: Some(t!("commands.shared.projectNotFound")),
       files_modified: vec![],
       ran_deploy: false,
     });
   };
 
   let Some(ctx_info) = resolve_context(&project_id) else {
-    emit_chat_event(&app, &project_id, &turn_id, ChatEvent::Error { text: "Project not found.".into() });
+    emit_chat_event(&app, &project_id, &turn_id, ChatEvent::Error { text: t!("commands.shared.projectNotFound") });
     screenshot::cleanup(&attachments);
     return Ok(ChatTurnResult {
       ok: false,
-      error: Some("Project not found.".into()),
+      error: Some(t!("commands.shared.projectNotFound")),
       files_modified: vec![],
       ran_deploy: false,
     });
@@ -824,11 +1041,11 @@ pub(crate) async fn run_turn(
       &app,
       &project_id,
       &turn_id,
-      ChatEvent::Error { text: "A message is already being processed for this project.".into() },
+      ChatEvent::Error { text: t!("commands.chat.busy") },
     );
     return Ok(ChatTurnResult {
       ok: false,
-      error: Some("Turn already running.".into()),
+      error: Some(t!("commands.chat.turnRunning")),
       files_modified: vec![],
       ran_deploy: false,
     });
@@ -852,10 +1069,19 @@ pub(crate) async fn run_turn(
 
   // The guidance and Fabricator's in-process tools fit where the app's backend
   // runs (see `agent_skills::guidance_for`): on this computer, with the local
-  // backend tools beside the semantic-model ones, or on Microsoft Fabric. The
+  // backend tools beside the Fabric IQ one, or on Microsoft Fabric. The
   // session is resumed with another set when that changes.
   let guidance = agent_skills::guidance_for(&project, &crate::services::local_backend::snapshot(&app, &project_id));
-  let fab_tools = crate::services::agent_tools::fabricator_tools(app.clone(), project_id.clone(), guidance);
+  // The user's own instructions for every app, beside Fabricator's guidance,
+  // with the tool that shows when one shaped the work.
+  let settings = store::get_settings();
+  let custom_instructions = settings.custom_instructions.as_deref().and_then(agent_skills::custom_instructions);
+  let fab_tools = crate::services::agent_tools::fabricator_tools(
+    app.clone(),
+    project_id.clone(),
+    guidance,
+    custom_instructions.is_some(),
+  );
 
   // Your own API keys: every session gets the provider registry so
   // a thread can switch between Copilot's models and the user's own, and a turn
@@ -864,7 +1090,6 @@ pub(crate) async fn run_turn(
   let byok_registry = state.byok.session_registry();
   // The plugins on in this chat: the Fabric IQ and Work IQ servers it can research
   // with, and the MCP servers the user added (an experiment).
-  let settings = store::get_settings();
   let iq = IqConfig::for_project(&project, &settings);
   let mcp_servers = McpServers::for_project(&project, &settings);
   let provider_model = project.model.clone().filter(|m| byok::is_provider_selection(m));
@@ -889,6 +1114,7 @@ pub(crate) async fn run_turn(
       byok_registry.clone(),
       iq,
       mcp_servers.clone(),
+      custom_instructions.clone(),
     );
   let first_open = match &provider_model {
     Some(model) => match state.byok.ensure_ready(model) {
@@ -926,7 +1152,7 @@ pub(crate) async fn run_turn(
   };
   if opened.recreated && project.copilot_session_id.is_some() {
     emit_chat_event(&app, &project_id, &turn_id, ChatEvent::Notice {
-      text: "The saved Copilot session is no longer available. Started a new session; your Fabricator chat history is still here.".into(),
+      text: t!("commands.chat.sessionGone"),
     });
   }
   let mut session = opened.session;
@@ -973,6 +1199,7 @@ pub(crate) async fn run_turn(
 
   let new_ctx = || {
     let mut ctx = TurnCtx::new(full);
+    ctx.cwd = ctx_info.cwd.clone();
     ctx.provider = provider.clone();
     ctx.mcp_servers = mcp_servers.names();
     ctx
@@ -1016,7 +1243,7 @@ pub(crate) async fn run_turn(
           session = opened.session;
           if opened.recreated {
             emit_chat_event(&app, &project_id, &turn_id, ChatEvent::Notice {
-              text: "Copilot's saved session is unavailable. Started a new session; your Fabricator chat history is still here.".into(),
+              text: t!("commands.chat.sessionUnavailable"),
             });
           }
           if let Err(e) = session.rpc().mode().set(ModeSetRequest { mode: session_mode.clone(), ..Default::default() }).await {
@@ -1046,10 +1273,6 @@ pub(crate) async fn run_turn(
     let opts = match continuation {
       Some(prompt) => MessageOptions::new(prompt.to_string()),
       None => {
-        let text = match crate::commands::goals::chat_note(&project) {
-          Some(note) => format!("{note}\n\n{text}"),
-          None => text.clone(),
-        };
         let opts = MessageOptions::new(turn_text(
           &project,
           &text,
@@ -1057,6 +1280,7 @@ pub(crate) async fn run_turn(
           store::manual_deploy_enabled(),
           &iq_ready,
           &mcp_ready,
+          custom_instructions.is_some(),
         ));
         if attach.is_empty() { opts } else { opts.with_attachments(attach.clone()) }
       }
@@ -1069,7 +1293,7 @@ pub(crate) async fn run_turn(
         reconnected = true;
         attempt += 1;
         emit_chat_event(&app, &project_id, &turn_id, ChatEvent::Notice {
-          text: "Reconnecting to the Copilot session...".into(),
+          text: t!("commands.chat.reconnecting"),
         });
         continue;
       }
@@ -1124,7 +1348,7 @@ pub(crate) async fn run_turn(
                   todos_dirty = false;
                 }
                 let mut sink = |e: ChatEvent| emit_chat_event(&app, &project_id, &turn_id, e);
-                if let Flow::Stop = map_event(&ev.event_type, &ev.data, &mut sink, &mut ctx) {
+                if let Flow::Stop = route_event(ev.agent_id.as_deref(), &ev.event_type, &ev.data, &mut sink, &mut ctx) {
                   return DrainEnd::Finished;
                 }
               }
@@ -1163,14 +1387,15 @@ pub(crate) async fn run_turn(
       if continues < byok::MAX_CONTINUES {
         continues += 1;
         emit_chat_event(&app, &project_id, &turn_id, ChatEvent::Notice {
-          text: "The model stopped before finishing. Asking it to continue…".into(),
+          text: t!("commands.chat.continuing"),
         });
         continuation = Some(byok::CONTINUE_PROMPT);
         ctx.saw_result = false;
         ctx.ended_empty = false;
         continue;
       }
-      let error = byok::STOPPED_EARLY.to_string();
+      // A model that keeps stopping without finishing.
+      let error = t!("services.byok.stoppedEarly");
       emit_chat_event(&app, &project_id, &turn_id, ChatEvent::Error { text: error.clone() });
       ctx.errored = Some(error);
       break;
@@ -1183,7 +1408,7 @@ pub(crate) async fn run_turn(
       reconnected = true;
       attempt += 1;
       emit_chat_event(&app, &project_id, &turn_id, ChatEvent::Notice {
-        text: "Reconnecting to the Copilot session...".into(),
+        text: t!("commands.chat.reconnecting"),
       });
       continue;
     }
@@ -1206,7 +1431,7 @@ pub(crate) async fn run_turn(
       &app,
       &project_id,
       &turn_id,
-      ChatEvent::Notice { text: format!("Copilot hiccup — retrying ({}/{})…", attempt, MAX_ATTEMPTS - 1) },
+      ChatEvent::Notice { text: t!("commands.chat.retrying", attempt = attempt, max = MAX_ATTEMPTS - 1) },
     );
     tokio::time::sleep(Duration::from_millis(attempt as u64 * 1000)).await;
     attempt += 1;
@@ -1287,9 +1512,9 @@ pub(crate) async fn run_turn(
   // `session.error` already emitted its own Error; cancellation is user-initiated.
   if !ok && !cancelled && ctx.errored.is_none() {
     let detail = if timed_out {
-      "Copilot timed out after two hours.".to_string()
+      t!("commands.chat.timedOut")
     } else {
-      "Copilot ended unexpectedly.".to_string()
+      t!("commands.chat.endedUnexpectedly")
     };
     emit_chat_event(&app, &project_id, &turn_id, ChatEvent::Error { text: detail });
   }
@@ -1302,7 +1527,7 @@ pub(crate) async fn run_turn(
   );
   Ok(ChatTurnResult {
     ok,
-    error: if ok || cancelled { None } else { ctx.errored.or_else(|| Some("Turn failed.".into())) },
+    error: if ok || cancelled { None } else { ctx.errored.or_else(|| Some(t!("commands.chat.turnFailed"))) },
     files_modified: ctx.files_modified,
     ran_deploy: ctx.ran_deploy,
   })
@@ -1315,13 +1540,16 @@ pub fn chat_cancel(state: State<'_, AppState>, project_id: String) {
 
 /// Abort is a request, not proof that source-writing tools have stopped. Wait
 /// for idle before releasing ownership; a wedged owned runtime is torn down.
+/// Only the main agent's idle counts: a subagent's says nothing of the session.
 async fn abort_turn_and_wait(state: &AppState, project_id: &str, session: &Arc<Session>) {
   let mut events = session.subscribe();
   let stopped = tokio::time::timeout(Duration::from_secs(30), async {
     session.abort().await.map_err(|_| ())?;
     loop {
       match events.recv().await {
-        Ok(event) if event.event_type == "session.idle" => return Ok::<(), ()>(()),
+        Ok(event) if event.event_type == "session.idle" && event.agent_id.as_deref().is_none_or(str::is_empty) => {
+          return Ok::<(), ()>(())
+        }
         Ok(_) => {}
         Err(_) => return Err(()),
       }
@@ -1422,7 +1650,7 @@ pub async fn chat_steer(
   }
   if let Err(e) = session.send(opts).await {
     if let Some(turn) = &active_turn {
-      emit_chat_event(&app, &project_id, turn, ChatEvent::Error { text: format!("Couldn't interject: {e}") });
+      emit_chat_event(&app, &project_id, turn, ChatEvent::Error { text: t!("commands.chat.cantInterject", error = e) });
     }
     screenshot::cleanup(&attachments);
     // Handled (with an error shown) — don't start a competing turn.
@@ -1493,21 +1721,21 @@ pub async fn chat_resolve_plan(
   plan_content: String,
   feedback: Option<String>,
 ) -> Result<(), String> {
-  let owner = state.plan.plan_owner(&request_id).ok_or_else(|| "No pending plan to resolve.".to_string())?;
+  let owner = state.plan.plan_owner(&request_id).ok_or_else(|| t!("commands.chat.noPendingPlan"))?;
   if owner.project_id != project_id {
-    return Err("That plan request doesn't belong to this project.".into());
+    return Err(t!("commands.chat.planNotThisProject"));
   }
   let session = state
     .copilot
     .peek_session(&project_id)
     .await
-    .ok_or_else(|| "No active Copilot session for this project.".to_string())?;
+    .ok_or_else(|| t!("commands.chat.noSession"))?;
   session
     .rpc()
     .plan()
     .update(PlanUpdateRequest { content: plan_content })
     .await
-    .map_err(|e| format!("Failed to update the plan: {e}"))?;
+    .map_err(|e| t!("commands.chat.cantUpdatePlan", error = e))?;
 
   let result = match action.as_str() {
     "interactive" | "autopilot" | "autopilot_fleet" | "exit_only" => {
@@ -1518,7 +1746,7 @@ pub async fn chat_resolve_plan(
   if state.plan.resolve_plan(&request_id, result) {
     Ok(())
   } else {
-    Err("No pending plan to resolve.".into())
+    Err(t!("commands.chat.noPendingPlan"))
   }
 }
 
@@ -1538,20 +1766,20 @@ pub fn chat_resolve_question(
 ) -> Result<(), String> {
   let trimmed = answer.trim();
   if trimmed.is_empty() {
-    return Err("An answer is required.".into());
+    return Err(t!("commands.chat.answerRequired"));
   }
   let owner = state
     .plan
     .question_owner(&request_id)
-    .ok_or_else(|| "No pending question to resolve.".to_string())?;
+    .ok_or_else(|| t!("commands.chat.noPendingQuestion"))?;
   if was_freeform && !owner.allow_freeform {
-    return Err("This question doesn't accept a free-form answer.".into());
+    return Err(t!("commands.chat.noFreeform"));
   }
   if !state
     .plan
     .resolve_question(&request_id, Some(UserInputResponse { answer: trimmed.to_string(), was_freeform }))
   {
-    return Err("No pending question to resolve.".into());
+    return Err(t!("commands.chat.noPendingQuestion"));
   }
   emit_chat_event(
     &app,
@@ -1588,7 +1816,7 @@ pub async fn chat_export_plan(app: AppHandle, suggested_name: String, content: S
   let Some(path) = picked.into_path().ok() else {
     return Ok(None);
   };
-  std::fs::write(&path, content.as_bytes()).map_err(|e| format!("Couldn't save the plan: {e}"))?;
+  std::fs::write(&path, content.as_bytes()).map_err(|e| t!("commands.chat.cantSavePlan", error = e))?;
   Ok(Some(path.display().to_string()))
 }
 
@@ -1597,7 +1825,7 @@ pub async fn chat_export_plan(app: AppHandle, suggested_name: String, content: S
 /// dialog is closed.
 #[tauri::command]
 pub async fn chat_pick_paths(app: AppHandle) -> Vec<String> {
-  crate::services::path_picker::pick_files_and_folders(&app, "Choose files or folders for Copilot to read")
+  crate::services::path_picker::pick_files_and_folders(&app, &t!("commands.chat.pickPathsTitle"))
     .await
     .into_iter()
     .map(|path| path.to_string_lossy().into_owned())
@@ -1640,14 +1868,14 @@ pub fn chat_set_plugin(project_id: String, plugin: String, on: bool) -> Result<V
   let iq = iq::Iq::from_plugin(&plugin);
   let server = mcp::server_of_plugin(&plugin).map(str::to_string);
   if iq.is_none() && server.is_none() {
-    return Err(format!("Fabricator doesn't have the plugin {plugin}."));
+    return Err(t!("commands.chat.unknownPlugin", plugin = plugin));
   }
   if store::find_project(&project_id).is_none() {
-    return Err("Project not found.".into());
+    return Err(t!("commands.shared.projectNotFound"));
   }
   if let Some(id) = &server {
     if on && !store::mcp_servers().iter().any(|s| &s.id == id) {
-      return Err("That MCP server isn't in Fabricator anymore.".into());
+      return Err(t!("commands.chat.serverGone"));
     }
   }
   let state = store::mutate_project(&project_id, |p| {
@@ -1689,24 +1917,20 @@ pub(crate) fn chat_defaults(defaults: ChatDefaults, servers: &[McpServerEntry]) 
 }
 
 /// What a new project's chat starts with: the chat defaults, with only the
-/// plugins chat offers it now (Work IQ and MCP servers while their experiments
-/// are on, and a server only while it's added). Auto with none on without them.
+/// plugins chat offers it now (Work IQ while its experiment is on, and an MCP
+/// server only while it's added). Auto with none on without them.
 pub(crate) fn new_project_chat(settings: &AppSettings) -> (ModelChoice, Vec<String>) {
   let Some(defaults) = settings.chat_defaults.clone() else {
     return (ModelChoice::default(), Vec::new());
   };
-  let experiments = settings.experiments.as_ref();
-  let work_iq = experiments.and_then(|f| f.work_iq).unwrap_or(false);
-  let mcp_servers = experiments.and_then(|f| f.mcp_servers).unwrap_or(false);
+  let work_iq = settings.experiments.as_ref().and_then(|f| f.work_iq).unwrap_or(false);
   let plugins = defaults
     .plugins
     .iter()
     .filter(|plugin| match iq::Iq::from_plugin(plugin) {
       Some(iq::Iq::Fabric) => true,
       Some(iq::Iq::Work) => work_iq,
-      None => {
-        mcp_servers && mcp::server_of_plugin(plugin).is_some_and(|id| settings.mcp_servers.iter().any(|s| s.id == id))
-      }
+      None => mcp::server_of_plugin(plugin).is_some_and(|id| settings.mcp_servers.iter().any(|s| s.id == id)),
     })
     .cloned()
     .collect();
@@ -1768,6 +1992,142 @@ mod tests {
     out
   }
 
+  /// Like [`collect`], with the id of the subagent each event came from.
+  fn route(events: &[(Option<&str>, &str, Value)], ctx: &mut TurnCtx) -> Vec<ChatEvent> {
+    let mut out = vec![];
+    let mut sink = |e: ChatEvent| out.push(e);
+    for (agent, event_type, data) in events {
+      route_event(*agent, event_type, data, &mut sink, ctx);
+    }
+    out
+  }
+
+  /// The agent runs (step, name, state, background) and the steps (id, parent) in events.
+  #[allow(clippy::type_complexity)]
+  fn agents_and_steps(events: &[ChatEvent]) -> (Vec<(String, String, Value, bool)>, Vec<(String, Option<String>)>) {
+    let mut agents = vec![];
+    let mut steps = vec![];
+    for event in events {
+      match event {
+        ChatEvent::Agent { id, name, state, background } => {
+          agents.push((id.clone(), name.clone(), json!(state), *background))
+        }
+        ChatEvent::ToolStart { tool } => steps.push((tool.id.clone(), tool.parent.clone())),
+        _ => {}
+      }
+    }
+    (agents, steps)
+  }
+
+  /// A subagent's steps go under the main agent's step that started it, the
+  /// steps of an agent it starts too, and its own words stay out of the reply.
+  #[test]
+  fn a_subagents_work_goes_under_the_step_that_started_it_and_its_words_stay_out_of_the_reply() {
+    let mut ctx = TurnCtx::new(false);
+    let worker = Some("gp-1");
+    let events = route(
+      &[
+        (None, "tool.execution_start", json!({"toolCallId":"task-1","toolName":"task","arguments":{"description":"Build the screens","agent_type":"general-purpose","mode":"background"}})),
+        (None, "tool.execution_complete", json!({"toolCallId":"task-1","success":true})),
+        (worker, "subagent.started", json!({"toolCallId":"task-1","agentName":"general-purpose","agentDisplayName":"screens","executionMode":"background"})),
+        (worker, "subagent.selected", json!({"agentName":"general-purpose","agentDisplayName":"General purpose"})),
+        (worker, "assistant.reasoning_delta", json!({"reasoningId":"r1","deltaContent":"Shell first."})),
+        (worker, "assistant.message_delta", json!({"messageId":"s1","deltaContent":"I'll put the shell in place."})),
+        (worker, "tool.execution_start", json!({"toolCallId":"edit-1","toolName":"create","arguments":{"path":"src/App.tsx"}})),
+        (worker, "session.info", json!({"infoType":"file_created","message":"src/App.tsx"})),
+        (worker, "tool.execution_complete", json!({"toolCallId":"edit-1","success":true})),
+        // An agent it starts joins its group.
+        (worker, "tool.execution_start", json!({"toolCallId":"task-2","toolName":"task","arguments":{"description":"Find the styles"}})),
+        (Some("explore-1"), "subagent.started", json!({"toolCallId":"task-2","agentName":"explore","parentId":"gp-1"})),
+        (Some("explore-1"), "tool.execution_start", json!({"toolCallId":"grep-1","toolName":"grep","arguments":{"pattern":"--accent"}})),
+        (Some("explore-1"), "subagent.completed", json!({"toolCallId":"task-2","agentName":"explore"})),
+        (worker, "assistant.message", json!({"messageId":"s2","content":"Report: the screens are in."})),
+        (None, "assistant.message_delta", json!({"messageId":"m1","deltaContent":"Your screens are in."})),
+        (worker, "subagent.completed", json!({"toolCallId":"task-1","agentName":"general-purpose"})),
+      ],
+      &mut ctx,
+    );
+    let reply: String = events.iter().map(|e| match e { ChatEvent::Delta { text } => text.as_str(), _ => "" }).collect();
+    assert_eq!(reply, "Your screens are in.");
+    assert!(!events.iter().any(|e| matches!(e, ChatEvent::Reasoning { .. })));
+    let (agents, steps) = agents_and_steps(&events);
+    assert_eq!(
+      agents,
+      [
+        ("task-1".to_string(), "General purpose".to_string(), json!("running"), true),
+        ("task-1".to_string(), "General purpose".to_string(), json!("success"), true),
+      ]
+    );
+    let group = Some("task-1".to_string());
+    assert_eq!(
+      steps,
+      [
+        ("task-1".to_string(), None),
+        ("edit-1".to_string(), group.clone()),
+        ("task-2".to_string(), group.clone()),
+        ("grep-1".to_string(), group),
+      ]
+    );
+    assert_eq!(ctx.files_modified, ["src/App.tsx"]);
+  }
+
+  /// An agent goes by the runtime's name for it once that's known, and one that
+  /// fails or is cancelled shows it didn't finish.
+  #[test]
+  fn an_agent_takes_the_runtimes_name_and_shows_when_it_didnt_finish() {
+    let mut ctx = TurnCtx::new(false);
+    let events = route(
+      &[
+        (Some("r-1"), "subagent.started", json!({"toolCallId":"t-1","agentName":"research"})),
+        (Some("r-1"), "subagent.selected", json!({"agentName":"research","agentDisplayName":"Research Agent"})),
+        (Some("r-1"), "subagent.completed", json!({"toolCallId":"t-1","agentName":"research","cancelled":true})),
+        (Some("g-1"), "subagent.started", json!({"toolCallId":"t-2","agentName":"general-purpose"})),
+        (Some("g-1"), "subagent.failed", json!({"toolCallId":"t-2","agentName":"general-purpose","error":"boom"})),
+      ],
+      &mut ctx,
+    );
+    let (agents, _) = agents_and_steps(&events);
+    assert_eq!(
+      agents,
+      [
+        ("t-1".to_string(), "Research".to_string(), json!("running"), false),
+        ("t-1".to_string(), "Research Agent".to_string(), json!("running"), false),
+        ("t-1".to_string(), "Research Agent".to_string(), json!("error"), false),
+        ("t-2".to_string(), "General purpose".to_string(), json!("running"), false),
+        ("t-2".to_string(), "General purpose".to_string(), json!("error"), false),
+      ]
+    );
+  }
+
+  /// A background agent takes more work after its first run (`write_agent`),
+  /// and the runtime reports no start or end for that run: the agent's own
+  /// messages show when it works and when it's done.
+  #[test]
+  fn a_background_agents_later_runs_show_from_its_own_messages() {
+    let mut ctx = TurnCtx::new(false);
+    let worker = Some("gp-1");
+    let done = json!({"messageId":"d","content":"The screens are in.","toolRequests":[]});
+    let events = route(
+      &[
+        (None, "tool.execution_start", json!({"toolCallId":"task-1","toolName":"task","arguments":{"agent_type":"general-purpose","mode":"background"}})),
+        (worker, "subagent.started", json!({"toolCallId":"task-1","agentName":"general-purpose","executionMode":"background"})),
+        (worker, "user.message", json!({"content":"Put up the shell."})),
+        (worker, "assistant.message", json!({"messageId":"a","content":"","toolRequests":[{"name":"create"}]})),
+        (worker, "assistant.message", done.clone()),
+        (worker, "subagent.completed", json!({"toolCallId":"task-1","agentName":"general-purpose"})),
+        (None, "tool.execution_start", json!({"toolCallId":"msg-1","toolName":"write_agent","arguments":{"agent_id":"gp-1"}})),
+        (worker, "user.message", json!({"content":"Here's the data contract."})),
+        (worker, "tool.execution_start", json!({"toolCallId":"edit-2","toolName":"edit","arguments":{"path":"src/App.tsx"}})),
+        (worker, "assistant.message", done),
+      ],
+      &mut ctx,
+    );
+    let (agents, steps) = agents_and_steps(&events);
+    let states: Vec<Value> = agents.into_iter().map(|(_, _, state, _)| state).collect();
+    assert_eq!(states, [json!("running"), json!("success"), json!("running"), json!("success")]);
+    assert!(steps.contains(&("edit-2".to_string(), Some("task-1".to_string()))), "{steps:?}");
+  }
+
   /// What Copilot Fusion chose goes under the turn: each change once, with a
   /// request it couldn't plan shown as a fallback.
   #[test]
@@ -1809,18 +2169,29 @@ mod tests {
     }))
     .unwrap();
     // The app runs here, or falls back to its published backend.
-    assert_eq!(turn_text(&project, "Add a list", Guidance::Local, true, &iq::Prepared::default(), &mcp::Prepared::default()), format!("{LOCAL_NOTE}\n\nAdd a list"));
-    assert!(turn_text(&project, "x", Guidance::Local, false, &iq::Prepared::default(), &mcp::Prepared::default()).starts_with(LOCAL_AUTO_PUBLISH_NOTE));
-    assert!(turn_text(&project, "x", Guidance::FabricBacked, true, &iq::Prepared::default(), &mcp::Prepared::default()).starts_with(FALLBACK_NOTE));
-    assert!(turn_text(&project, "x", Guidance::FabricBacked, false, &iq::Prepared::default(), &mcp::Prepared::default()).starts_with(FALLBACK_AUTO_PUBLISH_NOTE));
+    assert_eq!(turn_text(&project, "Add a list", Guidance::Local, true, &iq::Prepared::default(), &mcp::Prepared::default(), false), format!("{LOCAL_NOTE}\n\nAdd a list"));
+    assert!(turn_text(&project, "x", Guidance::Local, false, &iq::Prepared::default(), &mcp::Prepared::default(), false).starts_with(LOCAL_AUTO_PUBLISH_NOTE));
+    assert!(turn_text(&project, "x", Guidance::FabricBacked, true, &iq::Prepared::default(), &mcp::Prepared::default(), false).starts_with(FALLBACK_NOTE));
+    assert!(turn_text(&project, "x", Guidance::FabricBacked, false, &iq::Prepared::default(), &mcp::Prepared::default(), false).starts_with(FALLBACK_AUTO_PUBLISH_NOTE));
     // Never published: no turn publishes it, even with publishing after each turn on.
     let mut unpublished = project.clone();
     unpublished.last_deploy = None;
-    assert!(turn_text(&unpublished, "x", Guidance::Local, false, &iq::Prepared::default(), &mcp::Prepared::default()).starts_with(LOCAL_UNPUBLISHED_NOTE));
-    assert!(turn_text(&unpublished, "x", Guidance::Local, true, &iq::Prepared::default(), &mcp::Prepared::default()).starts_with(LOCAL_NOTE));
+    assert!(turn_text(&unpublished, "x", Guidance::Local, false, &iq::Prepared::default(), &mcp::Prepared::default(), false).starts_with(LOCAL_UNPUBLISHED_NOTE));
+    assert!(turn_text(&unpublished, "x", Guidance::Local, true, &iq::Prepared::default(), &mcp::Prepared::default(), false).starts_with(LOCAL_NOTE));
     assert!(LOCAL_NOTE.contains("runs on this computer") && LOCAL_NOTE.contains("Publish after each chat turn is off"));
     assert!(LOCAL_UNPUBLISHED_NOTE.contains("hasn't been published yet") && !LOCAL_UNPUBLISHED_NOTE.contains("when this turn ends"));
     assert!(FALLBACK_NOTE.contains("published backend") && FALLBACK_NOTE.contains("whether it needs a publish first"));
+    // A team app runs here too; its turns never publish, whatever the setting says.
+    let mut team = project.clone();
+    team.team = Some(crate::types::TeamBinding::default());
+    for manual in [true, false] {
+      let local = turn_text(&team, "x", Guidance::Local, manual, &iq::Prepared::default(), &mcp::Prepared::default(), false);
+      assert_eq!(local, format!("{}\n\nx", crate::services::team::CHAT_NOTE));
+      let fallback = turn_text(&team, "x", Guidance::FabricBacked, manual, &iq::Prepared::default(), &mcp::Prepared::default(), false);
+      assert_eq!(fallback, format!("{}\n\nx", crate::services::team::FALLBACK_CHAT_NOTE));
+    }
+    assert!(crate::services::team::CHAT_NOTE.contains("runs on this computer"));
+    assert!(crate::services::team::FALLBACK_CHAT_NOTE.contains("whether it needs a publish first"));
     for note in [LOCAL_NOTE, LOCAL_AUTO_PUBLISH_NOTE, LOCAL_UNPUBLISHED_NOTE, FALLBACK_NOTE, FALLBACK_AUTO_PUBLISH_NOTE] {
       assert!(note.starts_with("[Fabricator: ") && note.ends_with(']'), "{note}");
       // Publishing is what the UI calls it: no note talks about deploying.
@@ -1837,7 +2208,7 @@ mod tests {
     let work = iq::Prepared { ready: IqConfig { fabric: false, work: true }, unavailable: vec![] };
     let note = work.note().unwrap();
     assert_eq!(
-      turn_text(&project, "Who owns billing?", Guidance::Local, true, &work, &mcp::Prepared::default()),
+      turn_text(&project, "Who owns billing?", Guidance::Local, true, &work, &mcp::Prepared::default(), false),
       format!("{LOCAL_NOTE}\n\n{note}\n\nWho owns billing?")
     );
     // The user's MCP servers come after them.
@@ -1847,13 +2218,31 @@ mod tests {
     };
     let chart_note = chart.note().unwrap();
     assert_eq!(
-      turn_text(&project, "Chart sales", Guidance::Local, true, &work, &chart),
+      turn_text(&project, "Chart sales", Guidance::Local, true, &work, &chart, false),
       format!("{LOCAL_NOTE}\n\n{note}\n\n{chart_note}\n\nChart sales")
     );
     assert_eq!(
-      turn_text(&project, "Chart sales", Guidance::Local, true, &iq::Prepared::default(), &chart),
+      turn_text(&project, "Chart sales", Guidance::Local, true, &iq::Prepared::default(), &chart, false),
       format!("{LOCAL_NOTE}\n\n{chart_note}\n\nChart sales")
     );
+  }
+
+  /// While the user has custom instructions, each message reminds Copilot of
+  /// them, last of the notes, right before the user's own words.
+  #[test]
+  fn a_message_reminds_copilot_of_the_users_custom_instructions() {
+    let project: StudioProject = serde_json::from_value(json!({
+      "id": "p", "name": "App", "path": "C:\\apps\\app", "addedAt": "2026-01-01T00:00:00.000Z"
+    }))
+    .unwrap();
+    let work = iq::Prepared { ready: IqConfig { fabric: false, work: true }, unavailable: vec![] };
+    let note = work.note().unwrap();
+    assert_eq!(
+      turn_text(&project, "Add a list", Guidance::Local, true, &work, &mcp::Prepared::default(), true),
+      format!("{LOCAL_NOTE}\n\n{note}\n\n{CUSTOM_INSTRUCTIONS_NOTE}\n\nAdd a list")
+    );
+    assert!(CUSTOM_INSTRUCTIONS_NOTE.starts_with("[Fabricator: ") && CUSTOM_INSTRUCTIONS_NOTE.ends_with(']'));
+    assert!(CUSTOM_INSTRUCTIONS_NOTE.contains(crate::services::agent_tools::FOLLOWED_INSTRUCTION_TOOL));
   }
 
   #[test]
@@ -1914,6 +2303,91 @@ mod tests {
       ChatEvent::Delta { text } => assert_eq!(text, "Hello"),
       _ => panic!("expected delta"),
     }
+  }
+
+  /// The runtime reports only the files it creates, so the files a turn changed
+  /// also come from its edits and patches that succeeded, in the project, once each.
+  #[test]
+  fn successful_edits_and_patches_are_the_files_a_turn_changed() {
+    let mut ctx = TurnCtx::new(false);
+    ctx.cwd = "C:\\apps\\todo".to_string();
+    let start = |id: &str, tool: &str, args: Value| {
+      ("tool.execution_start", json!({"toolCallId": id, "toolName": tool, "arguments": args}))
+    };
+    let end = |id: &str, success: bool| ("tool.execution_complete", json!({"toolCallId": id, "success": success}));
+    let patch = "*** Begin Patch\n*** Update File: C:\\apps\\todo\\src\\App.tsx\n@@\n-a\n+b\n*** Add File: rayfin/rayfin.yml\n+x\n*** End Patch";
+    collect(
+      &[
+        start("e1", "edit", json!({"path": "C:\\apps\\todo\\src\\App.tsx", "old_str": "a", "new_str": "b"})),
+        end("e1", true),
+        start("e2", "edit", json!({"path": "C:\\apps\\todo\\src\\Broken.tsx", "old_str": "x", "new_str": "y"})),
+        end("e2", false),
+        start("v1", "view", json!({"path": "C:\\apps\\todo\\src\\Read.tsx"})),
+        end("v1", true),
+        start("p1", "apply_patch", json!(patch)),
+        end("p1", true),
+        start("c1", "create", json!({"path": "c:\\Apps\\Todo\\src\\theme.ts", "file_text": "x"})),
+        ("session.info", json!({"infoType": "file_created", "message": "C:\\apps\\todo\\src\\theme.ts"})),
+        end("c1", true),
+        // Copilot's own plan file isn't the app's.
+        ("session.info", json!({"infoType": "file_created", "message": "C:\\Users\\me\\.copilot\\session-state\\s\\plan.md"})),
+      ],
+      &mut ctx,
+    );
+    assert_eq!(ctx.files_modified, ["src/App.tsx", "rayfin/rayfin.yml", "src/theme.ts"]);
+  }
+
+  /// In Autopilot the agent ends with `task_complete`, often with its summary
+  /// only there: that summary is the answer when nothing was said after the
+  /// last step, and isn't when a reply already is or the runtime wants more.
+  #[test]
+  fn an_autopilot_summary_is_the_answer_only_when_the_turn_has_none() {
+    let reply = |events: &[ChatEvent]| -> String {
+      events.iter().map(|e| match e { ChatEvent::Delta { text } => text.as_str(), _ => "" }).collect()
+    };
+    let steps = |closing: &str| {
+      vec![
+        ("assistant.message", json!({"messageId": "m1", "content": "Starting now.", "toolRequests": [{"name": "create"}]})),
+        ("tool.execution_start", json!({"toolCallId": "c1", "toolName": "create", "arguments": {"path": "a.txt"}})),
+        ("tool.execution_complete", json!({"toolCallId": "c1", "success": true})),
+        ("assistant.message", json!({"messageId": "m2", "content": closing, "toolRequests": [{"name": "task_complete"}]})),
+        ("tool.execution_start", json!({"toolCallId": "t1", "toolName": "task_complete", "arguments": {"summary": "Created a.txt."}})),
+        ("tool.execution_complete", json!({"toolCallId": "t1", "success": true})),
+      ]
+    };
+    let done = json!({"summary": "Created a.txt.", "success": true, "outcome": "completed"});
+
+    let mut ctx = TurnCtx::new(false);
+    let mut events = steps("");
+    events.push(("session.task_complete", done.clone()));
+    assert_eq!(reply(&collect(&events, &mut ctx)), "Starting now.\n\nCreated a.txt.");
+
+    let mut ctx = TurnCtx::new(false);
+    let mut events = steps("Your file is ready.");
+    events.push(("session.task_complete", done));
+    assert_eq!(reply(&collect(&events, &mut ctx)), "Starting now.\n\nYour file is ready.");
+
+    let mut ctx = TurnCtx::new(false);
+    let mut events = steps("");
+    events.push(("session.task_complete", json!({"summary": "Created a.txt.", "success": false, "outcome": "continue"})));
+    assert_eq!(reply(&collect(&events, &mut ctx)), "Starting now.");
+  }
+
+  #[test]
+  fn an_event_with_an_empty_agent_id_is_the_main_agents() {
+    let mut ctx = TurnCtx::new(false);
+    let events = route(&[(Some(""), "assistant.message_delta", json!({"messageId": "m1", "deltaContent": "Done."}))], &mut ctx);
+    assert!(matches!(events.as_slice(), [ChatEvent::Delta { text }] if text == "Done."));
+    let flow = route_event(Some(""), "session.idle", &json!({}), &mut |_e: ChatEvent| {}, &mut ctx);
+    assert!(matches!(flow, Flow::Stop));
+  }
+
+  #[test]
+  fn only_whole_status_codes_read_as_transient() {
+    assert!(TRANSIENT_RE.is_match("HTTP 503 Service Unavailable"));
+    assert!(TRANSIENT_RE.is_match("the model returned 500"));
+    assert!(!TRANSIENT_RE.is_match("The request has 15003 tokens, more than this model takes."));
+    assert!(!TRANSIENT_RE.is_match("Error 5021: model not supported"));
   }
 
   #[test]
@@ -2423,21 +2897,21 @@ mod tests {
 
   #[test]
   fn a_new_project_starts_with_the_chat_defaults_chat_offers_it() {
-    let settings = |work_iq: bool, mcp_servers: bool| -> AppSettings {
+    let settings = |work_iq: bool| -> AppSettings {
       let mut settings: AppSettings = serde_json::from_value(json!({
         "theme": "dark",
-        "experiments": { "workIq": work_iq, "mcpServers": mcp_servers },
+        "experiments": { "workIq": work_iq },
         "chatDefaults": { "model": "gpt-6-sol", "effort": "xhigh", "plugins": ["work-iq", "fabric-iq", "mcp:chart", "mcp:gone"] }
       }))
       .unwrap();
       settings.mcp_servers = vec![server("chart")];
       settings
     };
-    let (chat, plugins) = new_project_chat(&settings(true, true));
+    let (chat, plugins) = new_project_chat(&settings(true));
     assert_eq!((chat.model.as_deref(), chat.effort.as_deref()), (Some("gpt-6-sol"), Some("xhigh")));
     assert_eq!(plugins, ["work-iq", "fabric-iq", "mcp:chart"]);
-    // Work IQ and MCP servers only while their experiments are on.
-    assert_eq!(new_project_chat(&settings(false, false)).1, ["fabric-iq"]);
+    // Work IQ only while its experiment is on; an MCP server whenever it's added.
+    assert_eq!(new_project_chat(&settings(false)).1, ["fabric-iq", "mcp:chart"]);
     // Without chat defaults, as before: Auto, with every plugin off.
     let (chat, plugins) = new_project_chat(&serde_json::from_value(json!({ "theme": "dark" })).unwrap());
     assert_eq!((chat, plugins), (ModelChoice::default(), Vec::<String>::new()));

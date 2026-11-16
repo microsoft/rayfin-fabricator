@@ -7,12 +7,15 @@ import type {
   TeamActionResult,
   TeamWorkspace
 } from '@shared/ipc'
+import { Trans, useTranslation } from '../i18n'
 import { useSuppressPreview } from '../overlay'
+import { useToast } from '../toast'
 import type { ModelSelection } from '../modelSelection'
-import { projectNameProblem } from '../projectName'
+import { funnyProjectName, projectNameProblem } from '../projectName'
 import { useMascotInstall } from './mascot/stage'
 import { ModelPicker } from './models/ModelPicker'
 import { displayPath } from './projectDisplay'
+import GithubRepoFields, { NEW_GITHUB_REPO, type GithubRepoChoice } from './github/GithubRepoFields'
 
 /** `scratch` = the Rayfin CLI's Universal App that grows into anything; `example` = a community template. */
 type Start = 'scratch' | 'example'
@@ -47,21 +50,32 @@ interface Props {
   projectsFolder?: string
   /** Other folders earlier new projects went in, most recent first. */
   recentLocations?: string[]
+  /** Open setup, to install the GitHub CLI for a GitHub repository. */
+  onReviewSetup?: () => void
 }
 
 const keyOf = (t: { path?: string; name: string }): string => t.path || t.name
+
+/** How many random names to try before leaving the name to the user. */
+const SUGGESTION_TRIES = 10
 
 /** A folder as Windows and macOS compare them: in any case, with either slash. */
 const comparable = (path: string): string =>
   path.trim().replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
 
 /** The coarse stages a scaffold goes through, in order. `done` is authoritative. */
-type CreatePhase = 'preparing' | 'customizing' | 'installing' | 'finalizing' | 'done'
+type CreatePhase = 'preparing' | 'customizing' | 'installing' | 'finalizing' | 'github' | 'done'
 
 interface PhaseDef {
   id: CreatePhase
-  label: string
-  hint?: string
+  /** Keys in the `home` catalog. */
+  label:
+    | 'create.phases.preparing'
+    | 'create.phases.customizing'
+    | 'progress.installing'
+    | 'create.phases.finishing'
+    | 'create.phases.github'
+  hint?: 'progress.firstRun'
   /**
    * Loose, lowercase fragments that signal this stage has begun. Kept broad and
    * forgiving on purpose — see {@link markerPhase}.
@@ -76,18 +90,36 @@ interface PhaseDef {
  * `done` is never marker-derived (see below).
  */
 const CREATE_PHASES: PhaseDef[] = [
-  { id: 'preparing', label: 'Preparing', markers: [] },
-  { id: 'customizing', label: 'Customizing template', markers: ['customiz'] },
+  { id: 'preparing', label: 'create.phases.preparing', markers: [] },
+  { id: 'customizing', label: 'create.phases.customizing', markers: ['customiz'] },
   {
     id: 'installing',
-    label: 'Installing dependencies',
-    hint: 'First run can take a minute or two.',
+    label: 'progress.installing',
+    hint: 'progress.firstRun',
     markers: ['install']
   },
-  { id: 'finalizing', label: 'Finishing up', markers: ['initializing git', 'git repository'] }
+  {
+    id: 'finalizing',
+    label: 'create.phases.finishing',
+    markers: ['initializing git', 'git repository']
+  }
 ]
 
-const PHASE_ORDER: CreatePhase[] = ['preparing', 'customizing', 'installing', 'finalizing', 'done']
+/** Once the app exists, when it gets a GitHub repository: driven by that step, never by markers. */
+const GITHUB_PHASE: PhaseDef = {
+  id: 'github',
+  label: 'create.phases.github',
+  markers: []
+}
+
+const PHASE_ORDER: CreatePhase[] = [
+  'preparing',
+  'customizing',
+  'installing',
+  'finalizing',
+  'github',
+  'done'
+]
 const phaseRank = (p: CreatePhase): number => PHASE_ORDER.indexOf(p)
 
 /**
@@ -142,10 +174,13 @@ export default function CreateProjectScreen({
   initialExample,
   model,
   projectsFolder,
-  recentLocations
+  recentLocations,
+  onReviewSetup
 }: Props): JSX.Element {
   // The native preview webview floats above HTML; suppress it while this covers the body.
   useSuppressPreview()
+  const { t } = useTranslation('home')
+  const toast = useToast()
 
   const teamTargets = (teamWorkspaces ?? []).filter((w) => !w.setup || w.setup.done)
   /** '' = this computer; otherwise a team workspace id. */
@@ -156,6 +191,17 @@ export default function CreateProjectScreen({
   )
 
   const [name, setName] = useState(initialName ?? '')
+  const nameRef = useRef<HTMLInputElement>(null)
+  /** The name is the user's (or was given): Fabricator stops suggesting one. */
+  const nameChosen = useRef(Boolean(initialName))
+  /** The name Fabricator suggested, kept while it's free. */
+  const suggested = useRef('')
+  /** Also create a GitHub repository for the new app. */
+  const [github, setGithub] = useState(false)
+  const [githubChoice, setGithubChoice] = useState<GithubRepoChoice>(NEW_GITHUB_REPO)
+  const [githubReady, setGithubReady] = useState(false)
+  /** The new app's GitHub repository is being created. */
+  const [creatingRepo, setCreatingRepo] = useState(false)
   /** The folder the project goes in; blank is the projects folder. */
   const [location, setLocation] = useState(projectsFolder ?? '')
   const [locationCheck, setLocationCheck] = useState<
@@ -205,11 +251,11 @@ export default function CreateProjectScreen({
       if (res.ok && res.gallery) {
         setGallery(res.gallery)
         const first = res.gallery.templates[0]
-        const asked = res.gallery.templates.find((t) => keyOf(t) === initialExample)
+        const asked = res.gallery.templates.find((entry) => keyOf(entry) === initialExample)
         setCommunitySel(asked ? keyOf(asked) : first ? keyOf(first) : '')
       } else {
         setGallery(null)
-        setGalleryError(res.error ?? 'Couldn’t load the community gallery.')
+        setGalleryError(res.error ?? t('create.galleryFailed'))
       }
     } finally {
       setLoadingGallery(false)
@@ -244,7 +290,7 @@ export default function CreateProjectScreen({
     return () => window.clearInterval(id)
   }, [busy, startedAt])
 
-  const selectedEntry = gallery?.templates.find((t) => keyOf(t) === communitySel) ?? null
+  const selectedEntry = gallery?.templates.find((entry) => keyOf(entry) === communitySel) ?? null
 
   // The projects folder can arrive after the screen opens.
   useEffect(() => {
@@ -256,6 +302,53 @@ export default function CreateProjectScreen({
     !destination && location.trim() && comparable(location) !== comparable(projectsFolder ?? '')
       ? location.trim()
       : ''
+
+  // Start with a random name that's free where the project goes ("Caffeinated
+  // Narwhal"), kept when that place changes unless it's taken there, until the
+  // user types a name of their own. Without a free one, the field starts empty.
+  useEffect(() => {
+    if (nameChosen.current || busy || done) return
+    let stale = false
+    const kept = suggested.current
+    const timer = window.setTimeout(
+      () => {
+        void (async () => {
+          for (let n = 0; n < SUGGESTION_TRIES; n += 1) {
+            const candidate = n === 0 && kept ? kept : funnyProjectName()
+            let free: boolean
+            try {
+              free = (
+                await window.api.projects.checkName(
+                  candidate,
+                  destination || undefined,
+                  customLocation || undefined
+                )
+              ).ok
+            } catch {
+              return
+            }
+            if (stale || nameChosen.current) return
+            if (free) {
+              suggested.current = candidate
+              setName(candidate)
+              return
+            }
+          }
+        })()
+      },
+      kept ? 300 : 0
+    )
+    return () => {
+      stale = true
+      window.clearTimeout(timer)
+    }
+  }, [destination, customLocation])
+
+  // A suggested name is selected, so typing replaces it.
+  useEffect(() => {
+    const input = nameRef.current
+    if (!nameChosen.current && input && document.activeElement === input) input.select()
+  }, [name])
 
   async function browse(): Promise<void> {
     const picked = await window.api.projects.pickFolder()
@@ -272,11 +365,42 @@ export default function CreateProjectScreen({
       setLocationCheck({
         ok: false,
         missing: true,
-        message: 'Couldn’t create the folder.',
+        message: t('create.folderFailed'),
         key: path
       })
     } finally {
       setCreatingFolder(false)
+    }
+  }
+
+  /**
+   * Put the new app on GitHub. The app is there either way: when this fails it
+   * opens all the same, and a notice says why and where to try again.
+   */
+  async function createRepo(projectId: string, repoName: string): Promise<void> {
+    setCreatingRepo(true)
+    try {
+      const repo = await window.api.github.createRepo(projectId, {
+        ...githubChoice,
+        name: repoName
+      })
+      if (repo.ok) {
+        toast.success(
+          repo.url === undefined
+            ? t('create.repo.pushed')
+            : t('create.repo.pushedTo', { url: repo.url.replace(/^https:\/\//, '') }),
+          { title: t('create.repo.onGithub') }
+        )
+      } else {
+        toast.error(t('create.repo.retry', { error: repo.error ?? t('create.repo.notCreated') }), {
+          title: t('create.repo.notOnGithub')
+        })
+      }
+    } catch (reason) {
+      const why = reason instanceof Error ? reason.message : t('create.repo.notCreated')
+      toast.error(t('create.repo.retry', { error: why }), { title: t('create.repo.notOnGithub') })
+    } finally {
+      setCreatingRepo(false)
     }
   }
 
@@ -310,7 +434,7 @@ export default function CreateProjectScreen({
           mascot.succeed()
           onTeamCreated?.(teamResult)
         } else {
-          setError(teamResult.error ?? 'Project creation failed.')
+          setError(teamResult.error ?? t('create.failed'))
           setShowDetails(true)
         }
         return
@@ -322,12 +446,13 @@ export default function CreateProjectScreen({
         ...(customLocation ? { location: customLocation } : {})
       })
       if (result.ok) {
+        if (wantsGithub && result.project) await createRepo(result.project.id, slug)
         setDone(true)
         // The workbench opens in the same moment, so tell Ray directly.
         mascot.succeed()
         onCreated?.(result)
       } else {
-        setError(result.error ?? 'Project creation failed.')
+        setError(result.error ?? t('create.failed'))
         // Surface the raw output so the real failure (not just our summary) is
         // visible without an extra click.
         setShowDetails(true)
@@ -374,7 +499,7 @@ export default function CreateProjectScreen({
       window.clearTimeout(timer)
     }
   }, [checkKey, slug, nameProblem, busy, done])
-  const nameTaken = nameCheck?.key === checkKey && !nameCheck.ok ? (nameCheck.message ?? 'That name is taken.') : null
+  const nameTaken = nameCheck?.key === checkKey && !nameCheck.ok ? (nameCheck.message ?? t('create.nameTaken')) : null
   const nameWarning = nameProblem ?? nameTaken
 
   // Can the chosen folder take the project? Checked shortly after typing stops;
@@ -411,13 +536,17 @@ export default function CreateProjectScreen({
     .slice(0, 5)
 
   const urlValid = /^(https?:\/\/|git@|git\+)/i.test(url.trim())
+  /** A GitHub repository goes with an app on this computer; a team app has its team's. */
+  const wantsGithub = github && !destination
   const canCreate =
     Boolean(slug) &&
     !nameWarning &&
     locationReady &&
+    (!wantsGithub || githubReady) &&
     (start === 'scratch' || (customMode ? urlValid : Boolean(selectedEntry)))
 
   // ----- Create progress (cosmetic; completion is driven by `done`) -----
+  const phases = wantsGithub ? [...CREATE_PHASES, GITHUB_PHASE] : CREATE_PHASES
   const elapsedSec = startedAt ? Math.max(0, Math.floor((now - startedAt) / 1000)) : 0
   const elapsedLabel = `${Math.floor(elapsedSec / 60)}:${String(elapsedSec % 60).padStart(2, '0')}`
   const detectedPhase = markerPhase(log)
@@ -425,24 +554,28 @@ export default function CreateProjectScreen({
   // Never regress: take the furthest of the parsed marker and the time floor.
   const phase: CreatePhase = done
     ? 'done'
-    : phaseRank(detectedPhase) >= phaseRank(fallback)
-      ? detectedPhase
-      : fallback
-  const activeIdx =
-    phase === 'done' ? CREATE_PHASES.length : CREATE_PHASES.findIndex((p) => p.id === phase)
-  const activePhaseLabel =
-    phase === 'done' ? 'Project ready' : (CREATE_PHASES[activeIdx]?.label ?? 'Preparing')
+    : creatingRepo
+      ? 'github'
+      : phaseRank(detectedPhase) >= phaseRank(fallback)
+        ? detectedPhase
+        : fallback
+  const activeIdx = phase === 'done' ? phases.length : phases.findIndex((p) => p.id === phase)
+  const activePhaseLabel = t(
+    phase === 'done' ? 'progress.ready' : (phases[activeIdx]?.label ?? 'create.phases.preparing')
+  )
   const createFailed = !busy && !done && Boolean(error)
   const showProgress = busy || Boolean(log)
   /** The fields step aside while the app is created, and while the workbench opens it. */
   const hideFields = busy || done
 
-  const heading = source ? 'New app from Power BI' : 'New project'
+  const heading = source ? t('create.titleFromReport') : t('create.title')
   const sub = hideFields
-    ? `Setting up ${name.trim() || 'your app'}…`
+    ? name.trim()
+      ? t('create.settingUp', { name: name.trim() })
+      : t('create.settingUpApp')
     : source
-      ? 'Name your app. Fabricator reads the report while it creates the app, then Copilot rebuilds it page by page.'
-      : 'Give it a name. Next, describe what you want and Copilot builds it.'
+      ? t('create.subFromReport')
+      : t('create.sub')
 
   const head = (
     <header className="create-head" data-mascot-avoid="">
@@ -460,19 +593,23 @@ export default function CreateProjectScreen({
 
         <div className="create-body" data-mascot-avoid="">
           <label className={`field${hideFields ? ' create-field-hidden' : ''}`}>
-            <span className="field-label">Project name</span>
+            <span className="field-label">{t('create.name')}</span>
             <input
+              ref={nameRef}
               className="field-input"
               type="text"
               value={name}
               autoFocus
-              placeholder="My Rayfin App"
+              placeholder={t('create.namePlaceholder')}
               autoCapitalize="off"
               autoCorrect="off"
               spellCheck={false}
               disabled={busy}
               aria-invalid={nameWarning ? true : undefined}
-              onChange={(e) => setName(e.target.value)}
+              onChange={(e) => {
+                nameChosen.current = true
+                setName(e.target.value)
+              }}
             />
             {nameWarning ? (
               <span className="field-hint field-hint--warn" role="alert">
@@ -481,38 +618,41 @@ export default function CreateProjectScreen({
             ) : (
               slug && (
                 <span className="field-hint">
-                  Folder: <code>{slug}</code>
+                  <Trans
+                    t={t}
+                    i18nKey="create.folder"
+                    values={{ slug }}
+                    components={{ code: <code /> }}
+                  />
                 </span>
               )
             )}
           </label>
           {teamTargets.length > 0 && (
             <label className={`field${hideFields ? ' create-field-hidden' : ''}`}>
-              <span className="field-label">Where</span>
+              <span className="field-label">{t('create.where')}</span>
               <select
                 className="field-input"
                 value={destination}
                 disabled={busy}
                 onChange={(e) => setDestination(e.target.value)}
               >
-                <option value="">Just me, on this computer</option>
+                <option value="">{t('create.justMe')}</option>
                 {teamTargets.map((w) => (
                   <option key={w.id} value={w.id}>
-                    Team workspace: {w.name}
+                    {t('create.teamWorkspace', { name: w.name })}
                   </option>
                 ))}
               </select>
               <span className="field-hint">
-                {destination
-                  ? 'Your team sees the app once you publish it. The team pipeline deploys your preview.'
-                  : 'It runs on this computer. Publish it to a Fabric workspace whenever you’re ready.'}
+                {destination ? t('create.teamHint') : t('create.localHint')}
               </span>
             </label>
           )}
           {!destination && (
             <div className={`field${hideFields ? ' create-field-hidden' : ''}`}>
               <label className="field-label" htmlFor={locationId}>
-                Location
+                {t('create.location')}
               </label>
               <div className="create-location">
                 <input
@@ -520,7 +660,7 @@ export default function CreateProjectScreen({
                   className="field-input"
                   type="text"
                   value={location}
-                  placeholder={projectsFolder || 'Your projects folder'}
+                  placeholder={projectsFolder || t('create.locationPlaceholder')}
                   autoCapitalize="off"
                   autoCorrect="off"
                   spellCheck={false}
@@ -534,7 +674,7 @@ export default function CreateProjectScreen({
                   disabled={busy}
                   onClick={() => void browse()}
                 >
-                  Browse…
+                  {t('actions.browse')}
                 </button>
               </div>
               {locationState && !locationState.ok && (
@@ -547,15 +687,19 @@ export default function CreateProjectScreen({
                       disabled={busy || creatingFolder}
                       onClick={() => void createFolder()}
                     >
-                      {creatingFolder ? 'Creating…' : 'Create folder'}
+                      {creatingFolder ? t('create.creating') : t('create.createFolder')}
                     </button>
                   )}
                 </span>
               )}
               {locationChoices.length > 0 && (
-                <div className="create-recents" role="group" aria-label="Recent locations">
+                <div
+                  className="create-recents"
+                  role="group"
+                  aria-label={t('create.recentLocations')}
+                >
                   <span className="create-recents-label" aria-hidden="true">
-                    Recent
+                    {t('create.recent')}
                   </span>
                   {locationChoices.map((path) => (
                     <button
@@ -566,10 +710,39 @@ export default function CreateProjectScreen({
                       disabled={busy}
                       onClick={() => setLocation(path)}
                     >
-                      {comparable(path) === projectsKey ? 'Projects folder' : displayPath(path)}
+                      {comparable(path) === projectsKey
+                        ? t('create.projectsFolder')
+                        : displayPath(path)}
                     </button>
                   ))}
                 </div>
+              )}
+            </div>
+          )}
+
+          {!destination && (
+            <div className={`create-github${hideFields ? ' create-field-hidden' : ''}`}>
+              <label className="create-github-check">
+                <input
+                  type="checkbox"
+                  checked={github}
+                  disabled={busy}
+                  onChange={(e) => setGithub(e.target.checked)}
+                />
+                <span>
+                  <span className="create-github-title">{t('create.github')}</span>
+                  <span className="field-hint">{t('create.githubHint')}</span>
+                </span>
+              </label>
+              {github && (
+                <GithubRepoFields
+                  name={slug}
+                  value={githubChoice}
+                  onChange={setGithubChoice}
+                  onReady={setGithubReady}
+                  disabled={busy}
+                  onReviewSetup={onReviewSetup}
+                />
               )}
             </div>
           )}
@@ -583,7 +756,7 @@ export default function CreateProjectScreen({
                 </div>
                 {model && (
                   <div className="create-model">
-                    <span className="field-label">Copilot model</span>
+                    <span className="field-label">{t('create.model')}</span>
                     <ModelPicker
                       value={model.value}
                       disabled={busy}
@@ -591,30 +764,27 @@ export default function CreateProjectScreen({
                       tiers
                       placement="down"
                       onManageKeys={model.onManageKeys}
-                      label="Copilot model"
+                      label={t('create.model')}
                     />
-                    <span className="field-hint">
-                      Copilot rebuilds the report with this model. You can change it in the chat
-                      later.
-                    </span>
+                    <span className="field-hint">{t('create.modelHint')}</span>
                   </div>
                 )}
               </>
             ) : start === 'scratch' ? (
               <p className="create-start">
-                Want a head start?{' '}
+                {t('create.headStart')}{' '}
                 <button
                   type="button"
                   className="link-btn"
                   disabled={busy}
                   onClick={() => setStart('example')}
                 >
-                  Start from a community example
+                  {t('create.fromCommunity')}
                 </button>
               </p>
             ) : (
               <div className="create-examples-head">
-                <span className="field-label">Start from an example</span>
+                <span className="field-label">{t('create.fromExample')}</span>
                 <button
                   type="button"
                   className="link-btn"
@@ -624,15 +794,13 @@ export default function CreateProjectScreen({
                     setCustomMode(false)
                   }}
                 >
-                  Start from scratch instead
+                  {t('create.fromScratch')}
                 </button>
               </div>
             )}
 
             {start === 'example' && !customMode && (
-              <p className="template-caption">
-                Ready-made apps from the Rayfin community. Pick one to build on.
-              </p>
+              <p className="template-caption">{t('create.examplesCaption')}</p>
             )}
 
             {start === 'scratch' ? null : customMode ? (
@@ -646,22 +814,18 @@ export default function CreateProjectScreen({
                   disabled={busy}
                   onChange={(e) => setUrl(e.target.value)}
                 />
-                <span className="field-hint">
-                  A git or tarball URL for a community (awesome-rayfin) template.
-                </span>
+                <span className="field-hint">{t('create.urlHint')}</span>
                 <input
                   className="field-input"
                   type="text"
                   value={templateName}
-                  placeholder="Template name (optional, for multi-template repos)"
+                  placeholder={t('create.templateName')}
                   spellCheck={false}
                   disabled={busy}
                   onChange={(e) => setTemplateName(e.target.value)}
                 />
                 {url.trim() && !urlValid && (
-                  <span className="field-hint field-hint--warn">
-                    Enter a valid http(s) or git URL.
-                  </span>
+                  <span className="field-hint field-hint--warn">{t('create.urlInvalid')}</span>
                 )}
                 <button
                   type="button"
@@ -669,7 +833,7 @@ export default function CreateProjectScreen({
                   disabled={busy}
                   onClick={() => setCustomMode(false)}
                 >
-                  ← Back to the examples
+                  {t('create.backToExamples')}
                 </button>
               </div>
             ) : loadingGallery ? (
@@ -692,7 +856,7 @@ export default function CreateProjectScreen({
                     disabled={busy}
                     onClick={() => void loadGallery()}
                   >
-                    Try again
+                    {t('actions.tryAgain')}
                   </button>
                   <button
                     type="button"
@@ -700,7 +864,7 @@ export default function CreateProjectScreen({
                     disabled={busy}
                     onClick={() => setCustomMode(true)}
                   >
-                    Use a custom URL
+                    {t('create.customUrl')}
                   </button>
                 </div>
               </div>
@@ -708,30 +872,34 @@ export default function CreateProjectScreen({
               <>
                 {gallery && gallery.templates.length === 0 ? (
                   <div className="gallery-empty">
-                    <p className="gallery-empty-msg">This gallery doesn’t have any examples yet.</p>
+                    <p className="gallery-empty-msg">{t('create.galleryEmpty')}</p>
                   </div>
                 ) : (
                   <div className="template-grid">
-                    {gallery?.templates.map((t) => (
+                    {gallery?.templates.map((entry) => (
                       <button
-                        key={keyOf(t)}
+                        key={keyOf(entry)}
                         type="button"
                         disabled={busy}
-                        className={`template-card${communitySel === keyOf(t) ? ' template-card--active' : ''}`}
-                        onClick={() => setCommunitySel(keyOf(t))}
+                        className={`template-card${communitySel === keyOf(entry) ? ' template-card--active' : ''}`}
+                        onClick={() => setCommunitySel(keyOf(entry))}
                       >
-                        <span className="template-card-name">{t.name}</span>
-                        <span className="template-card-desc">{t.description}</span>
+                        <span className="template-card-name">{entry.name}</span>
+                        <span className="template-card-desc">{entry.description}</span>
                       </button>
                     ))}
                   </div>
                 )}
                 <div className="gallery-footer">
                   <span className="field-hint">
-                    From{' '}
-                    <span className="gallery-source">
-                      {gallery?.displayName || gallery?.repoUrl.replace(/^https?:\/\//, '')}
-                    </span>
+                    <Trans
+                      t={t}
+                      i18nKey="create.from"
+                      values={{
+                        source: gallery?.displayName || gallery?.repoUrl.replace(/^https?:\/\//, '')
+                      }}
+                      components={{ repo: <span className="gallery-source" /> }}
+                    />
                   </span>
                   <button
                     type="button"
@@ -739,7 +907,7 @@ export default function CreateProjectScreen({
                     disabled={busy}
                     onClick={() => setCustomMode(true)}
                   >
-                    Use a custom URL
+                    {t('create.customUrl')}
                   </button>
                 </div>
               </>
@@ -749,10 +917,10 @@ export default function CreateProjectScreen({
           {showProgress && (
             <div className="create-progress" aria-busy={busy}>
               <span className="sr-only" role="status" aria-live="polite">
-                {busy ? activePhaseLabel : done ? 'Project ready' : ''}
+                {busy ? activePhaseLabel : done ? t('progress.ready') : ''}
               </span>
               <ol className="create-phases">
-                {CREATE_PHASES.map((p, i) => {
+                {phases.map((p, i) => {
                   const state =
                     phase === 'done' || i < activeIdx
                       ? 'done'
@@ -778,12 +946,10 @@ export default function CreateProjectScreen({
                         ) : null}
                       </span>
                       <span className="create-phase-text">
-                        <span className="create-phase-label">{p.label}</span>
+                        <span className="create-phase-label">{t(p.label)}</span>
                         {p.id === 'installing' && state === 'active' && (
                           <span className="create-phase-hint">
-                            {elapsedSec > 75
-                              ? 'Still working — large dependency trees take a little longer.'
-                              : p.hint}
+                            {elapsedSec > 75 ? t('progress.stillWorking') : p.hint && t(p.hint)}
                           </span>
                         )}
                       </span>
@@ -794,20 +960,24 @@ export default function CreateProjectScreen({
 
               <div className="create-progress-meta">
                 <span className="create-elapsed" aria-hidden="true">
-                  {busy ? `${elapsedLabel} elapsed` : done ? 'Done' : ''}
+                  {busy
+                    ? t('progress.elapsed', { time: elapsedLabel })
+                    : done
+                      ? t('actions.done')
+                      : ''}
                 </span>
                 <button
                   type="button"
                   className="link-btn create-progress-toggle"
                   onClick={() => setShowDetails((v) => !v)}
                 >
-                  {showDetails ? 'Hide details' : 'Show details'}
+                  {showDetails ? t('progress.hideDetails') : t('progress.showDetails')}
                 </button>
               </div>
 
               {showDetails && (
                 <pre className="log-console log-console--sm create-progress-details" ref={logRef}>
-                  {log || 'Starting…'}
+                  {log || t('create.starting')}
                 </pre>
               )}
             </div>
@@ -818,14 +988,14 @@ export default function CreateProjectScreen({
 
         <footer className="create-foot" data-mascot-avoid="">
           <button className="btn btn--ghost" onClick={onCancel} disabled={busy || done}>
-            Cancel
+            {t('actions.cancel')}
           </button>
           <button
             className="btn btn--primary"
             onClick={create}
             disabled={busy || done || !canCreate}
           >
-            {busy ? 'Creating…' : done ? 'Opening…' : 'Create project'}
+            {busy ? t('create.creating') : done ? t('create.opening') : t('create.create')}
           </button>
         </footer>
       </div>

@@ -1,12 +1,14 @@
 import { memo, useMemo, useState, type JSX } from 'react'
+import { useTranslation } from '../../i18n'
 import Markdown from '../Markdown'
 import { ChevronRightIcon } from '../icons'
+import { AgentRow } from './AgentRow'
 import { formatTurnDuration } from './format'
 import { CheckIcon, ToolKindIcon } from './icons'
 import { StepRow } from './StepRow'
 import { ThinkingRow } from './ThinkingRow'
 import { summarizeKinds } from './toolPresentation'
-import { workDuration, type TurnBlock } from './turnLayout'
+import { workDuration, type TurnBlock, type WorkItem } from './turnLayout'
 
 type WorkBlock = Extract<TurnBlock, { kind: 'work' }>
 
@@ -32,25 +34,30 @@ export const WorkLog = memo(function WorkLog({
   soleBlock: boolean
   onOpenFile?: (path: string) => void
 }): JSX.Element {
+  const { t, i18n } = useTranslation('chat')
   const { items, steps, live } = block
   const [choice, setChoice] = useState<boolean | null>(null)
   const [showAll, setShowAll] = useState(false)
   const open = choice ?? live
-  const kinds = useMemo(() => summarizeKinds(steps), [steps])
+  // The summary is in the language shown, so a switch summarizes again.
+  const kinds = useMemo(() => summarizeKinds(steps), [steps, i18n.language])
   const duration = live ? undefined : workDuration(steps, turnElapsedMs, soleBlock)
 
-  const hiddenCount = live && !showAll ? Math.max(0, items.length - LIVE_WINDOW) : 0
-  const shown = hiddenCount ? items.slice(hiddenCount) : items
-  const hiddenSteps = hiddenCount
-    ? items.slice(0, hiddenCount).filter((i) => i.kind === 'tool').length
-    : 0
+  const windowStart = live && !showAll ? Math.max(0, items.length - LIVE_WINDOW) : 0
+  // A subagent still working stays in view however far the log has moved on.
+  const working = (item: WorkItem): boolean =>
+    item.kind === 'tool' && item.tool.agent?.state === 'running'
+  const earlier = items.slice(0, windowStart)
+  const hidden = earlier.filter((item) => !working(item))
+  const shown = windowStart ? [...earlier.filter(working), ...items.slice(windowStart)] : items
+  const hiddenSteps = hidden.filter((i) => i.kind === 'tool').length
 
-  const stepCount = `${steps.length} ${steps.length === 1 ? 'step' : 'steps'}`
+  const stepCount = t('steps.count', { count: steps.length })
   const title = live
-    ? 'Working'
+    ? t('workLog.working')
     : duration != null
-      ? `Worked for ${formatTurnDuration(duration)}`
-      : 'Worked'
+      ? t('workLog.workedFor', { duration: formatTurnDuration(duration) })
+      : t('workLog.worked')
   const summary = [title, stepCount, ...kinds.map((k) => k.label)].join(', ')
 
   return (
@@ -60,7 +67,7 @@ export const WorkLog = memo(function WorkLog({
         className="worklog-head"
         aria-expanded={open}
         aria-label={summary}
-        title={open ? 'Hide steps' : 'Show steps'}
+        title={open ? t('workLog.hideSteps') : t('workLog.showSteps')}
         onClick={() => setChoice(!open)}
       >
         <span className="worklog-icon" aria-hidden="true">
@@ -82,22 +89,31 @@ export const WorkLog = memo(function WorkLog({
       </button>
       {open && (
         <div className="worklog-body">
-          {hiddenCount > 0 && (
+          {hidden.length > 0 && (
             <button type="button" className="worklog-earlier" onClick={() => setShowAll(true)}>
-              Show{' '}
               {hiddenSteps > 0
-                ? `${hiddenSteps} earlier ${hiddenSteps === 1 ? 'step' : 'steps'}`
-                : 'earlier notes'}
+                ? t('steps.showEarlier', { count: hiddenSteps })
+                : t('workLog.showEarlierNotes')}
             </button>
           )}
           {shown.map((item) =>
             item.kind === 'tool' ? (
-              <StepRow
-                key={item.key}
-                tool={item.tool}
-                projectPath={projectPath}
-                onOpenFile={onOpenFile}
-              />
+              item.tool.agent || item.children?.length ? (
+                <AgentRow
+                  key={item.key}
+                  tool={item.tool}
+                  steps={item.children ?? []}
+                  projectPath={projectPath}
+                  onOpenFile={onOpenFile}
+                />
+              ) : (
+                <StepRow
+                  key={item.key}
+                  tool={item.tool}
+                  projectPath={projectPath}
+                  onOpenFile={onOpenFile}
+                />
+              )
             ) : item.kind === 'reasoning' ? (
               <ThinkingRow key={item.key} seg={item.seg} live={item.live} />
             ) : (

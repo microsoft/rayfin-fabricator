@@ -8,20 +8,12 @@
  */
 
 import type {
-  ChatDesignSummary,
-  DesignCommand,
-  DesignEnableOptions,
-  DesignHostTheme,
-  DesignLocateResult,
-  DesignLocateTarget,
-  DesignPageOutline,
-  DesignRestyleContext,
-  DesignSnapshot,
-  DesignStatus,
-  DesignSuggestion,
-  DesignVariation,
-  DesignVariationEvent
-} from './design'
+  PickCommand,
+  PickLocateResult,
+  PickLocateTarget,
+  PickSetOptions,
+  PickStatus
+} from './pick'
 import type {
   AdvisorFinding,
   AdvisorLoadResult,
@@ -46,6 +38,12 @@ export interface AppVersions {
    * to disambiguate the two. Absent when it can't be determined.
    */
   copilotBundled?: string | null
+  /**
+   * The rayfin-local that runs apps on this computer: the version a local
+   * backend reported this session, else the one Fabricator runs reports. Null
+   * when neither says.
+   */
+  rayfinLocal?: string | null
 }
 
 /** An available application update (mirrors the Rust `UpdateInfo`). */
@@ -191,6 +189,23 @@ export interface GithubAccountsResult {
   /** Active account first. */
   accounts: GithubAccount[]
   error?: string
+}
+
+/** A GitHub repository to create for a project. */
+export interface GithubRepoRequest {
+  /** The GitHub CLI account that creates it, and that Fabricator then gets and pushes changes as. */
+  account: string
+  /** Who owns it: the account itself, or one of its organizations. */
+  owner: string
+  name: string
+  private: boolean
+}
+
+export interface GithubRepoResult {
+  ok: boolean
+  error?: string
+  /** The repository's page, such as `https://github.com/contoso/sales`. */
+  url?: string
 }
 
 /** A Microsoft Fabric account signed in on this computer. */
@@ -416,8 +431,8 @@ export interface TeamBinding {
   branch?: string
   prNumber?: number
   prUrl?: string
-  /** Which deployment the preview shows. */
-  view?: 'preview' | 'production'
+  /** Your personal preview, which the pipeline deploys once your pull request
+   *  is ready for review (draft pull requests don't deploy). */
   preview?: TeamDeployRecord
   production?: TeamDeployRecord
   publish?: TeamPublishState
@@ -560,6 +575,9 @@ export interface TeamActionResult {
   project?: StudioProject
   /** Files changed by both you and a teammate (repo-relative). */
   conflicts?: string[]
+  /** The app's npm packages changed (teammates' changes came in, or yours went
+   *  away), so the app on this computer needs them installed again. */
+  packagesChanged?: boolean
 }
 
 /** Something an unfinished setup created, which abandoning it deletes. */
@@ -636,11 +654,12 @@ export interface TeamSessionStatus {
   /** A merge with teammates' changes is waiting to be resolved. */
   conflicted: boolean
   requireReview: boolean
+  /** The pipeline run deploying your preview (a draft's runs deploy nothing, so
+   *  they're never here) or, while publishing, the published app. */
   run?: TeamRunStatus
   preview?: TeamDeployRecord
   production?: TeamDeployRecord
   publish?: TeamPublishState
-  view: 'preview' | 'production'
   viewer?: string
 }
 
@@ -1321,7 +1340,7 @@ export interface DevServerResult {
   url?: string
   error?: string
   conflict?: PortConflict
-  /** Team apps: the deployment the local preview uses (`production` = the published app). */
+  /** Team apps on a Fabric backend: the deployment the live preview uses (`production` = the published app). */
   backend?: 'preview' | 'production' | 'none'
 }
 
@@ -1615,6 +1634,12 @@ export interface StudioProject {
    * Team projects are deployed by the workspace's pipeline, never locally.
    */
   team?: TeamBinding
+  /**
+   * The GitHub CLI account Fabricator created the project's GitHub repository
+   * as. Getting and pushing changes use that account, whichever account the
+   * GitHub CLI has active.
+   */
+  githubAccount?: string
   /** True when the folder no longer exists / is no longer a Rayfin project. */
   missing?: boolean
   /** The Rayfin version the project has installed (its CLI's), read when projects are listed. */
@@ -1645,9 +1670,25 @@ export interface ProjectsState {
 
 export type ThemePreference = 'dark' | 'light' | 'system'
 
+/**
+ * A language Fabricator's interface comes in, by its BCP 47 code. English is
+ * the source; the others are translations of it. Must match `i18n::LANGUAGES`
+ * in Rust and the folders in `src/renderer/src/i18n/locales/`.
+ */
+export type Language = 'en' | 'es' | 'de' | 'ja'
+
+/** A {@link Language}, or 'system' to follow the computer's language. */
+export type LanguagePreference = Language | 'system'
+
 export interface AppSettings {
   /** UI theme; 'system' follows the OS dark/light setting. */
   theme: ThemePreference
+  /**
+   * The interface's language (Settings → Appearance). Unset or 'system'
+   * follows the computer's language when Fabricator comes in it, and English
+   * otherwise. Fabricator's own messages from the core follow it too.
+   */
+  language?: LanguagePreference
   /** UI zoom factor (1 = 100%). Scales the whole interface for large monitors. */
   uiScale?: number
   /** Experimental, opt-in features (off by default). */
@@ -1673,8 +1714,8 @@ export interface AppSettings {
    */
   byok?: ByokSettings
   /**
-   * The MCP servers you added (MCP servers experiment). Never holds the values
-   * of their environment variables or headers.
+   * The MCP servers you added. Never holds the values of their environment
+   * variables or headers.
    */
   mcpServers?: McpServer[]
   /**
@@ -1682,7 +1723,20 @@ export interface AppSettings {
    * project's chat keeps its own choice after that.
    */
   chatDefaults?: ChatDefaults
+  /**
+   * Your own instructions for every app (Settings → Custom instructions), such
+   * as "Use the system theme by default." Every Build chat follows them, with
+   * Fabricator's own guidance, from its next message. They stay in Fabricator:
+   * they're never written into a project. Saving an empty text clears them.
+   */
+  customInstructions?: string
 }
+
+/**
+ * The most characters of custom instructions Fabricator keeps, since they go
+ * with every message. Must match `agent_skills::CUSTOM_INSTRUCTIONS_MAX` in Rust.
+ */
+export const CUSTOM_INSTRUCTIONS_MAX = 8000
 
 /** The model and plugins a new project's chat starts with. */
 export interface ChatDefaults {
@@ -1694,8 +1748,8 @@ export interface ChatDefaults {
   contextTier?: ContextTier
   /**
    * The plugins on ({@link ChatPluginId}s, including `mcp:<id>`). A new project
-   * gets only the ones chat offers it: Work IQ and MCP servers while their
-   * experiments are on.
+   * gets only the ones chat offers it: Work IQ while its experiment is on, and
+   * the MCP servers you still have.
    */
   plugins?: string[]
 }
@@ -1787,30 +1841,12 @@ export interface ExperimentFlags {
    * turned on there.
    */
   workIq?: boolean
-  /**
-   * MCP servers: add MCP servers (a command Fabricator runs on this computer,
-   * or a remote server's URL) to chat's plugins, so chat can use their tools.
-   * Each chat still has a server off until it's turned on there.
-   */
-  mcpServers?: boolean
-  /**
-   * Export as an app: Export project also offers App, a `.rayfin` file that
-   * Fabricator installs and runs in a window of its own. It gates exporting
-   * only: `.rayfin` files open whether it's on or off.
-   */
-  appExport?: boolean
-  /**
-   * Goals: each app's Goals tab, where you write what the app is for and the
-   * checks it must keep passing (`GOALS.md`), and Copilot runs them against a
-   * fresh copy of the app before you publish.
-   */
-  goals?: boolean
 }
 
 /**
  * A chat plugin: an MCP server chat can use. Fabric IQ reads the Power BI
  * reports and semantic models you can open; Work IQ (an experiment) reads your
- * Microsoft 365 data; `mcp:<id>` is an MCP server you added (an experiment).
+ * Microsoft 365 data; `mcp:<id>` is an MCP server you added.
  */
 export type ChatPluginId = 'fabric-iq' | 'work-iq' | `mcp:${string}`
 
@@ -1822,9 +1858,9 @@ export type ChatPluginId = 'fabric-iq' | 'work-iq' | `mcp:${string}`
 export type McpTransport = 'stdio' | 'http' | 'sse'
 
 /**
- * An MCP server you added (MCP servers experiment). Only the names of its
- * environment variables or headers are here: their values stay in the OS
- * credential store, and never come back to the renderer.
+ * An MCP server you added. Only the names of its environment variables or
+ * headers are here: their values stay in the OS credential store, and never
+ * come back to the renderer.
  */
 export interface McpServer {
   /** Stable id: starts its tools' names (`chart-generate_bar_chart`); its plugin id is `mcp:<id>`. */
@@ -2497,9 +2533,30 @@ export interface ChatToolCall {
   endedAt?: number
   /**
    * The name the user gave the MCP server whose tool this is, for a server
-   * they added (MCP servers experiment); `title` then names the tool.
+   * they added; `title` then names the tool.
    */
   server?: string
+  /**
+   * For a step a subagent took: the id of the main agent's step that started
+   * that agent (or the agent above it). The step shows under that one.
+   */
+  parent?: string
+  /**
+   * For a step that started a subagent: the agent, and how its run went. A
+   * background agent keeps working after the step that started it finished.
+   */
+  agent?: ChatAgentRun
+}
+
+/** A subagent that a chat step started: its name, and how its run went. */
+export interface ChatAgentRun {
+  name: string
+  state: ChatToolState
+  /**
+   * It runs in the background, so the step that started it only reports that
+   * it started; its result goes to the main agent.
+   */
+  background?: boolean
 }
 
 /**
@@ -2550,6 +2607,8 @@ export type ChatEvent =
   | { type: 'reasoning'; id: string; text: string }
   | { type: 'tool-start'; tool: ChatToolCall }
   | { type: 'tool-output'; id: string; text: string }
+  /** A subagent started by step `id` began, got its name, or finished. */
+  | { type: 'agent'; id: string; name: string; state: ChatToolState; background?: boolean }
   | {
       type: 'tool-end'
       id: string
@@ -2562,6 +2621,8 @@ export type ChatEvent =
       exitCode?: number
     }
   | { type: 'notice'; text: string }
+  /** Chat turned a plugin on in the project (Fabric IQ, when the user agreed), so its plugins changed. */
+  | { type: 'plugins-changed' }
   | { type: 'fusion'; fusion: ChatFusion }
   | { type: 'error'; text: string }
   | { type: 'result'; ok: boolean; filesModified: string[]; ranDeploy: boolean }
@@ -2708,20 +2769,36 @@ export interface RayfinVersionInfo {
   /** Per-package detail, used to build the upgrade prompt + popover. */
   packages: RayfinPackageVersion[]
   /**
-   * The newest stable release within the Rayfin versions the bundled local
-   * backend runs (`rayfin-local.json` `sdk.supported`), for the headline
-   * package; Rayfin's packages ship in lockstep. A personal app's upgrades stop
-   * here. Absent when npm couldn't list the releases or none is in the range.
+   * Where Fabricator's updates go, for the headline package (Rayfin's packages
+   * ship in lockstep): the newest stable release the bundled local backend
+   * runs (`rayfin-local.json` `sdk.supported`) that isn't newer than npm's
+   * `latest`, so the app keeps running on this computer. Absent when npm
+   * couldn't list the releases or none is.
    */
-  latestSupportedLocally?: string
+  recommended?: string
+  /** A stable release newer than {@link recommended}, which Fabricator offers too, with a warning. */
+  newer?: RayfinNewerRelease
+}
+
+/**
+ * A Rayfin release newer than the one Fabricator's updates go to: the newest
+ * on npm, whatever its dist-tag, such as a `preview` 2.0.0 while `latest` is
+ * 1.36.2.
+ */
+export interface RayfinNewerRelease {
+  version: string
+  /** Whether it's npm's `latest`. One that isn't might be unstable. */
+  isLatest: boolean
+  /** Whether the bundled local backend runs it; with one it doesn't, some things might not work as expected here. */
+  runsLocally: boolean
 }
 
 /** The newest Rayfin releases, for Home's update offers (`rayfin.latest`). */
 export interface RayfinLatest {
-  /** The newest stable release on npm: where a team app's upgrades go. */
+  /** The newest stable release on npm: its `latest` dist-tag. */
   latest?: string
-  /** The newest release the bundled local backend runs: where a personal app's go. */
-  latestSupportedLocally?: string
+  /** Where every app's updates go, as {@link RayfinVersionInfo.recommended}. */
+  recommended?: string
 }
 
 /* ------------------------------------------------------------------ *
@@ -2977,153 +3054,6 @@ export interface AdvisorEventEnvelope {
   event: AdvisorEvent
 }
 
-/* ------------------------------------------------------------------ *
- * Goals (an experiment)
- *
- * What an app is for and the checks it must keep passing, in the project's
- * `GOALS.md`. Copilot runs the checks on a fresh copy of the app, calling its
- * routes as each kind of user. Mirrors the Goals DTOs in `types.rs`.
- * ------------------------------------------------------------------ */
-
-/** How a check came out. `not-proven`: Copilot couldn't show it either way by calling the app. */
-export type GoalStatus = 'passed' | 'failed' | 'not-proven'
-
-/** One check in `GOALS.md`. `id` comes from its words, so a reworded check is a new check. */
-export interface GoalCheck {
-  id: string
-  text: string
-}
-
-/** A check's last outcome on this computer (never kept in the project). */
-export interface GoalResult {
-  checkId: string
-  /** The check as it read when it ran. */
-  check: string
-  status: GoalStatus
-  /** One or two plain sentences: what Copilot found. */
-  summary: string
-  /** The calls that show it, as Fabricator made them: who called, what they asked, how the app answered. */
-  calls: string[]
-  /** What Copilot saw in those answers, or what's missing, as short lines. */
-  evidence: string[]
-  /** RFC3339. */
-  ranAt: string
-  /** A signature of the app's code it ran against. */
-  fingerprint: string
-  /** The app's code changed since it ran. */
-  stale: boolean
-}
-
-/** The last Goals run: when, how long, on which model, and what it covered. */
-export interface GoalsRunInfo {
-  ranAt: string
-  durationMs: number
-  /** Absent on Auto. */
-  model?: string
-  /** Copilot's summary of the run. */
-  summary: string
-  /** The checks it ran. */
-  checkIds: string[]
-  /** It ran every check. */
-  all: boolean
-  /** It got through every check it was given. */
-  complete: boolean
-}
-
-/** An app's goals (`goals.load`): `GOALS.md` read, with each check's last result. */
-export interface GoalsSnapshot {
-  /** `GOALS.md` exists. */
-  exists: boolean
-  /** What the app is for, and who for. */
-  purpose: string
-  checks: GoalCheck[]
-  /** Results of the checks as they read now. */
-  results: GoalResult[]
-  lastRun: GoalsRunInfo | null
-  /** Every check passed, on the app's code as it is now. */
-  allPassed: boolean
-  /** Why the checks can't run for this app, when they can't. */
-  cannotRun: string | null
-  /** A run is going for this app (set by `load` only). */
-  running: boolean
-}
-
-/** What `goals.run` runs: these checks (all of them when absent), on this model. */
-export interface GoalsRunRequest extends AdvisorModelChoice {
-  checkIds?: string[]
-}
-
-/** How a run went (as its `done` event said), and the goals and results after it. */
-export interface GoalsRunEnd {
-  /** Every check it was given has a result. */
-  ok: boolean
-  cancelled: boolean
-  /** Why it stopped short. */
-  error?: string
-  snapshot: GoalsSnapshot
-}
-
-/** Goals Copilot drafted from the app's code, for the user to edit and save. */
-export interface GoalsProposal {
-  purpose: string
-  checks: string[]
-}
-
-/**
- * Where a run is: `preparing` (copying the app), `starting` its copy,
- * `seeding` it, `checking`, or `finishing` (removing the copy).
- */
-export type GoalsPhase = 'preparing' | 'starting' | 'seeding' | 'checking' | 'finishing'
-
-/** Streamed Goals events (main -> renderer). */
-export type GoalsEvent =
-  | { type: 'phase'; phase: GoalsPhase; detail?: string }
-  /** A tool call a run made (sent on start and again when it ends). */
-  | { type: 'activity'; tool: ChatToolCall }
-  /** A check's outcome. */
-  | { type: 'result'; result: GoalResult }
-  /** A tool call a draft made. */
-  | { type: 'draftActivity'; tool: ChatToolCall }
-  /** A run ended: `ok` when every check it was given has a result, else `cancelled` or why it stopped short. */
-  | { type: 'done'; ok: boolean; cancelled: boolean; error?: string }
-
-export interface GoalsEventEnvelope {
-  projectId: string
-  event: GoalsEvent
-}
-
-/**
- * `window.api.goals` (the Goals experiment): read and save an app's
- * `GOALS.md`, have Copilot draft it, and run its checks on a fresh copy of the
- * app. Team apps can't run checks yet (`cannotRun`).
- */
-export interface GoalsApi {
-  load: (projectId: string) => Promise<GoalsSnapshot>
-  /** Save the purpose and checks to `GOALS.md`, keeping whatever else it says. */
-  save: (projectId: string, purpose: string, checks: string[]) => Promise<GoalsSnapshot>
-  /**
-   * Run checks, streaming `phase`, `activity` and `result` events, then
-   * `done`. Rejects only when the run can't begin (one is already going, say);
-   * otherwise resolves with how it went and the goals and results after it.
-   */
-  run: (projectId: string, request: GoalsRunRequest) => Promise<GoalsRunEnd>
-  /** Stop a run. Resolves with whether one was running. */
-  cancel: (projectId: string) => Promise<boolean>
-  /**
-   * Have Copilot read the app and propose its purpose and checks, building on
-   * what's written so far. Nothing is saved.
-   */
-  draft: (
-    projectId: string,
-    purpose: string,
-    checks: string[],
-    choice?: AdvisorModelChoice
-  ) => Promise<GoalsProposal>
-  /** Stop drafting. Resolves with whether a draft was running. */
-  draftCancel: (projectId: string) => Promise<boolean>
-  onEvent: (cb: (envelope: GoalsEventEnvelope) => void) => () => void
-}
-
 /** Per-project chat configuration (model, reasoning effort and tiers). */
 export interface ChatOptions {
   /** Copilot model id (`--model`); 'auto' or undefined lets Copilot pick. */
@@ -3142,16 +3072,6 @@ export interface AdvisorModelChoice {
   effort?: string
   autoTier?: string
   contextTier?: string
-}
-
-/** Extras for one Design Options request. */
-export interface DesignVariationsOptions {
-  /** Reasoning effort for the model, when it supports one. */
-  effort?: ReasoningEffort
-  /** Streams each option as a `design:variation` event tagged with this id. */
-  requestId?: string
-  /** One of Fabricator's temp captures of the element (vision models); deleted afterwards. */
-  screenshotPath?: string
 }
 
 /**
@@ -3218,8 +3138,8 @@ export interface ChatMessage {
    * this assistant turn and answered via `chat_resolve_question`.
    */
   questions?: ChatPlanQuestion[]
-  /** The Design changes a (user) message carried, shown as a card in the transcript. */
-  design?: ChatDesignSummary
+  /** The elements a (user) message picked in the preview with Touch Up, shown as chips. */
+  picks?: ChatPickRef[]
   /** The Advisor findings a (user) message handed to Copilot, shown as a card in the transcript. */
   advisor?: ChatAdvisorSummary
   /** The Fabric data a (user) message asked Copilot to connect, shown as chips in the transcript. */
@@ -3229,11 +3149,20 @@ export interface ChatMessage {
   /** The report-migration page a (user) message asked Copilot to build, shown as a chip. */
   migration?: ChatMigrationRef
   /**
-   * The prompt Copilot received when it differs from `text` (a Design turn's
-   * structured changes, or a hand-off's full instructions); re-sent by Retry /
-   * Try again / Resume.
+   * The prompt Copilot received when it differs from `text` (picked elements'
+   * details, or a hand-off's full instructions); re-sent by Retry / Try again /
+   * Resume.
    */
   prompt?: string
+}
+
+/** An element a message picked in the preview, as its chip shows it. */
+export interface ChatPickRef {
+  /** Its number, as the preview showed it. */
+  n: number
+  label: string
+  /** Index of its picture in the message's `attachmentThumbs`. */
+  shot?: number
 }
 
 /** Fabric data a message carried, as its chip shows it. */
@@ -3728,6 +3657,71 @@ export interface HelpEventEnvelope {
 }
 
 /* ------------------------------------------------------------------ *
+ * Terminal
+ * ------------------------------------------------------------------ */
+
+/** A shell the project terminal can run. */
+export interface TerminalShell {
+  /** `pwsh`, `powershell`, `cmd`, `git-bash`, or a Unix shell's name (`zsh`). */
+  id: string
+  /** As the shell picker lists it: "PowerShell", "Command Prompt", "zsh". */
+  name: string
+  /** Its executable. */
+  path: string
+  /** What a new terminal runs unless another is chosen. */
+  default: boolean
+}
+
+/** A terminal to start in a project's folder. */
+export interface TerminalSpawnRequest {
+  /** Chosen by the renderer (a UUID), so keystrokes can go to it before it has started. */
+  id: string
+  projectId: string
+  /** A {@link TerminalShell} id; the default when absent or no longer installed. */
+  shell?: string
+  cols: number
+  rows: number
+}
+
+/** A terminal that started. */
+export interface TerminalInfo {
+  id: string
+  shellId: string
+  shellName: string
+  /** The folder it started in: the project's. */
+  cwd: string
+  pid: number | null
+  /** Windows' build number, which decides how xterm.js treats ConPTY; null elsewhere. */
+  windowsBuild: number | null
+}
+
+/** What a terminal streams while it runs: what the shell prints, then how it ended. */
+export type TerminalEvent = { kind: 'output'; data: string } | { kind: 'exit'; code: number | null }
+
+/**
+ * The project terminal: shells in pseudoterminals (ConPTY on Windows), started
+ * in a project's folder with its own command-line tools first on `PATH`.
+ */
+export interface TerminalApi {
+  /** The shells on this computer, the default first. */
+  shells: () => Promise<TerminalShell[]>
+  /** Start a terminal. Its output, then its exit, go to `onEvent`. */
+  spawn: (
+    request: TerminalSpawnRequest,
+    onEvent: (event: TerminalEvent) => void
+  ) => Promise<TerminalInfo>
+  /** Type into a terminal: keystrokes, a paste, or the terminal's replies. */
+  write: (id: string, data: string) => Promise<void>
+  resize: (id: string, cols: number, rows: number) => Promise<void>
+  /** Hold a terminal's output while the panel catches up, or let it flow again. */
+  pause: (id: string, paused: boolean) => Promise<void>
+  /** End a terminal's shell and what it started; its exit still arrives. */
+  kill: (id: string) => Promise<void>
+  /** End a project's terminals, or every terminal (a page that loaded again has none). */
+  killAll: (projectId?: string) => Promise<void>
+}
+
+/* ------------------------------------------------------------------ *
  * IPC channels
  * ------------------------------------------------------------------ */
 
@@ -3823,9 +3817,7 @@ export const IpcChannels = {
   procLog: 'proc:log',
   chatEvent: 'chat:event',
   advisorEvent: 'advisor:event',
-  goalsEvent: 'goals:event',
   helpEvent: 'help:event',
-  designVariation: 'design:variation',
   previewNav: 'preview:nav',
   previewAgent: 'preview:agent',
   updateProgress: 'update:progress',
@@ -4000,6 +3992,19 @@ export interface RayfinStudioApi {
      * register + open it. Fails if the clone isn't a Rayfin project.
      */
     clone: (repo: string) => Promise<ProjectActionResult>
+    /** Where `account` (the CLI's active account when absent) can create repositories: itself, then its organizations. */
+    owners: (account?: string) => Promise<TeamOwnersResult>
+    /**
+     * Whether `owner/name` can take a new project repository: a valid name that's
+     * free, or an empty repository `account` can push to (which it then uses).
+     */
+    checkRepo: (account: string, owner: string, name: string) => Promise<ProjectNameCheck>
+    /**
+     * Create a GitHub repository for a project with its own git history and no
+     * remote yet, push its versions, and remember `request.account` for getting
+     * and pushing its changes.
+     */
+    createRepo: (projectId: string, request: GithubRepoRequest) => Promise<GithubRepoResult>
   }
 
   fabric: {
@@ -4690,37 +4695,24 @@ export interface RayfinStudioApi {
   }
 
   /**
-   * Design mode's model-backed and source-aware helpers. The model calls run on
-   * transient, read-only Copilot sessions (never in chat history).
+   * Touch Up: the source hints sent with picked elements. Picking itself
+   * runs in the preview ({@link RayfinStudioApi.preview}'s `pick`).
    */
-  design: {
-    /** Ask a fast model for `count` named alternative looks for one element. */
-    variations: (
-      projectId: string,
-      context: DesignRestyleContext,
-      hint?: string,
-      count?: number,
-      model?: string,
-      options?: DesignVariationsOptions
-    ) => Promise<DesignVariation[]>
-    /** Each option as it streams in, before `variations` resolves (routed by `requestId`). */
-    onVariation: (callback: (event: DesignVariationEvent) => void) => () => void
-    /** Review a page outline (+ optional screenshot) and suggest improvements. */
-    polish: (
-      projectId: string,
-      page: DesignPageOutline,
-      screenshotPath?: string,
-      model?: string,
-      effort?: ReasoningEffort
-    ) => Promise<DesignSuggestion[]>
+  pick: {
     /** Find the likely source lines behind picked elements (heuristic hints). */
-    locate: (projectId: string, targets: DesignLocateTarget[]) => Promise<DesignLocateResult>
+    locate: (projectId: string, targets: PickLocateTarget[]) => Promise<PickLocateResult>
   }
 
   /** App-wide settings (theme, telemetry opt-in). */
   settings: {
     get: () => Promise<AppSettings>
     set: (patch: Partial<AppSettings>) => Promise<AppSettings>
+    /**
+     * The language the computer's language settings ask for, of the ones
+     * Fabricator comes in: what the 'system' language preference shows.
+     * English when it comes in none of them.
+     */
+    systemLanguage: () => Promise<Language>
   }
 
   /**
@@ -4741,9 +4733,9 @@ export interface RayfinStudioApi {
   }
 
   /**
-   * MCP servers (experimental; {@link ExperimentFlags.mcpServers}). The values
-   * of a server's environment variables and headers only ever go to the
-   * backend, to be kept in the OS credential store; nothing returns one.
+   * MCP servers. The values of a server's environment variables and headers
+   * only ever go to the backend, to be kept in the OS credential store; nothing
+   * returns one.
    */
   mcp: {
     /** The servers you added. */
@@ -4801,9 +4793,8 @@ export interface RayfinStudioApi {
     forward: () => Promise<void>
     /**
      * Capture the current preview content as a PNG `data:` URL (via WebView2's
-     * `CapturePreview`). Lossless, for Design to attach the previewed changes
-     * (full view + element crops) to a chat turn. Rejects when no preview is open
-     * or capture fails.
+     * `CapturePreview`). Lossless, for Touch Up to crop its picks and
+     * screenshots out of. Rejects when no preview is open or capture fails.
      */
     capture: () => Promise<string>
     /**
@@ -4824,38 +4815,33 @@ export interface RayfinStudioApi {
      */
     onAgentPreview: (cb: (event: PreviewAgentEvent) => void) => () => void
     /**
-     * In-preview Design mode ("visual chat"). The controller injected into every
-     * preview frame lets the user point at elements, preview tweaks, and queue
-     * changes that are later sent to Copilot as one turn. Works in both the
+     * Touch Up. The agent injected into every preview frame lets the user
+     * point at elements in the app and hand them to chat. Works in both the
      * direct and Fabric-embedded views. The host only relays the JSON documents
-     * described in `@shared/design`.
+     * described in `@shared/pick`.
      */
-    design: {
+    pick: {
       /**
-       * Turn Design on/off. `embedded` marks the Fabric-embedded view, where the
-       * app is a cross-origin iframe; `appUrl` (the direct app URL) supplies the
-       * origin the top-frame relay uses to find and drive that iframe. `options`
-       * seeds the session (id, queued items, host theme).
+       * Arm Touch Up (its shortcut works in the page), switch picking on or
+       * off, or with `armed` false put it back to sleep. `embedded` marks the
+       * Fabric-embedded view, where the app is a cross-origin iframe; `appUrl`
+       * (the direct app URL) supplies the origin the top-frame relay drives.
+       * `options` hands the page the current picks and Fabricator's theme.
        */
-      setEnabled: (
-        enabled: boolean,
+      set: (
+        armed: boolean,
+        on: boolean,
         embedded?: boolean,
         appUrl?: string,
-        options?: DesignEnableOptions
+        options?: PickSetOptions
       ) => Promise<void>
-      /** Read the controller's lightweight status. Polled while Design is on. */
-      poll: () => Promise<DesignStatus | null>
-      /** Read the queued items (fetched when `poll().version` changes). */
-      snapshot: () => Promise<DesignSnapshot | null>
-      /** Send a command to the controller; results arrive via `poll().results`. */
-      command: (command: DesignCommand) => Promise<void>
-      /**
-       * Push Fabricator's own theme (accent/surfaces/text/border + UI scale) so
-       * the design tools match the host app's look and zoom. Re-sent after a
-       * preview reload (when `poll().hasTheme` is false) and on theme/scale change.
-       */
-      setTheme: (theme: DesignHostTheme) => Promise<void>
+      /** Read the agent's state, with the events after `since` on `page`. */
+      poll: (page: string | null, since: number) => Promise<PickStatus | null>
+      /** Send a command to the agent; results arrive via `poll().results`. */
+      command: (command: PickCommand) => Promise<void>
     }
+    /** Give the keyboard back to Fabricator's own window (from the preview). */
+    releaseFocus: () => Promise<void>
     /**
      * Clear the `localStorage` and `sessionStorage` of the page the preview
      * shows, then reload it, so an app that signs itself in signs in again:
@@ -4948,7 +4934,7 @@ export interface RayfinStudioApi {
       folder: string,
       deleteApps: boolean
     ) => Promise<TeamActionResult>
-    /** Save the app's changes to its working branch (deploys your preview). */
+    /** Save the app's changes to its working branch (its draft pull request, which deploys nothing until you publish). */
     sync: (projectId: string, message: string) => Promise<TeamActionResult>
     /** Working state; `refresh` also asks GitHub (PR, deployments, pipeline run). */
     status: (projectId: string, refresh: boolean) => Promise<TeamSessionStatus>
@@ -4956,8 +4942,6 @@ export interface RayfinStudioApi {
     update: (projectId: string, keepConflicts: boolean) => Promise<TeamActionResult>
     /** Throw away unpublished changes and start fresh from the published app. */
     discard: (projectId: string) => Promise<TeamActionResult>
-    /** Show your preview or the published app in the preview pane. */
-    setView: (projectId: string, view: 'preview' | 'production') => Promise<TeamActionResult>
     runLog: (projectId: string, runId: number) => Promise<string>
     /** Publish (progress on `team:progress` with scope = projectId). */
     publish: (projectId: string, confirmDataLoss: boolean) => Promise<TeamActionResult>
@@ -5013,8 +4997,8 @@ export interface RayfinStudioApi {
   local: LocalBackendApi
   apps: InstalledAppsApi
   security: SecurityCheckApi
-  /** The Goals experiment; see {@link GoalsApi}. */
-  goals: GoalsApi
+  /** The project terminal; see {@link TerminalApi}. */
+  terminal: TerminalApi
 }
 
 /* ------------------------------------------------------------------ *

@@ -4,6 +4,9 @@
 //! wires up plugins + managed state, and registers every `#[tauri::command]`
 //! that backs the renderer's `window.api` surface (see `src/shared/ipc.ts`).
 
+// First, so every module can use its `t!`.
+#[macro_use]
+mod i18n;
 mod commands;
 mod error;
 mod services;
@@ -130,6 +133,10 @@ pub fn run() {
   // store (issue #17). Must run before anything spawns the CLI or its helpers.
   enable_rayfin_encryption_fallback();
 
+  // Label the Rayfin CLI's telemetry of every command Fabricator runs as
+  // Fabricator's (`RAYFIN_TELEMETRY_ENV`). Also before anything spawns the CLI.
+  services::rayfin_telemetry::init();
+
   // Point the Rayfin CLI at the Fabric account chosen in Accounts (each extra
   // account has its own config folder). Also before anything spawns the CLI.
   services::fabric_accounts::init();
@@ -161,9 +168,19 @@ pub fn run() {
     .manage(DevServers::default())
     .manage(services::local_backend::LocalBackends::default())
     .manage(services::apps::Apps::default())
-    .manage(commands::goals::GoalRunners::default())
+    .manage(services::terminal::Terminals::default())
     // The stills the preview leaves in its place under an HTML overlay.
     .register_uri_scheme_protocol(services::preview::STILL_SCHEME, services::preview::serve_still)
+    // The renderer's terminals live on its page: a page that loads again (a
+    // reload) has none, so the shells it had end.
+    .on_page_load(|webview, payload| {
+      if webview.label() == "main" && matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
+        if let Some(terminals) = webview.try_state::<services::terminal::Terminals>() {
+          let terminals = terminals.inner().clone();
+          std::thread::spawn(move || terminals.kill_all(None));
+        }
+      }
+    })
     .setup(|app| {
       if cfg!(debug_assertions) {
         app.handle().plugin(
@@ -172,6 +189,8 @@ pub fn run() {
             .build(),
         )?;
       }
+      // The core's text in the language Settings asks for, before it shows any.
+      i18n::set_preference(services::store::get_settings().language.as_deref());
       let version = app.package_info().version.to_string();
       services::telemetry::init(telemetry_connection_string(app), version);
 
@@ -228,7 +247,6 @@ pub fn run() {
         services::new_project_cache::clean_up();
         services::apps::clean_up();
         commands::security::clean_up();
-        commands::goals::clean_up();
       });
 
       Ok(())
@@ -252,6 +270,7 @@ pub fn run() {
       // settings
       commands::settings::settings_get,
       commands::settings::settings_set,
+      commands::settings::settings_system_language,
       // your own API keys
       commands::byok::byok_status,
       commands::byok::byok_set_key,
@@ -294,6 +313,9 @@ pub fn run() {
       commands::github::github_sign_out_account,
       commands::github::github_list_repos,
       commands::github::github_clone,
+      commands::github_repo::github_owners,
+      commands::github_repo::github_check_repo,
+      commands::github_repo::github_create_repo,
       // team workspaces (experimental)
       commands::team::team_env_status,
       commands::team::team_github_signin,
@@ -319,7 +341,6 @@ pub fn run() {
       commands::team::team_status,
       commands::team::team_update,
       commands::team::team_discard,
-      commands::team::team_set_view,
       commands::team::team_run_log,
       commands::team::team_publish,
       commands::team::team_review_requests,
@@ -465,13 +486,6 @@ pub fn run() {
       commands::advisor::advisor_explain_cancel,
       commands::advisor::advisor_verify,
       commands::advisor::advisor_verify_cancel,
-      // goals
-      commands::goals::goals_load,
-      commands::goals::goals_save,
-      commands::goals::goals_run,
-      commands::goals::goals_cancel,
-      commands::goals::goals_draft,
-      commands::goals::goals_draft_cancel,
       // help assistant
       commands::help::help_ask,
       commands::help::help_cancel,
@@ -535,18 +549,15 @@ pub fn run() {
       services::preview::preview_forward,
       services::preview::preview_capture,
       services::preview::preview_still,
-      services::preview::preview_design_set,
-      services::preview::preview_design_poll,
-      services::preview::preview_design_snapshot,
-      services::preview::preview_design_command,
-      services::preview::preview_design_set_theme,
+      services::preview::preview_pick_set,
+      services::preview::preview_pick_poll,
+      services::preview::preview_pick_command,
+      services::preview::preview_release_focus,
       // the app gallery's quick look
       services::quicklook::quicklook_show,
       services::quicklook::quicklook_set_bounds,
       services::quicklook::quicklook_close,
-      commands::design::design_variations,
-      commands::design::design_polish,
-      commands::design::design_locate,
+      commands::pick::pick_locate,
       // local backend (rayfin-local)
       commands::local::local_start,
       commands::local::local_stop,
@@ -581,6 +592,14 @@ pub fn run() {
       commands::local::local_report_fallback,
       // Preview as: clear the local preview's site data and reload it
       services::preview::preview_reset_site_data,
+      // the project terminal
+      commands::terminal::terminal_shells,
+      commands::terminal::terminal_spawn,
+      commands::terminal::terminal_write,
+      commands::terminal::terminal_resize,
+      commands::terminal::terminal_pause,
+      commands::terminal::terminal_kill,
+      commands::terminal::terminal_kill_all,
     ])
     .build(tauri::generate_context!())
     .expect("error while building tauri application")
@@ -610,7 +629,9 @@ pub fn run() {
         services::dev_server::kill_all(app);
         services::local_backend::kill_all(app);
         services::apps::kill_all(app);
-        commands::goals::kill_all(app);
+        if let Some(terminals) = app.try_state::<services::terminal::Terminals>() {
+          terminals.kill_all(None);
+        }
       }
     });
 }

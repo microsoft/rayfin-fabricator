@@ -5,6 +5,8 @@
 //! JSON parameters go through `@file` because `az` is a batch script on
 //! Windows, and `cmd.exe` mangles quotes and braces in arguments.
 
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::{json, Value};
@@ -46,15 +48,15 @@ static NOT_FOUND_RE: Lazy<Regex> =
 
 fn classify(res: &RunResult) -> AzError {
   if res.not_found {
-    return AzError { kind: AzErrorKind::Missing, message: "The Azure CLI (az) isn't installed.".into() };
+    return AzError { kind: AzErrorKind::Missing, message: t!("team.az.missingCli") };
   }
   let text = res.stderr.trim();
   let message = text
     .lines()
     .map(|l| l.trim().trim_start_matches("ERROR:").trim())
     .find(|l| !l.is_empty() && !l.starts_with("WARNING"))
-    .unwrap_or("The Azure CLI command failed.")
-    .to_string();
+    .map(String::from)
+    .unwrap_or_else(|| t!("team.az.commandFailed"));
   let kind = if LOGIN_RE.is_match(text) {
     AzErrorKind::NeedsLogin
   } else if BLOCKED_RE.is_match(text) {
@@ -70,8 +72,8 @@ fn classify(res: &RunResult) -> AzError {
 impl AzError {
   pub fn describe(&self, action: &str) -> String {
     match self.kind {
-      AzErrorKind::Missing => format!("{action}: the Azure CLI isn't installed."),
-      AzErrorKind::NeedsLogin => format!("{action}: your Azure sign-in has expired. Sign in to Azure again from setup."),
+      AzErrorKind::Missing => t!("team.az.describe.missingCli", action = action),
+      AzErrorKind::NeedsLogin => t!("team.az.describe.expired", action = action),
       _ => format!("{action}: {}", self.message),
     }
   }
@@ -101,14 +103,14 @@ async fn az_json(args: &[&str]) -> Result<Value, AzError> {
     return Ok(Value::Null);
   }
   serde_json::from_str(out.trim())
-    .map_err(|e| AzError { kind: AzErrorKind::Other, message: format!("Unexpected Azure CLI output: {e}") })
+    .map_err(|e| AzError { kind: AzErrorKind::Other, message: t!("team.az.unexpectedOutput", error = e) })
 }
 
 /// Write a JSON parameter file for `az … --parameters @file`.
 fn param_file(value: &Value) -> Result<std::path::PathBuf, AzError> {
   let file = std::env::temp_dir().join(format!("fabricator-az-{}.json", uuid::Uuid::new_v4()));
   std::fs::write(&file, serde_json::to_vec(value).unwrap_or_default())
-    .map_err(|e| AzError { kind: AzErrorKind::Other, message: format!("Could not prepare the Azure request: {e}") })?;
+    .map_err(|e| AzError { kind: AzErrorKind::Other, message: t!("team.az.cantPrepareRequest", error = e) })?;
   Ok(file)
 }
 
@@ -119,7 +121,8 @@ fn str_of(v: &Value, key: &str) -> Option<String> {
 /// The signed-in account: (tenant id, user name).
 pub async fn account() -> Result<(String, String), AzError> {
   let v = az_json(&["account", "show", "--output", "json"]).await?;
-  let tenant = str_of(&v, "tenantId").ok_or(AzError { kind: AzErrorKind::NeedsLogin, message: "Not signed in.".into() })?;
+  let tenant =
+    str_of(&v, "tenantId").ok_or_else(|| AzError { kind: AzErrorKind::NeedsLogin, message: t!("team.az.notSignedIn") })?;
   let user = v.get("user").and_then(|u| str_of(u, "name")).unwrap_or_default();
   Ok((tenant, user))
 }
@@ -133,9 +136,32 @@ pub async fn token(resource: &str) -> Result<String, AzError> {
   .await?;
   let token = out.trim().to_string();
   if token.is_empty() {
-    return Err(AzError { kind: AzErrorKind::NeedsLogin, message: "The Azure CLI returned no token.".into() });
+    return Err(AzError { kind: AzErrorKind::NeedsLogin, message: t!("team.az.noToken") });
   }
   Ok(token)
+}
+
+/// An access token for `resource` as the signed-in user, and when it expires,
+/// when the Azure CLI says (2.54 and later do).
+pub async fn token_until(resource: &str) -> Result<(String, Option<SystemTime>), AzError> {
+  let out = az(&["account", "get-access-token", "--resource", resource, "--output", "json"], 60_000).await?;
+  token_of(&out)
+}
+
+/// The token and its expiry in `az account get-access-token`'s JSON. Never
+/// quotes the output, which holds the token.
+fn token_of(out: &str) -> Result<(String, Option<SystemTime>), AzError> {
+  let v: Value = serde_json::from_str(out.trim()).map_err(|_| AzError {
+    kind: AzErrorKind::Other,
+    message: t!("team.az.unreadableToken"),
+  })?;
+  let token = str_of(&v, "accessToken")
+    .ok_or_else(|| AzError { kind: AzErrorKind::NeedsLogin, message: t!("team.az.noToken") })?;
+  let expires = v
+    .get("expires_on")
+    .and_then(|e| e.as_u64().or_else(|| e.as_str().and_then(|s| s.trim().parse().ok())))
+    .map(|secs| UNIX_EPOCH + Duration::from_secs(secs));
+  Ok((token, expires))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -169,7 +195,7 @@ pub async fn create_app(display_name: &str) -> Result<AppRegistration, AzError> 
     "json",
   ])
   .await?;
-  app_of(&v).ok_or(AzError { kind: AzErrorKind::Other, message: "Azure returned no application.".into() })
+  app_of(&v).ok_or_else(|| AzError { kind: AzErrorKind::Other, message: t!("team.az.noApplication") })
 }
 
 /// The application with this client ID, or `None` when it doesn't exist.
@@ -196,7 +222,7 @@ pub async fn ensure_service_principal(app_id: &str) -> Result<String, AzError> {
     return Ok(id);
   }
   let v = az_json(&["ad", "sp", "create", "--id", app_id, "--output", "json"]).await?;
-  str_of(&v, "id").ok_or(AzError { kind: AzErrorKind::Other, message: "Azure returned no service principal.".into() })
+  str_of(&v, "id").ok_or_else(|| AzError { kind: AzErrorKind::Other, message: t!("team.az.noServicePrincipal") })
 }
 
 /// The application's federated credentials as (name, subject).
@@ -427,6 +453,19 @@ mod tests {
     assert_eq!(classify(&failed("ERROR: something else")).kind, AzErrorKind::Other);
     let missing = classify(&RunResult { ok: false, exit_code: None, stdout: String::new(), stderr: String::new(), not_found: true });
     assert_eq!(missing.kind, AzErrorKind::Missing);
+  }
+
+  #[test]
+  fn a_token_comes_with_its_expiry_when_the_azure_cli_says() {
+    let at = |secs: u64| Some(UNIX_EPOCH + Duration::from_secs(secs));
+    let json = r#"{"accessToken":"t","expiresOn":"2026-11-06 23:49:15.000000","expires_on":1794037755,"tokenType":"Bearer"}"#;
+    assert_eq!(token_of(json).unwrap(), ("t".to_string(), at(1794037755)));
+    assert_eq!(token_of(r#"{"accessToken":"t","expires_on":"1794037755"}"#).unwrap().1, at(1794037755));
+    // Before 2.54 there's only the local time.
+    assert_eq!(token_of(r#"{"accessToken":"t","expiresOn":"2026-11-06 23:49:15.000000"}"#).unwrap().1, None);
+    assert_eq!(token_of(r#"{"accessToken":""}"#).unwrap_err().kind, AzErrorKind::NeedsLogin);
+    let garbled = token_of("secret-token-text").unwrap_err();
+    assert!(!garbled.message.contains("secret"), "{}", garbled.message);
   }
 
   #[test]

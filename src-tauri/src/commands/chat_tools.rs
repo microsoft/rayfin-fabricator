@@ -139,8 +139,14 @@ pub fn tool_title(tool_name: &str, args: Option<&Value>) -> String {
   if let Some(patch) = args.as_str() {
     return patch_files(patch).into_iter().next().unwrap_or_else(|| tool_name.to_string());
   }
-  if matches!(lower(tool_name).as_str(), "fabricator_local_call" | "fabricator_goals_call") {
+  if lower(tool_name) == "fabricator_local_call" {
     return local_call_title(args);
+  }
+  // A followed custom instruction goes by the instruction, which the turn shows.
+  if lower(tool_name) == crate::services::agent_tools::FOLLOWED_INSTRUCTION_TOOL {
+    if let Some(instruction) = args.get("instruction").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()) {
+      return truncate(collapse(instruction).trim(), 200);
+    }
   }
   // What the work log says it did: `load`, else `check`.
   if lower(tool_name) == "fabricator_local_seed" {
@@ -160,22 +166,25 @@ fn local_call_title(args: &Value) -> String {
   let field = |key: &str| args.get(key).and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty());
   let name = field("name").map(|n| truncate(&collapse(n), 80));
   let what = match (field("target").map(str::to_ascii_lowercase).as_deref(), name) {
-    (Some("function"), Some(name)) => format!("the {name} function"),
-    (Some("function"), None) => "a function".to_string(),
-    (Some("connector"), Some(name)) => format!("the {name} connector"),
-    (Some("connector-graphql"), Some(name)) => format!("the {name} connector's data API"),
-    (Some("connector" | "connector-graphql"), None) => "a connector".to_string(),
-    _ => "the app's data API".to_string(),
+    (Some("function"), Some(name)) => t!("commands.chatTools.localCall.function", name = name),
+    (Some("function"), None) => t!("commands.chatTools.localCall.aFunction"),
+    (Some("connector"), Some(name)) => t!("commands.chatTools.localCall.connector", name = name),
+    (Some("connector-graphql"), Some(name)) => t!("commands.chatTools.localCall.connectorApi", name = name),
+    (Some("connector" | "connector-graphql"), None) => t!("commands.chatTools.localCall.aConnector"),
+    _ => t!("commands.chatTools.localCall.appApi"),
   };
   let who = match field("as") {
-    None => "as you".to_string(),
+    None => t!("commands.chatTools.localCall.asYou"),
     Some(caller) => match caller.to_ascii_lowercase().as_str() {
-      "developer" => "as you".to_string(),
-      "anonymous" => "while signed out".to_string(),
-      _ => format!("as {}", truncate(caller.strip_prefix("user:").unwrap_or(caller).trim(), 80)),
+      "developer" => t!("commands.chatTools.localCall.asYou"),
+      "anonymous" => t!("commands.chatTools.localCall.signedOut"),
+      _ => t!(
+        "commands.chatTools.localCall.asUser",
+        user = truncate(caller.strip_prefix("user:").unwrap_or(caller).trim(), 80),
+      ),
     },
   };
-  format!("{what} {who}")
+  t!("commands.chatTools.localCall.title", what = what, who = who)
 }
 
 /// Files a call reads or writes, when the tool names them.
@@ -190,6 +199,33 @@ pub fn tool_paths(tool_name: &str, args: Option<&Value>) -> Option<Vec<String>> 
   }
   let path = args.get("path").and_then(|v| v.as_str()).map(str::trim).filter(|p| !p.is_empty())?;
   Some(vec![path.to_string()])
+}
+
+/// `path` relative to the project folder `root`, with forward slashes, as the
+/// renderer's `projectRelative`: a relative path is taken as relative to the
+/// project already, and a path outside it (such as Copilot's own plan file) is
+/// `None`. Windows paths compare case-insensitively.
+pub fn project_relative(path: &str, root: &str) -> Option<String> {
+  let normalize = |p: &str| p.trim().replace('\\', "/").trim_end_matches('/').to_string();
+  let drive = |p: &str| p.len() >= 2 && p.as_bytes()[0].is_ascii_alphabetic() && p.as_bytes()[1] == b':';
+  let path = normalize(path);
+  if path.is_empty() {
+    return None;
+  }
+  if !((drive(&path) && path[2..].starts_with('/')) || path.starts_with('/')) {
+    return Some(path.strip_prefix("./").unwrap_or(&path).to_string());
+  }
+  let root = normalize(root);
+  if root.is_empty() {
+    return None;
+  }
+  let fold = drive(&root) || drive(&path);
+  let same = |a: &str, b: &str| if fold { a.eq_ignore_ascii_case(b) } else { a == b };
+  if same(&path, &root) {
+    return Some(String::new());
+  }
+  let inside = path.len() > root.len() + 1 && path.as_bytes()[root.len()] == b'/' && same(&path[..root.len()], &root);
+  inside.then(|| path[root.len() + 1..].to_string())
 }
 
 /// The command line a shell tool ran.
@@ -372,14 +408,14 @@ mod tests {
     assert_eq!(title(json!({"target":"connector","name":"sales","as":"developer"})), "the sales connector as you");
     assert_eq!(title(json!({"target":"connector-graphql","name":"warehouse","as":"user:ana@example.com"})), "the warehouse connector's data API as ana@example.com");
     assert_eq!(title(json!({"target":"function"})), "a function as you");
-    // A Goals run calls its copy of the app the same way.
-    let goals = json!({"target":"graphql","as":"user:bo@example.com"});
-    assert_eq!(tool_title("fabricator_goals_call", Some(&goals)), "the app's data API as bo@example.com");
     // The status takes no arguments, so its title stays the tool's name.
     assert_eq!(tool_title("fabricator_local_status", Some(&json!({}))), "fabricator_local_status");
     // The seed tool's title is what it does.
     assert_eq!(tool_title("fabricator_local_seed", Some(&json!({}))), "check");
     assert_eq!(tool_title("fabricator_local_seed", Some(&json!({"action":" Load "}))), "load");
+    // A followed custom instruction goes by the instruction.
+    let followed = json!({"instruction":"Use the system\n theme by default","how":"made the app follow the system's setting"});
+    assert_eq!(tool_title("fabricator_followed_instruction", Some(&followed)), "Use the system theme by default");
   }
 
   #[test]
@@ -401,6 +437,22 @@ mod tests {
     assert_eq!(shell_command("powershell", Some(&shell)).as_deref(), Some("npm run build"));
     assert_eq!(shell_command("edit", Some(&shell)), None);
     assert!(!is_shell_tool("fabricator_screenshot"));
+  }
+
+  #[test]
+  fn project_paths_are_relative_with_forward_slashes_and_others_are_left_out() {
+    let root = "C:\\Users\\me\\Apps\\todo\\";
+    assert_eq!(project_relative("C:\\Users\\me\\Apps\\todo\\src\\App.tsx", root).as_deref(), Some("src/App.tsx"));
+    assert_eq!(project_relative("c:/users/ME/apps/todo/src/App.tsx", root).as_deref(), Some("src/App.tsx"));
+    assert_eq!(project_relative("./rayfin/rayfin.yml", root).as_deref(), Some("rayfin/rayfin.yml"));
+    assert_eq!(project_relative("C:\\Users\\me\\Apps\\todo", root).as_deref(), Some(""));
+    // Copilot's own files, and a sibling folder that only shares the name's start.
+    assert_eq!(project_relative("C:\\Users\\me\\.copilot\\session-state\\s\\plan.md", root), None);
+    assert_eq!(project_relative("C:\\Users\\me\\Apps\\todo-old\\a.ts", root), None);
+    assert_eq!(project_relative("/Users/me/Apps/todo/src/main.ts", "/Users/me/Apps/todo").as_deref(), Some("src/main.ts"));
+    assert_eq!(project_relative("/Users/me/Apps/Todo/src/main.ts", "/Users/me/Apps/todo"), None);
+    assert_eq!(project_relative("C:\\elsewhere\\a.ts", ""), None);
+    assert_eq!(project_relative("  ", root), None);
   }
 
   #[test]

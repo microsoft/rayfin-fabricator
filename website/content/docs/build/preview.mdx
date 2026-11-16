@@ -5,7 +5,7 @@ description: "Use the preview pane to watch your app change as Copilot works, se
 
 The preview pane shows your Rayfin app while you build: your app running on this computer, with its own backend and data, and once the app is published, your published app.
 
-![The preview toolbar above the running app: back, forward and reload, the app's address, and the Fabric, Design and focus buttons.](/screenshots/preview-toolbar.webp)
+![The preview toolbar above the running app: back, forward and reload, the app's address, and the toolbar's buttons on the right.](/screenshots/preview-toolbar.webp)
 
 ## What the preview shows
 
@@ -18,7 +18,7 @@ A published app that this computer can't run previews against its published back
 
 The local preview uses the published app's `VITE_*` configuration, so it runs against the published app's backend: frontend changes show as Copilot makes them, and changes to data, permissions or functions work once you publish them. If the project has no local Vite installation, Fabricator keeps showing the published app instead.
 
-Team app previews are handled by the team pipeline and local preview behavior. See [Work on a team app](/docs/team/work-on-an-app).
+A team app's preview works the same way: your app on this computer, and once the team has published it, **Local** and **Published**, where **Published** is the published app that everyone on the team uses. A team app that this computer can't run uses the team's deployment of it in Fabric instead. See [Work on a team app](/docs/team/work-on-an-app).
 
 ## Your app on this computer
 
@@ -30,13 +30,13 @@ The toolbar adds:
 
 - **Local** and **Published**, once the app is published, with an info button beside them, **About Local and Published**. See [Switch between Local and Published](/docs/build/preview#switch-between-local-and-published).
 - **Preview as**, to choose who the app signs in as. See [Preview as someone else](/docs/build/preview#preview-as-someone-else).
-- **Output**, which opens and closes the output of your app's backend, Vite and functions, under the preview. While your app runs as it should, the button has no dot. A blinking dot means your app is starting, and a red dot that it couldn't start. When your app runs but its latest change didn't apply, it shows an amber dot and the number of problems, such as **1 problem**, and **Output** starts with what's wrong, for example "Your app’s latest data model change couldn’t be read, so it still uses the previous data model."
+- **Output**, which shows and hides the output of your app's backend, Vite and functions, in the **Output** tab of the [terminal](/docs/build/terminal#your-apps-output) below your project. While your app runs as it should, the button has no dot. A blinking dot means your app is starting, and a red dot that it couldn't start. When your app runs but its latest change didn't apply, it shows an amber dot and the number of problems, such as **1 problem**, and **Output** starts with what's wrong, for example "Your app’s latest data model change couldn’t be read, so it still uses the previous data model."
 
-**Output**, under the preview, shows the latest output of your app's backend, Vite and functions, with the time and source of each line and the newest at the bottom. It follows new lines unless you scroll up. Select **Copy** to copy it, for example for a bug report, or **Restart** to stop your app's backend and Vite and start them again.
+**Output** shows the latest output of your app's backend, Vite and functions, with the time and source of each line, warnings in yellow and errors in red, and the newest at the bottom. It follows new lines unless you scroll up. Select **Copy output** to copy it, for example for a bug report, or **Restart app** to stop your app's backend and Vite and start them again. See [Your app's output](/docs/build/terminal#your-apps-output).
 
 While the app starts, the preview says what it's doing, such as "Reading your app’s data model", "Updating its database" or "Building its functions". If the app stopped, select **Start**.
 
-**Design** works whenever no chat turn is running. Your app on this computer has no **Fabric** view: that's for published apps that need the Fabric portal. See [Use the toolbar](/docs/build/preview#use-the-toolbar).
+**Point & Edit** works here, also while Copilot is working, so you can pick what to change next. Your app on this computer has no **Fabric** view: that's for published apps that need the Fabric portal. See [Use the toolbar](/docs/build/preview#use-the-toolbar).
 
 ## When your app doesn't start
 
@@ -59,7 +59,7 @@ Once an app is published, the toolbar has **Local** and **Published**:
 - **Local** shows your app on this computer, with its local data. The preview starts here.
 - **Published** shows your published app on Microsoft Fabric, with its data. Your changes reach it when you publish them.
 
-To switch while Design is on, finish designing with **Done** first. In **Published**, Design works on the published app, and an app that works only inside the Fabric portal has **Fabric**, which shows it in the Fabric portal shell.
+Switching turns **Point & Edit** off, and your picks stay in the chat composer. In **Published**, Point & Edit works on the published app, and an app that works only inside the Fabric portal has **Fabric**, which shows it in the Fabric portal shell.
 
 An app you published before it ran on this computer starts with empty local data, and its published app keeps its data. Until you select it or look at **Published**, the info button beside **Local** and **Published** is blue: select it for a short note on how the two differ.
 
@@ -82,7 +82,7 @@ Switching clears the preview's browser storage and reloads it, so the app signs 
 
 Test users have no password: they sign in only here, through **Preview as**. They're local users of your app on this computer, so Blueprint's **Data explorer** lists them under **Local users**, where you can delete them. See [See your app's local data](/docs/build/data-model#see-your-apps-local-data).
 
-**Preview as** is there in **Local** while your app runs and no chat turn is running. It's turned off while Design is on.
+**Preview as** is there in **Local** while your app runs and no chat turn is running.
 
 ## Use the toolbar
 
@@ -90,12 +90,11 @@ The preview toolbar gives you browser-like controls and Fabricator-specific tool
 
 - **Back**, **Forward** and **Reload** navigate the preview history.
 - The address shows what the preview is showing: your published app's, or `localhost` for an app running on this computer. Select it to open the page in your default browser.
-- For a team app, a status label names the deployment you're looking at, **My preview** or **Published**, and says **Publishing…** while the pipeline updates it. Its local preview is marked **Published data** while it uses the published app's data, and **No data yet** before anything is published.
+- For a team app, **Published** has a status label, such as **Published**, which says **Publishing…** while the team pipeline updates the published app. The preview of a team app that this computer can't run is marked **Published data** while it uses the published app's data.
+- **Desktop**, **Tablet** and **Phone** show your app at other screen widths. **Desktop** fills the pane, **Tablet** previews at 820 CSS pixels, and **Phone** previews at 390 by 844 CSS pixels inside a phone outline.
+- **Point & Edit** lets you pick parts of your app and clip screenshots of it, to show Copilot what to change. While the published app in the preview is publishing, it waits until publishing is done. See [Point & Edit](/docs/build/touch-up).
 - **Fabric** is there only for an app that works only inside the Fabric portal: one that reads semantic models through a `fabric.yaml` file, the classic way to connect them, whose models load only there, or one whose `rayfin/rayfin.yml` hosts it to open only inside Fabric. It switches the published app between the direct view and the Fabric portal shell, and such an app switches to the Fabric view the first time it's published. It's turned off when the published app has no portal link, and while a local preview runs. Other apps, including ones that connect to Fabric data through Rayfin connectors, don't need it, so they don't have the button, and neither does your app on this computer.
-- **Design** opens Design mode. On a preview at a `localhost` address, it works only between turns: always for your app on this computer, and with **Publish after each chat turn** off for the local preview of a published app. While the published app in the preview is publishing, Design waits until it's done.
 - **Focus** hides the chat and gives the preview more room. **Exit focus** shows the chat again.
-
-When Design mode is on, the extra preview-width buttons are **Desktop**, **Tablet** and **Phone**. **Desktop** fills the pane, **Tablet** previews at 820 CSS pixels, and **Phone** previews at 390 by 844 CSS pixels inside a phone outline. See [Design mode](/docs/build/design).
 
 > [!NOTE]
 > Browser devtools are available from the native preview's webview, not as a separate toolbar button in the current PreviewPane source.
@@ -104,7 +103,7 @@ When Design mode is on, the extra preview-width buttons are **Desktop**, **Table
 
 The preview tracks Fabricator's UI scale and the browser surface's pixel ratio. That matters when you move Fabricator between monitors or change display scaling: the native preview is resized and repositioned to stay aligned with its pane.
 
-In Design mode, device widths account for Fabricator's UI scale, so **Tablet** and **Phone** still represent the app's CSS width instead of the physical monitor width.
+The **Tablet** and **Phone** widths account for Fabricator's UI scale, so they still represent the app's CSS width instead of the physical monitor width.
 
 ## Sign in inside the preview
 
@@ -127,7 +126,7 @@ Refreshing Fabricator's Fabric authentication affects the Rayfin CLI credentials
 
 ## When every preview port is busy
 
-A local preview of a published app runs against the published backend: for team apps, and for a published app that this computer can't run. It must use a `localhost` port your app accepts for sign-in. Fabricator first tries the registered `http://localhost:N` ports from `rayfin/rayfin.yml`.
+A local preview of an app that this computer can't run uses the app's backend in Fabric: the published app's, or for a team app, the team's deployment of it. It must use a `localhost` port your app accepts for sign-in. Fabricator first tries the registered `http://localhost:N` ports from `rayfin/rayfin.yml`.
 
 If another app's local backend holds the port and Copilot isn't working on that app, Fabricator stops that backend and uses the port. The backend starts again when you open that app. Otherwise, you see a dialog titled like "Your live preview needs localhost:5173". It says in plain words what is using the port, and offers one-click choices:
 

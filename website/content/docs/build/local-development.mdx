@@ -3,14 +3,14 @@ title: "Develop on this computer"
 description: "Run your apps and their backend on this computer while you build, and publish them to Microsoft Fabric when you choose."
 ---
 
-Each app you build, other than a team app, runs on this computer from the moment you create or open it: its pages, its data, sign-in, functions, connectors and file storage. You can build and try an app without a Fabric workspace, and Copilot checks its work against the running app. When you want other people to use the app, you publish it to Microsoft Fabric.
+Each app you build runs on this computer from the moment you create or open it: its pages, its data, sign-in, functions, connectors and file storage. You can build and try an app without a Fabric workspace, and Copilot checks its work against the running app. When you want other people to use the app, you publish it to Microsoft Fabric.
 
 ![The preview of Contoso Expenses running on this computer: the toolbar with Local and Published, the Running status, Preview as You and localhost:5173, and Output open below the app with Restart, Copy and the latest lines from rayfin-local and Vite.](/screenshots/preview-local.webp)
 
 > [!NOTE]
-> Earlier versions of Fabricator ran apps this way only with the **Local development** experiment on in **Settings → Experiments**. Now every app other than a team app runs on this computer, and the setting is gone. **Publish after each chat turn** is now off unless you turned it on yourself: until you turn it on, chat turns don't publish your apps. See [Publish after each chat turn](/docs/ship/deploy#publish-after-each-chat-turn).
+> Earlier versions of Fabricator ran apps this way only with the **Local development** experiment on in **Settings → Experiments**, and never ran team apps this way. Now every app runs on this computer, and the setting is gone. **Publish after each chat turn** is now off unless you turned it on yourself: until you turn it on, chat turns don't publish your apps. See [Publish after each chat turn](/docs/ship/deploy#publish-after-each-chat-turn).
 
-Team apps work differently: the team pipeline publishes them, and their preview runs against their deployment in Fabric. See [Work on a team app](/docs/team/work-on-an-app).
+Team apps run on this computer too, with your own local data, but the team pipeline publishes them: **Publish** in a team app deploys your preview, then merges your changes for the pipeline to publish. See [Work on a team app](/docs/team/work-on-an-app).
 
 ## What runs on this computer
 
@@ -25,12 +25,13 @@ When you open an app, Fabricator starts its local backend, rayfin-local, which c
 
 The local backend keeps running between chat turns and picks up each change: a change to the data model updates the local database, functions build again, and changes to `rayfin/rayfin.yml` apply. When it rebuilds something the page uses, the preview loads the page again once things settle.
 
-At most two apps run at once: the one you have open and the one you had open before it. Fabricator keeps each app's output for the preview's **Output** and for Help. For how it works, see [The local backend](/docs/reference/how-it-works#the-local-backend).
+At most two apps run at once: the one you have open and the one you had open before it. Fabricator keeps each app's output for its **Output** tab in the terminal and for Help. For how it works, see [The local backend](/docs/reference/how-it-works#the-local-backend).
 
 ### Who the app runs as
 
 - **Sign-in.** The app signs in as you: your Microsoft Entra account from the Azure CLI or, when the Azure CLI isn't signed in, the Fabric account in use. When neither is signed in, it signs in as a local account, `developer@example.com`. To try it as someone else, use [Preview as](/docs/build/preview#preview-as-someone-else).
 - **Connectors, and functions that ask for tokens,** run as you, with your Azure sign-in. That's true even for connections set to application access, which run as the [app identity](/docs/build/data-model#whose-credentials-the-app-identity-uses) once the app is published. So a call that works on this computer can still fail in the published app, when the app identity can't reach the data.
+- **Semantic models** are queried with your Azure sign-in too. When Power BI turns it down, the local backend uses your Rayfin CLI sign-in instead, and the first time, a browser window can open for you to sign in and let the Rayfin CLI query Power BI for you. See [Power BI turned down your sign-in](/docs/troubleshooting/preview#power-bi-turned-down-your-sign-in).
 - **Without an Azure sign-in,** the app still runs, but its connectors and those functions can't get a token. To sign in, see [Manage your accounts](/docs/start/accounts).
 
 ## What runs only on Fabric
@@ -38,11 +39,13 @@ At most two apps run at once: the one you have open and the one you had open bef
 A few things don't run on this computer:
 
 - **KQL database (Kusto) connectors.** Until the app is published, its calls to them fail in the preview.
-- **Rayfin releases older than the line Fabricator runs**, such as 1.36.x. An app on an older release can misbehave here. See [Keep Rayfin up to date](/docs/ship/rayfin-versions).
+- **Rayfin releases older than the lines Fabricator runs**, such as 1.36.x and 2.0.x. An app on an older release can misbehave here. See [Keep Rayfin up to date](/docs/ship/rayfin-versions).
 
 An app on a newer Rayfin release runs on this computer anyway, and a note above the preview says "This app uses Rayfin `<version>`, which is newer than the Rayfin versions Fabricator runs on this computer, so some things might not work as expected." If a published app on a newer release can't start here, its preview uses the published app's backend instead. See [The preview says some things might not work](/docs/troubleshooting/preview#the-preview-says-some-things-might-not-work).
 
-When a published app needs one of these, its preview uses the published app's backend instead, and says why, for example "The logs connector runs only on Fabric, so the preview uses your published app’s backend." The preview then runs your app's frontend on this computer against the published backend, so changes to data, permissions or functions reach that backend when you publish. While **Publish after each chat turn** is on, it does that only during chat turns, and shows your published app the rest of the time. There's no **Local** and **Published** switch, and the **Data explorer** still shows only the local data. After a chat turn that changes the app's packages or `rayfin/rayfin.yml`, Fabricator checks again whether this computer can run it. An app that was never published has no published backend to use, so it runs on this computer anyway. See [The preview uses your published app's backend](/docs/troubleshooting/preview#the-preview-uses-your-published-apps-backend).
+When a published app needs one of these, its preview uses the published app's backend instead, and says why, for example "The logs connector runs only on Fabric, so the preview uses your published app’s backend." The preview then runs your app's frontend on this computer against the published backend, so changes to data, permissions or functions reach that backend when you publish. While **Publish after each chat turn** is on, it does that only during chat turns, and shows your published app the rest of the time. There's no **Local** and **Published** switch, and the **Data explorer** still shows only the local data. After a chat turn that changes the app's packages or `rayfin/rayfin.yml`, and when the app's Rayfin version changes, for example after you update it with Copilot or in the [terminal](/docs/build/terminal), Fabricator checks again whether this computer can run it. An app that was never published has no published backend to use, so it runs on this computer anyway. See [The preview uses your published app's backend](/docs/troubleshooting/preview#the-preview-uses-your-published-apps-backend).
+
+A team app uses the team's deployment of it instead: your preview when it's deployed, otherwise the published app. Chat turns never publish a team app, so its preview runs this way the whole time the app is open. See [Work on a team app](/docs/team/work-on-an-app#build-it-on-this-computer).
 
 Some things work on this computer but can fail once the app is published:
 
@@ -53,7 +56,7 @@ The [Advisor](/docs/ship/advisor#checks-for-apps-that-run-on-this-computer) flag
 
 ## Watch your app in the preview
 
-The preview shows your app at a `localhost` address. While it starts, the preview says what it's doing. **Output**, in the preview toolbar, opens the output of your app's backend, Vite and functions, with **Restart**. It shows a dot only when your app needs a look, and the number of problems, such as **1 problem**, when a change didn't apply, such as a data model that couldn't be read. When the app can't start, the preview says why and offers a fix, such as **Install dependencies** or **Stop the other one**, with **Try again**, **View output** and **Find out why**, which asks Help. See [Your app on this computer](/docs/build/preview#your-app-on-this-computer) and [Your app doesn't start on this computer](/docs/troubleshooting/preview#your-app-doesnt-start-on-this-computer).
+The preview shows your app at a `localhost` address. While it starts, the preview says what it's doing. **Output**, in the preview toolbar, opens the output of your app's backend, Vite and functions in the terminal below your project, with **Restart app**. It shows a dot only when your app needs a look, and the number of problems, such as **1 problem**, when a change didn't apply, such as a data model that couldn't be read. When the app can't start, the preview says why and offers a fix, such as **Install dependencies** or **Stop the other one**, with **Try again**, **View output** and **Find out why**, which asks Help. See [Your app on this computer](/docs/build/preview#your-app-on-this-computer) and [Your app doesn't start on this computer](/docs/troubleshooting/preview#your-app-doesnt-start-on-this-computer).
 
 After each chat turn that changes your app, Fabricator saves a version in **Code → History**, named after your request, so you can restore an earlier one.
 

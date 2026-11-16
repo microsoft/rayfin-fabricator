@@ -155,7 +155,7 @@ describe('HomeView project launcher', () => {
   })
 
   it('offers a Rayfin update only on projects behind the newest release, and hands it on', async () => {
-    installHomeApi({ latest: { latest: '1.37.0', latestSupportedLocally: '1.36.2' } })
+    installHomeApi({ latest: { latest: '1.37.0', recommended: '1.36.2' } })
     const props = baseProps()
     const behind = makeProject('p1', { name: 'Sales', rayfinVersion: '1.35.1' })
     props.projects = [
@@ -176,10 +176,9 @@ describe('HomeView project launcher', () => {
     expect(within(sales).getByText(/^Rayfin 1\.35\.1/)).toBeTruthy()
     // Up to date for this computer: no version at all.
     expect(within(notes).queryByText(/^Rayfin \d/)).toBeNull()
-    // A team app updates to the newest release.
-    expect(
-      within(trips).getByRole('button', { name: 'Update Rayfin in Trips to 1.37.0' })
-    ).toBeTruthy()
+    // A team app runs on this computer too, so it stops at the same release.
+    expect(within(trips).queryByRole('button', { name: /^Update Rayfin in Trips/ })).toBeNull()
+    expect(within(trips).queryByText(/^Rayfin \d/)).toBeNull()
     fireEvent.click(update)
     expect(props.onUpdateRayfin).toHaveBeenCalledWith(behind, '1.36.2')
     expect(props.onSelect).not.toHaveBeenCalled()

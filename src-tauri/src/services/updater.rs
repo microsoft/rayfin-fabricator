@@ -91,15 +91,12 @@ pub async fn install(app: &AppHandle, state: &UpdaterState) -> AppResult<()> {
   let update = state.update.lock().unwrap().clone();
   let bytes = state.bytes.lock().unwrap().take();
   let (Some(update), Some(bytes)) = (update, bytes) else {
-    return Err(AppError::Msg(
-      "No downloaded update to install. Check for updates first.".into(),
-    ));
+    return Err(AppError::Msg(t!("services.updater.nothingDownloaded")));
   };
   // The installer replaces rayfin-local, which a running local backend keeps in
-  // use: projects', installed apps' and Goals runs'.
+  // use: projects' and installed apps'.
   crate::services::local_backend::stop_all(app).await;
   crate::services::apps::stop_all(app).await;
-  crate::commands::goals::stop_all(app).await;
   update
     .install(bytes)
     .map_err(|e| AppError::Msg(e.to_string()))?;

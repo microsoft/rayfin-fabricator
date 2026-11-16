@@ -1,5 +1,6 @@
-//! OS process helpers for rayfin-local processes: no console window, tree
-//! kills, liveness, and which executable a process runs.
+//! OS process helpers for rayfin-local processes, and the project terminal's
+//! shells: no console window, tree kills, signals, liveness, and which
+//! executable a process runs.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -47,8 +48,9 @@ pub fn kill_tree(pid: u32) {
   }
 }
 
+/// Send `signal` (`-HUP`, `-KILL`) to `target`: a pid, or `-<pgid>` for a process group.
 #[cfg(unix)]
-fn signal(signal: &str, target: &str) -> bool {
+pub fn signal(signal: &str, target: &str) -> bool {
   Command::new(KILL)
     .args([signal, "--", target])
     .stdin(Stdio::null())
@@ -139,9 +141,7 @@ pub fn terminate(pid: u32, grace: Duration) -> Result<(), String> {
   if wait_for_exit(&[pid], Duration::from_secs(5)).is_empty() {
     Ok(())
   } else {
-    Err(format!(
-      "Couldn't stop rayfin-local (PID {pid}). It may run as another user or as administrator: stop it where it runs, then start this app again."
-    ))
+    Err(t!("services.localBackend.stopFailed", pid = pid))
   }
 }
 
