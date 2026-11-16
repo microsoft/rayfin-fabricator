@@ -166,7 +166,58 @@ The app ships with Tauri's updater plugin. On startup (and via **Settings → Ch
 
 ### Updater signing key (custody)
 
-Update packages are verified against the public key baked into `src-tauri/tauri.conf.json` (`plugins.updater.pubkey`). The matching private key lives **only** in two GitHub Actions secrets and must be backed up offline:
+For the Microsoft ADO channel, bootstrap a **new** updater key into the existing
+`appdev-team-kv` in subscription `47d8d56c-3a05-4e1a-805b-87cc4b1ba5a3`,
+resource group `team-rg`, rather than reusing the upstream owner's key. From your
+usual login shell on macOS/Linux, with dependencies restored and Azure CLI signed
+in as an identity allowed to read vault metadata and list/get/set secrets:
+
+```bash
+# Read-only: validate the exact vault and check active and soft-deleted secret names.
+node scripts/bootstrap-updater-key.mjs
+
+# Explicitly create and upload a new pair. Run only one bootstrap at a time.
+node scripts/bootstrap-updater-key.mjs --create
+```
+
+The script generates a 48-byte cryptographically random password, uploads it as
+`fabricator-updater-password`, then generates a password-encrypted Tauri key and
+uploads it as `fabricator-updater-private-key`. These are **Key Vault secrets**,
+not Key Vault cryptographic keys: Tauri needs its own encrypted minisign private-key
+format. Azure authentication stays with Azure CLI; no token is exported. Secret
+uploads use protected files, not command-line secret values. Tauri receives its
+password through an in-memory native API in a worker with piped input, never a
+password in the OS argument list. Raw tool diagnostics are suppressed on failure
+because they may contain secret data; the failed operation is reported instead.
+
+After each upload the exact returned secret version is read back. The script
+compares the bytes and verifies an actual Tauri signing proof using the restored
+key/password and generated public key. Only then does it retain
+`src-tauri/updater.pub` and a nonsecret `src-tauri/updater.pub.vault.json` receipt
+containing versioned secret IDs and the public-key hash. Successful completion
+removes local temporary secret files. The public key is safe to commit; this does
+not automatically change the app's embedded public key or configure pipeline access.
+
+Existing or soft-deleted names and existing public-key outputs block creation.
+There is deliberately no overwrite, rotation, deletion or purge switch. Key Vault
+does not make the preflight plus two secret uploads a transaction: serialize
+issuance and do not run concurrent bootstraps. If an operation fails, protected
+`0700` recovery-directory / `0600` secret files and the known secret-version IDs
+are retained; inspect and recover that pair before retrying. Do not delete vault
+entries or pick new names merely to bypass the refusal.
+
+No vault firewall/RBAC/retention settings are changed. The vault currently has
+soft delete enabled but purge protection is not enabled; arrange appropriate
+recovery retention and a protected backup with the vault owner. Keeping the key
+and password in the same vault is convenient custody, not access separation:
+an identity able to read both can sign updates. Restrict the eventual pipeline
+identity to the required secrets, gate signing, and never expose them to arbitrary
+PR build code.
+
+The following describes the **existing upstream GitHub Actions channel**, not
+the new Key Vault-backed ADO configuration, which still needs to be wired:
+
+Update packages are verified against the public key baked into `src-tauri/tauri.conf.json` (`plugins.updater.pubkey`). The upstream workflow expects these two GitHub Actions secrets; their presence is not established by the public configuration, and they are not configured in the Microsoft repository:
 
 - `TAURI_SIGNING_PRIVATE_KEY` — the minisign private key.
 - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — its password.
