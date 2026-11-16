@@ -292,10 +292,22 @@ function upgradeDelivery(project: StudioProject | undefined, turnsPublish: boole
 
 /**
  * What an update to a Rayfin release newer than the recommended one tells
- * Copilot: why it needs care, which the user saw before choosing it.
+ * Copilot: why it needs care, which the user saw before choosing it. A new
+ * major version is a migration: a saved version to go back to first, then
+ * Rayfin's migration guide, and a team app might leave teammates behind.
  */
-function newerUpdateNote(newer: RayfinNewerRelease): string {
+function newerUpdateNote(newer: RayfinNewerRelease, team: boolean): string {
   const notes: string[] = []
+  if (newer.majorUpgrade) {
+    notes.push(
+      `Rayfin ${newer.version} is a new major version: this is a migration, not a routine update. ` +
+        'Before changing anything, make sure the app has a saved version (a git commit of its current state) ' +
+        "I can go back to, and tell me if you can't make one. Then follow Rayfin's migration guide for this " +
+        'major version (look in `node_modules/@microsoft/rayfin-guide/assets/docs/` after installing, ' +
+        'such as a `migration` or `upgrading` doc) step by step, and tell me what it changes about the ' +
+        "app's local data (`.rayfin-local`) and seed data."
+    )
+  }
   if (!newer.isLatest) {
     notes.push(
       `Rayfin ${newer.version} isn't Rayfin's latest release yet (npm's \`latest\` tag), so it might be unstable.`
@@ -304,6 +316,11 @@ function newerUpdateNote(newer: RayfinNewerRelease): string {
   if (!newer.runsLocally) {
     notes.push(
       `Fabricator's local backend doesn't run Rayfin ${newer.version} yet, so some things might not work as expected on this computer.`
+    )
+  }
+  if (team && newer.majorUpgrade) {
+    notes.push(
+      `This is a team app: teammates on an older Fabricator might not be able to run it on their computers once it's on Rayfin ${newer.version}.`
     )
   }
   notes.push('I chose it anyway: make the change, and remind me of this in your summary.')
@@ -1753,7 +1770,7 @@ export default function Workbench({
       const to = offer.latest ?? ups[0].latest
       const prompt =
         `Please upgrade this app's Rayfin packages to Rayfin ${to}.\n\n` +
-        (newer ? `${newerUpdateNote(newer)}\n\n` : '') +
+        (newer ? `${newerUpdateNote(newer, Boolean(project?.team))}\n\n` : '') +
         'Set these exact versions in package.json, then run `npm install`:\n' +
         `${lines}\n\n` +
         'Keep every Rayfin SDK package (`@microsoft/rayfin-core`, `-client`, `-data`, `-auth`, ' +
@@ -3685,6 +3702,7 @@ export default function Workbench({
               newer={newerVersion}
               onUpdate={requestRayfinUpdate}
               publishes={!manualDeploy && !active.team && Boolean(active.lastDeploy?.url)}
+              team={Boolean(active.team)}
             />
             {(active.workspaceName || active.workspace) && <WorkspaceStatus project={active} />}
           </span>

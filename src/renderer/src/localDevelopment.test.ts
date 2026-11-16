@@ -33,7 +33,12 @@ describe('Rayfin updates of an app', () => {
       { name: '@microsoft/rayfin-core', kind: 'sdk', installed, latest, upgradable: true }
     ]
   })
-  const preview: RayfinNewerRelease = { version: '2.0.0', isLatest: false, runsLocally: true }
+  const preview: RayfinNewerRelease = {
+    version: '2.0.0',
+    isLatest: false,
+    runsLocally: true,
+    majorUpgrade: false
+  }
 
   it('go to the release Fabricator recommends', () => {
     const offered = recommendedUpdates(versions('1.36.0', '1.37.1', '1.36.2'))
@@ -70,8 +75,35 @@ describe('Rayfin updates of an app', () => {
     expect(newerRayfinWarnings(preview)).toEqual([
       'It isn’t Rayfin’s latest release yet, so it might be unstable.'
     ])
-    expect(newerRayfinWarnings({ version: '2.1.0', isLatest: true, runsLocally: false })).toEqual([
+    expect(
+      newerRayfinWarnings({
+        version: '2.1.0',
+        isLatest: true,
+        runsLocally: false,
+        majorUpgrade: false
+      })
+    ).toEqual([
       'Fabricator doesn’t run it on this computer yet, so some things might not work as expected here.'
+    ])
+  })
+
+  it('warn that a new major version is a migration, and can leave teammates behind', () => {
+    const major: RayfinNewerRelease = {
+      version: '2.0.0',
+      isLatest: true,
+      runsLocally: true,
+      majorUpgrade: true
+    }
+    const migration =
+      'It’s a new major version of Rayfin: a migration, not a routine update. Save a version of the app first and follow Rayfin’s migration guide.'
+    expect(newerRayfinWarnings(major)).toEqual([migration])
+    expect(newerRayfinWarnings(major, true)).toEqual([
+      migration,
+      'Teammates on an older Fabricator might not be able to run the app on their computers once it moves to this version. Check with your team first.'
+    ])
+    // Within a major version, a team app needs no extra care.
+    expect(newerRayfinWarnings(preview, true)).toEqual([
+      'It isn’t Rayfin’s latest release yet, so it might be unstable.'
     ])
   })
 })

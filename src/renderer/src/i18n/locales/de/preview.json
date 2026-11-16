@@ -153,7 +153,9 @@
   },
   "rayfinWarning": {
     "prerelease": "Es ist noch nicht die neueste Version von Rayfin und könnte daher instabil sein.",
-    "unsupported": "Fabricator führt sie auf diesem Computer noch nicht aus, daher funktionieren hier manche Dinge möglicherweise nicht wie erwartet."
+    "unsupported": "Fabricator führt sie auf diesem Computer noch nicht aus, daher funktionieren hier manche Dinge möglicherweise nicht wie erwartet.",
+    "majorUpgrade": "Es ist eine neue Hauptversion von Rayfin: eine Migration, kein routinemäßiges Update. Speichere zuerst eine Version der App und folge dem Migrationsleitfaden von Rayfin.",
+    "team": "Teammitglieder mit einer älteren Version von Fabricator können die App nach dem Wechsel auf diese Version möglicherweise nicht mehr auf ihren Computern ausführen. Sprich dich vorher mit deinem Team ab."
   },
   "devices": {
     "desktop": "Desktop",

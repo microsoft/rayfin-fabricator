@@ -153,7 +153,9 @@
   },
   "rayfinWarning": {
     "prerelease": "It isn’t Rayfin’s latest release yet, so it might be unstable.",
-    "unsupported": "Fabricator doesn’t run it on this computer yet, so some things might not work as expected here."
+    "unsupported": "Fabricator doesn’t run it on this computer yet, so some things might not work as expected here.",
+    "majorUpgrade": "It’s a new major version of Rayfin: a migration, not a routine update. Save a version of the app first and follow Rayfin’s migration guide.",
+    "team": "Teammates on an older Fabricator might not be able to run the app on their computers once it moves to this version. Check with your team first."
   },
   "devices": {
     "desktop": "Desktop",

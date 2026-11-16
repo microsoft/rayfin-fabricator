@@ -118,16 +118,21 @@ async fn releases(pkg: &str) -> Option<Published> {
   published
 }
 
-/// Where updates go, from npm's releases of the headline package: the release
-/// Fabricator recommends, and a newer one it offers with a warning.
-fn update_targets(published: Option<&Published>) -> (Option<String>, Option<RayfinNewerRelease>) {
+/// Where updates go for an app on `installed`, from npm's releases of the
+/// headline package: the release Fabricator recommends, within the app's major
+/// version, and a newer one it offers with a warning.
+fn update_targets(
+  published: Option<&Published>,
+  installed: Option<&str>,
+) -> (Option<String>, Option<RayfinNewerRelease>) {
   let Some(published) = published else {
     return (None, None);
   };
-  let targets = rayfin_sdk::update_targets(published);
+  let targets = rayfin_sdk::update_targets(published, installed);
   let newer = targets.newer.map(|version| RayfinNewerRelease {
     is_latest: published.latest.as_deref().is_some_and(|latest| latest.trim() == version.to_string()),
     runs_locally: rayfin_sdk::runs_locally(&version),
+    major_upgrade: rayfin_sdk::is_major_upgrade(installed, &version),
     version: version.to_string(),
   });
   (targets.recommended.map(|v| v.to_string()), newer)
@@ -207,7 +212,7 @@ pub async fn rayfin_versions(id: String) -> RayfinVersionInfo {
     Some(name) => releases(&name).await,
     None => None,
   };
-  let (recommended, newer) = update_targets(published.as_ref());
+  let (recommended, newer) = update_targets(published.as_ref(), version.as_deref());
 
   RayfinVersionInfo {
     version,
@@ -219,13 +224,14 @@ pub async fn rayfin_versions(id: String) -> RayfinVersionInfo {
   }
 }
 
-/// The newest Rayfin release on npm, and the one every app's updates go to.
+/// The newest Rayfin release on npm, and the one every app of the major version
+/// new projects start on updates to.
 /// Rayfin's packages ship in lockstep, so the CLI's are every package's.
 /// Cached like [`rayfin_versions`]' lookups; absent when npm is unreachable.
 #[tauri::command]
 pub async fn rayfin_latest() -> RayfinLatest {
   let published = releases(CLI_PACKAGE).await;
-  let (recommended, _) = update_targets(published.as_ref());
+  let (recommended, _) = update_targets(published.as_ref(), None);
   RayfinLatest { latest: published.and_then(|p| p.latest), recommended }
 }
 
@@ -278,14 +284,19 @@ mod tests {
   }
 
   #[test]
-  fn a_newer_release_says_whether_it_is_latest_and_runs_here() {
+  fn a_newer_release_says_whether_it_is_latest_runs_here_and_is_a_migration() {
     let npm = |latest: &str| Published { versions: vec!["0.0.1".into(), "999.0.0".into()], latest: Some(latest.into()) };
-    let (recommended, preview) = update_targets(Some(&npm("0.0.1")));
+    let (recommended, preview) = update_targets(Some(&npm("0.0.1")), Some("1.36.2"));
     assert_eq!(recommended, None, "the local backend runs neither");
-    assert_eq!(preview, Some(RayfinNewerRelease { version: "999.0.0".into(), is_latest: false, runs_locally: false }));
-    let (_, latest) = update_targets(Some(&npm("999.0.0")));
+    assert_eq!(
+      preview,
+      Some(RayfinNewerRelease { version: "999.0.0".into(), is_latest: false, runs_locally: false, major_upgrade: true })
+    );
+    let (_, latest) = update_targets(Some(&npm("999.0.0")), Some("1.36.2"));
     assert_eq!(latest.map(|newer| newer.is_latest), Some(true));
-    assert_eq!(update_targets(None), (None, None));
+    let (_, same_major) = update_targets(Some(&npm("999.0.0")), Some("999.0.0-beta.1"));
+    assert_eq!(same_major.map(|newer| newer.major_upgrade), Some(false));
+    assert_eq!(update_targets(None, None), (None, None));
   }
 
   #[test]

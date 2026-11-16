@@ -54,7 +54,7 @@ describe('RayfinVersionControl', () => {
 
   it('offers a newer release than the recommended one, saying why it needs care', () => {
     const onUpdate = vi.fn()
-    const preview = { version: '2.0.0', isLatest: false, runsLocally: true }
+    const preview = { version: '2.0.0', isLatest: false, runsLocally: true, majorUpgrade: false }
     const { rerender } = render(
       <RayfinVersionControl info={current} newer={preview} onUpdate={onUpdate} />
     )
