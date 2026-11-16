@@ -129,7 +129,7 @@ export async function findCopilotArchives(build) {
   return archives[0]
 }
 
-async function inventory(root) {
+export async function inventoryWindows(root = ROOT) {
   const release = path.join(root, 'src-tauri/target/release')
   const archives = await findCopilotArchives(path.join(release, 'build'))
   const app = path.join(release, 'rayfin-fabricator.exe')
@@ -175,7 +175,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     if (process.platform !== 'win32')
       throw new Error('Run this inventory on the Windows build agent.')
     if (!process.argv[2]) throw new Error('Provide the inventory JSON output path.')
-    const report = await inventory(ROOT)
+    const report = await inventoryWindows()
     await writeFile(process.argv[2], `${JSON.stringify(report, null, 2)}\n`)
     for (const file of report.files.filter((file) => file.machine)) {
       console.log(

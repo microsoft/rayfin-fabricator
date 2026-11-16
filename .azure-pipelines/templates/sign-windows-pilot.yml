@@ -1,0 +1,47 @@
+parameters:
+  - name: binary
+    type: string
+  - name: keyCode
+    type: string
+
+steps:
+  - task: EsrpCodeSigning@6
+    displayName: Sign ${{ parameters.binary }} (${{ parameters.keyCode }})
+    inputs:
+      ConnectedServiceName: Fabric-ESRP-Secure-AppDev
+      UseMSIAuthentication: true
+      AppRegistrationClientId: 8644665c-9c03-4b6b-a224-e5634f3b674d
+      AppRegistrationTenantId: 975f013f-7f24-47e8-a7d3-abc4752bf346
+      EsrpClientId: f351681f-63af-4d0a-80b2-80bc2ec5cbb2
+      AuthAKVName: Fabric-ES-ESRP-PME
+      AuthSignCertName: Fabric-ESRP-Signing-PME
+      FolderPath: $(Agent.TempDirectory)/fabricator-signing
+      Pattern: ${{ parameters.binary }}
+      signConfigType: inlineSignParams
+      inlineOperation: |
+        [
+          {
+            "KeyCode": "${{ parameters.keyCode }}",
+            "OperationCode": "SigntoolSign",
+            "Parameters": {
+              "OpusName": "Rayfin Fabricator",
+              "OpusInfo": "https://github.com/microsoft/rayfin-fabricator",
+              "FileDigest": "/fd SHA256",
+              "PageHash": "/NPH",
+              "TimeStamp": "/tr http://rfc3161.gtm.corp.microsoft.com/TSS/HttpTspServer /td SHA256"
+            },
+            "ToolName": "sign",
+            "ToolVersion": "1.0"
+          },
+          {
+            "KeyCode": "${{ parameters.keyCode }}",
+            "OperationCode": "SigntoolVerify",
+            "Parameters": {},
+            "ToolName": "sign",
+            "ToolVersion": "1.0"
+          }
+        ]
+      SessionTimeout: 90
+      MaxConcurrency: 2
+      MaxRetryAttempts: 5
+      PendingAnalysisWaitTimeoutMinutes: 5

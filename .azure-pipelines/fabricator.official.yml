@@ -3,6 +3,12 @@ name: fabricator-validation-$(Date:yyyyMMdd).$(Rev:r)
 trigger: none
 pr: none
 
+parameters:
+  - name: SignWindowsPilot
+    displayName: Sign Windows pilot copies (no distribution)
+    type: boolean
+    default: false
+
 variables:
   NodeVersion: '>=24.15.0 <25.0.0'
   NpmRegistry: https://pkgs.dev.azure.com/powerbi/AppDev/_packaging/rayfin-official/npm/registry/
@@ -141,7 +147,7 @@ extends:
               - script: node scripts/rayfin-local/fetch.mjs --target x86_64-pc-windows-msvc
                 displayName: Fetch and verify pinned sidecar
 
-              - script: node --test scripts/check-release-version.test.mjs scripts/wry/download-crate.test.mjs scripts/inventory-windows-release.test.mjs
+              - script: node --test scripts/check-release-version.test.mjs scripts/wry/download-crate.test.mjs scripts/inventory-windows-release.test.mjs scripts/verify-windows-signing.test.mjs
                 displayName: Test release validation tooling
 
               - script: npm run typecheck
@@ -173,3 +179,39 @@ extends:
                   node scripts/inventory-windows-release.mjs "$(Build.ArtifactStagingDirectory)/validation/windows-binaries.json"
                   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
                 displayName: Inventory Windows payload hashes and signatures
+
+              - ${{ if eq(parameters.SignWindowsPilot, true) }}:
+                  - pwsh: |
+                      $ErrorActionPreference = 'Stop'
+                      $folder = "$(Agent.TempDirectory)/fabricator-signing"
+                      if (Test-Path $folder) { throw "Signing pilot directory already exists: $folder" }
+                      New-Item -ItemType Directory -Path $folder | Out-Null
+                      $inputs = @(
+                        "src-tauri/target/release/rayfin-fabricator.exe",
+                        "src-tauri/binaries/rayfin-local-x86_64-pc-windows-msvc.exe"
+                      )
+                      foreach ($file in $inputs) {
+                        $signature = Get-AuthenticodeSignature -LiteralPath $file
+                        if ($signature.Status -ne 'NotSigned') {
+                          throw "Pilot expects an unsigned input, not $($signature.Status): $file"
+                        }
+                      }
+                      Copy-Item -LiteralPath $inputs[0] -Destination "$folder/rayfin-fabricator.exe"
+                      Copy-Item -LiteralPath $inputs[1] -Destination "$folder/rayfin-local.exe"
+                    displayName: Stage exact unsigned pilot inputs outside published artifacts
+
+                  - template: templates/sign-windows-pilot.yml
+                    parameters:
+                      binary: rayfin-fabricator.exe
+                      keyCode: CP-230012
+
+                  - template: templates/sign-windows-pilot.yml
+                    parameters:
+                      binary: rayfin-local.exe
+                      keyCode: CP-231522
+
+                  - pwsh: |
+                      $ErrorActionPreference = 'Stop'
+                      node scripts/verify-windows-signing.mjs "$(Agent.TempDirectory)/fabricator-signing" "$(Build.ArtifactStagingDirectory)/validation/windows-binaries.json" "$(Build.ArtifactStagingDirectory)/validation/windows-signing-pilot.json"
+                      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                    displayName: Verify pilot signatures and preserve all original payloads

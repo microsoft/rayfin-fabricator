@@ -78,6 +78,16 @@ not an approved signing-policy determination. It does **not** sign, publish
 executables, create a GitHub release, access the ESRP connection, or generate updater assets.
 Official-template security checks are not disabled.
 
+The optional `SignWindowsPilot` parameter defaults to `false`. An authorized manual run
+can set it to `true` to sign temporary copies of Fabricator (`CP-230012`) and the received
+OSS sidecar (`CP-231522`) with `EsrpCodeSigning@6`, reusing the approved AppDev connection
+and Key Vault request-signing certificate. The copies must initially be unsigned.
+Verification requires valid timestamped Microsoft signatures and rechecks that the original
+build outputs and all embedded SDK payloads are unchanged. Only `windows-signing-pilot.json`
+is published; signed executables remain outside the artifact directory on the agent.
+This does not package an installer, generate updater signatures, or clear release-compliance
+requirements. The other approved keycodes are not exercised by this Windows-only pilot.
+
 Register the pipeline against this YAML in the GitHub repository and authorize the GitHub
 connection, template repository, and Windows pool only for that pipeline. ESRP resource
 authorization and a protected release environment are separate prerequisites for the later
