@@ -8,6 +8,10 @@ parameters:
     displayName: Sign Windows pilot copies (no distribution)
     type: boolean
     default: false
+  - name: testReleasePr
+    displayName: Opted-in PR number for a signed Windows alpha (0 disables publishing)
+    type: number
+    default: 0
 
 variables:
   NodeVersion: '>=24.15.0 <25.0.0'
@@ -49,11 +53,15 @@ extends:
             timeoutInMinutes: 120
             templateContext:
               outputs:
-                # Executables stay on the agent until the signing phases are implemented.
                 - output: pipelineArtifact
                   displayName: Publish source and version metadata
                   targetPath: $(Build.ArtifactStagingDirectory)/validation
                   artifactName: windows-validation
+                - ${{ if gt(parameters.testReleasePr, 0) }}:
+                    - output: pipelineArtifact
+                      displayName: Publish verified Windows alpha assets
+                      targetPath: $(Build.ArtifactStagingDirectory)/windows-alpha
+                      artifactName: windows-alpha
             steps:
               - checkout: self
                 clean: true
@@ -73,6 +81,17 @@ extends:
                   node scripts/check-release-version.mjs > "$(Build.ArtifactStagingDirectory)/validation/source.json"
                   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
                 displayName: Verify source commit and release versions
+
+              - ${{ if gt(parameters.testReleasePr, 0) }}:
+                  - pwsh: |
+                      $ErrorActionPreference = 'Stop'
+                      node scripts/pr-alpha.mjs prepare "$(Build.SourcesDirectory)"
+                      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                      node scripts/check-release-version.mjs > "$(Build.ArtifactStagingDirectory)/validation/source.json"
+                      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                    displayName: Validate author or reviewer opt-in and prepare exact-build alpha version
+                    env:
+                      TEST_RELEASE_PR: ${{ parameters.testReleasePr }}
 
               - pwsh: |
                   $ErrorActionPreference = 'Stop'
@@ -147,7 +166,7 @@ extends:
               - script: node scripts/rayfin-local/fetch.mjs --target x86_64-pc-windows-msvc
                 displayName: Fetch and verify pinned sidecar
 
-              - script: node --test scripts/check-release-version.test.mjs scripts/wry/download-crate.test.mjs scripts/inventory-windows-release.test.mjs scripts/verify-windows-signing.test.mjs
+              - script: node --test scripts/check-release-version.test.mjs scripts/wry/download-crate.test.mjs scripts/inventory-windows-release.test.mjs scripts/verify-windows-signing.test.mjs scripts/pr-alpha.test.mjs
                 displayName: Test release validation tooling
 
               - script: npm run typecheck
@@ -180,7 +199,7 @@ extends:
                   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
                 displayName: Inventory Windows payload hashes and signatures
 
-              - ${{ if eq(parameters.SignWindowsPilot, true) }}:
+              - ${{ if or(eq(parameters.SignWindowsPilot, true), gt(parameters.testReleasePr, 0)) }}:
                   - pwsh: |
                       $ErrorActionPreference = 'Stop'
                       $folder = "$(Agent.TempDirectory)/fabricator-signing"
@@ -215,3 +234,77 @@ extends:
                       node scripts/verify-windows-signing.mjs "$(Agent.TempDirectory)/fabricator-signing" "$(Build.ArtifactStagingDirectory)/validation/windows-binaries.json" "$(Build.ArtifactStagingDirectory)/validation/windows-signing-pilot.json"
                       if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
                     displayName: Verify pilot signatures and preserve all original payloads
+
+              - ${{ if gt(parameters.testReleasePr, 0) }}:
+                  - task: PowerShell@2
+                    name: packageAlpha
+                    displayName: Package and round-trip verify signed Windows portable alpha
+                    inputs:
+                      pwsh: true
+                      filePath: scripts/package-pr-alpha.ps1
+                      arguments: >-
+                        -SigningFolder "$(Agent.TempDirectory)/fabricator-signing"
+                        -ValidationFolder "$(Build.ArtifactStagingDirectory)/validation"
+                        -OutputFolder "$(Build.ArtifactStagingDirectory)/windows-alpha"
+                    env:
+                      TEST_RELEASE_PR: ${{ parameters.testReleasePr }}
+
+      - ${{ if gt(parameters.testReleasePr, 0) }}:
+          - stage: PublishAlpha
+            displayName: Publish explicitly opted-in PR alpha
+            dependsOn: [ValidateWindows, SDLSources]
+            condition: succeeded()
+            variables:
+              ReleaseTag: $[stageDependencies.ValidateWindows.BuildWindows.outputs['packageAlpha.ReleaseTag']]
+            jobs:
+              - job: PublishGitHubAlpha
+                displayName: Publish verified assets as a non-latest prerelease
+                templateContext:
+                  type: releaseJob
+                  isProduction: true
+                  inputs:
+                    - input: pipelineArtifact
+                      artifactName: windows-alpha
+                      targetPath: $(Pipeline.Workspace)/windows-alpha
+                steps:
+                  - checkout: none
+                  - task: UseNode@1
+                    inputs:
+                      version: $(NodeVersion)
+                  - pwsh: |
+                      $ErrorActionPreference = 'Stop'
+                      node "$(Pipeline.Workspace)/windows-alpha/_release/pr-alpha.mjs" verify "$(Pipeline.Workspace)/windows-alpha"
+                      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                      $metadata = Get-Content -Raw "$(Pipeline.Workspace)/windows-alpha/windows-alpha.json" | ConvertFrom-Json
+                      if ($env:RELEASE_TAG -cne "v$($metadata.version)") { throw 'Release tag does not match verified alpha.' }
+                    displayName: Recheck live PR authorization and exact artifact hashes before publication
+                    env:
+                      TEST_RELEASE_PR: ${{ parameters.testReleasePr }}
+                      RELEASE_TAG: $(ReleaseTag)
+                  - task: GitHubRelease@1
+                    displayName: Create signed Windows review alpha
+                    inputs:
+                      gitHubConnection: github.com_christopheranderson
+                      repositoryName: microsoft/rayfin-fabricator
+                      action: create
+                      target: $(Build.SourceVersion)
+                      tagSource: userSpecifiedTag
+                      tag: $(ReleaseTag)
+                      releaseNotesSource: inline
+                      releaseNotesInline: |
+                        Windows x64 portable review alpha for PR #${{ parameters.testReleasePr }}.
+                        Official build: https://dev.azure.com/powerbi/AppDev/_build/results?buildId=$(Build.BuildId)
+                        Source: $(Build.SourceVersion).
+                        Extract the entire ZIP and run rayfin-fabricator.exe; keep the sidecar and resources beside it.
+                        Requires WebView2 Runtime, Node.js/npm and git. See SMOKE-TEST.txt in the ZIP.
+                        Uses the normal Fabricator user profile; back up important data before testing.
+                        Microsoft Authenticode-signed app and sidecar. Manual updates only.
+                        Not an installer, stable release, or completed compliance clearance. No macOS or updater assets.
+                      assets: |
+                        $(Pipeline.Workspace)/windows-alpha/*.zip
+                        $(Pipeline.Workspace)/windows-alpha/windows-alpha.json
+                        $(Pipeline.Workspace)/windows-alpha/SHA256SUMS.txt
+                      isDraft: false
+                      isPreRelease: true
+                      makeLatest: 'false'
+                      addChangeLog: false

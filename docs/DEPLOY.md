@@ -96,6 +96,47 @@ authorization and a protected release environment are separate prerequisites for
 signing/publishing stages. Keep those credentials in ADO/Key Vault, not in this repository.
 macOS remains blocked until an approved Apple Silicon pool is available.
 
+### Opt-in PR review alphas
+
+The PR author or someone who has submitted a review can apply the `release-test`
+label to an open, same-repository PR targeting `main`. An authorized ADO operator
+then manually queues [pipeline 20869](https://dev.azure.com/powerbi/AppDev/_build?definitionId=20869)
+from that PR's exact current head branch/commit with `testReleasePr=<PR number>`.
+The default `0` publishes nothing. Labels and PR events do not automatically queue
+a privileged run. Applying labels requires the usual GitHub repository permissions.
+
+The pipeline checks the label's latest applying actor, open PR, repository, target
+branch and current head both before building and immediately before publishing.
+Removing the label, closing the PR or moving its head revokes publication for that
+run. API failures block release. Same-repo code and pipeline YAML must be trusted
+and reviewed before queueing: this is **not** a safe execution boundary for
+arbitrary PR code. Build scripts execute in a signing-capable job, and the
+no-checkout publication job uses a helper from that run's artifact. Restrict ADO
+queue and service-connection permissions accordingly; forks are not supported.
+
+Only the agent checkout's application manifests/lockfiles get the version
+`<base>-alpha.<Build.BuildId>`. No version change is committed. Both binaries are
+ESRP-signed and verified, then packaged into a Windows x64 **portable ZIP** with
+the sidecar, required icon resources, license and `SMOKE-TEST.txt`. Archive
+extraction must preserve every packaged file and both valid timestamped signatures.
+The release stage waits for the build and 1ES source-security stage, rechecks
+source/build/PR metadata and the ZIP hash, then creates a GitHub prerelease tagged
+`v<base>-alpha.<Build.BuildId>`, with `makeLatest=false`. Existing releases are never
+overwritten. Its only public assets are the ZIP, `SHA256SUMS.txt` and
+`windows-alpha.json`; no private signing credentials or build logs are uploaded.
+
+Extract the whole ZIP and run `rayfin-fabricator.exe` beside `rayfin-local.exe`
+and `resources/`. Windows x64, WebView2 Runtime, Node.js/npm and git are required.
+It uses the normal Fabricator user profile, so back up important data first.
+Smoke-test launch, sign-in, a disposable project's local backend and preview,
+and closing/reopening the app; record results on the PR. A release-producing PR
+should link at least one alpha for manual review before merge.
+
+Alpha versions never contact the stable updater endpoint. They publish no
+`latest.json`, installer, updater signatures or macOS assets. This enables manual
+review without claiming that the installer, stable release, or all compliance
+work is finished. Stable build/update behavior is unchanged.
+
 ### Existing GitHub Actions release
 
 Push a version tag to trigger the GitHub Actions release workflow that builds the Windows installer (Tauri/NSIS) and publishes it to a GitHub Release:
