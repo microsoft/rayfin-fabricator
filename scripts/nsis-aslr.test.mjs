@@ -71,12 +71,17 @@ test('patches only the pinned GNU relocation flags and section ordering, refusin
     "conf.CheckLinkFlag('-Wl,--disable-reloc-section') # stock\nstub_uenv = stub_env.Clone()\n"
   const linker =
     '  .ndata BLOCK(__section_alignment__) :\n  {\n    *(.ndata)\n  }\n  .reloc BLOCK(__section_alignment__) :\n  {\n    *(.reloc)\n  }\n'
-  const patched = patchNsisSources(gnu, linker)
+  const sconstruct = "defenv.DistributeStubs('Source/exehead/uninst.ico',names='uninst')\n"
+  const patched = patchNsisSources(gnu, linker, sconstruct)
   assert.ok(patched.gnu.includes('--enable-reloc-section'))
   assert.ok(!patched.gnu.includes('--disable-reloc-section'))
   assert.ok(patched.linker.indexOf('.reloc BLOCK') < patched.linker.indexOf('.ndata BLOCK'))
-  assert.throws(() => patchNsisSources(patched.gnu, patched.linker))
-  assert.throws(() => patchNsisSources(gnu, linker.replace('.ndata BLOCK', '.other BLOCK')))
+  assert.ok(patched.sconstruct.includes("if COMMAND_LINE_TARGETS == ['stubs']:\n\tReturn()"))
+  assert.throws(() => patchNsisSources(patched.gnu, patched.linker, patched.sconstruct))
+  assert.throws(() =>
+    patchNsisSources(gnu, linker.replace('.ndata BLOCK', '.other BLOCK'), sconstruct)
+  )
+  assert.throws(() => patchNsisSources(gnu, linker, 'unexpected entry point'))
 })
 
 test('binds packaging to the independently rebuilt stubs and unchanged toolset', async (t) => {

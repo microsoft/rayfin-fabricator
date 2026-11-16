@@ -162,6 +162,8 @@ only in the dedicated build directory. It does not use or alter the agent's
 Python installation, run an installer, install packages or contact PyPI.
 The source changes enable actual relocations and place `.reloc` before the
 `.ndata` and `.rsrc` sections that NSIS edits; they do not merely set an ASLR flag.
+The stubs-only target stops before configuring unused compiler/docs targets;
+the original pinned `makensis.exe` is retained, not rebuilt or replaced.
 Only those two stubs are replaced in a build-local copy of the pinned toolset.
 Tauri's shared cache and installer hooks/UX are unchanged.
 

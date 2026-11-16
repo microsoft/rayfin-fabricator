@@ -59,9 +59,10 @@ foreach ($build in @('first', 'second')) {
     if ($LASTEXITCODE -ne 0) { throw 'Cannot apply the exact NSIS ASLR source changes.' }
     Push-Location $source
     try {
-        & $python "$scons/scripts/scons.py" -j2 TOOLSET=mingw TARGET_ARCH=x86 `
+        & $python "$scons/scripts/scons.py" -j2 'TOOLSET=mingw,gcc,g++' TARGET_ARCH=x86 `
             "PATH=$env:PATH" "CC=$(Join-Path $compiler 'mingw32/bin/gcc.exe')" `
             "CXX=$(Join-Path $compiler 'mingw32/bin/g++.exe')" `
+            "APPEND_CCFLAGS=-ffile-prefix-map=$source=." `
             UNICODE=yes VERSION=3.13 VER_MAJOR=3 VER_MINOR=13 VER_REVISION=0 VER_BUILD=0 `
             "NSIS_MAX_STRLEN=$($lock.maxStringLength)" `
             SKIPSTUBS=bzip2,zlib SKIPUTILS=all SKIPPLUGINS=all SKIPMISC=all SKIPDOC=all stubs

@@ -84,7 +84,7 @@ export function verifyNsisRelocations(image) {
   }
 }
 
-export function patchNsisSources(gnu, linker) {
+export function patchNsisSources(gnu, linker, sconstruct) {
   const disable = "conf.CheckLinkFlag('-Wl,--disable-reloc-section')"
   const clone = 'stub_uenv = stub_env.Clone()'
   assert.equal(gnu.split(disable).length, 2, 'Pinned NSIS GNU configuration changed.')
@@ -101,7 +101,13 @@ export function patchNsisSources(gnu, linker) {
   linker = linker.replace(relocation, '')
   assert.equal(linker.split('  .ndata BLOCK').length, 2, 'Pinned NSIS data section changed.')
   linker = linker.replace('  .ndata BLOCK', `${match[0]}  .ndata BLOCK`)
-  return { gnu, linker }
+  const stubEnd = "defenv.DistributeStubs('Source/exehead/uninst.ico',names='uninst')"
+  assert.equal(sconstruct.split(stubEnd).length, 2, 'Pinned NSIS stubs-only entry point changed.')
+  sconstruct = sconstruct.replace(
+    stubEnd,
+    `${stubEnd}\n\nif COMMAND_LINE_TARGETS == ['stubs']:\n\tReturn()`
+  )
+  return { gnu, linker, sconstruct }
 }
 
 export async function nsisToolFiles(root, prefix = '') {
@@ -156,12 +162,15 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     if (command === 'patch') {
       const gnuFile = path.join(root, 'SCons/Config/gnu')
       const linkerFile = path.join(root, 'SCons/Config/linker_script')
+      const buildFile = path.join(root, 'SConstruct')
       const result = patchNsisSources(
         await readFile(gnuFile, 'utf8'),
-        await readFile(linkerFile, 'utf8')
+        await readFile(linkerFile, 'utf8'),
+        await readFile(buildFile, 'utf8')
       )
       await writeFile(gnuFile, result.gnu)
       await writeFile(linkerFile, result.linker)
+      await writeFile(buildFile, result.sconstruct)
     } else if (command === 'record') {
       await recordNsisTools(root, evidence, original)
     } else if (command === 'verify') {
