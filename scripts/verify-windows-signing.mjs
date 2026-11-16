@@ -11,6 +11,25 @@ const INPUTS = {
   'rayfin-local.exe': { path: 'sidecar/rayfin-local.exe', keyCode: 'CP-231522' }
 }
 
+export async function signingPilotFiles(folder) {
+  const entries = await readdir(folder, { withFileTypes: true })
+  for (const entry of entries) {
+    assert.ok(entry.isFile(), `Non-regular staged file: ${entry.name}.`)
+    assert.ok(
+      Object.hasOwn(INPUTS, entry.name) ||
+        /^CodeSignSummary-[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\.md$/i.test(entry.name),
+      `Unexpected staged file: ${entry.name}.`
+    )
+  }
+  const binaries = entries.filter((entry) => Object.hasOwn(INPUTS, entry.name))
+  assert.deepEqual(
+    binaries.map((entry) => entry.name).sort(),
+    Object.keys(INPUTS).sort(),
+    'Missing staged pilot binaries.'
+  )
+  return binaries.map(({ name }) => ({ name, file: path.join(folder, name) }))
+}
+
 export function verifySigningPilot(before, after, signed) {
   assert.deepEqual(after, before, 'Original build payloads or signatures changed during signing.')
   assert.equal(signed.length, 2, 'Expected exactly two signed pilot binaries.')
@@ -45,19 +64,10 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     if (!folder || !baseline || !output) {
       throw new Error('Provide the signing directory, baseline inventory, and output report.')
     }
-    assert.deepEqual(
-      (await readdir(folder)).sort(),
-      Object.keys(INPUTS).sort(),
-      'Unexpected staged files.'
-    )
+    const files = await signingPilotFiles(folder)
     const before = JSON.parse(await readFile(baseline, 'utf8'))
     const after = await inventoryWindows()
-    const signed = await inventoryFiles(
-      Object.keys(INPUTS).map((name) => ({
-        name,
-        file: path.join(folder, name)
-      }))
-    )
+    const signed = await inventoryFiles(files)
     const report = verifySigningPilot(before, after, signed)
     await writeFile(output, `${JSON.stringify(report, null, 2)}\n`)
     console.log(

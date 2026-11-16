@@ -83,7 +83,9 @@ can set it to `true` to sign temporary copies of Fabricator (`CP-230012`) and th
 OSS sidecar (`CP-231522`) with `EsrpCodeSigning@6`, reusing the approved AppDev connection
 and Key Vault request-signing certificate. The copies must initially be unsigned.
 Verification requires valid timestamped Microsoft signatures and rechecks that the original
-build outputs and all embedded SDK payloads are unchanged. Only `windows-signing-pilot.json`
+build outputs and all embedded SDK payloads are unchanged. ESRP's generated
+`CodeSignSummary-<guid>.md` files are permitted metadata, not signing inputs.
+Only `windows-signing-pilot.json`
 is published; signed executables remain outside the artifact directory on the agent.
 This does not package an installer, generate updater signatures, or clear release-compliance
 requirements. The other approved keycodes are not exercised by this Windows-only pilot.
