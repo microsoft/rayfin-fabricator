@@ -13,6 +13,8 @@ New-Item -ItemType Directory -Path $WorkFolder | Out-Null
 $python = (Get-Command python).Source
 $version = & $python -c 'import platform; print(platform.python_version())'
 if ($LASTEXITCODE -ne 0 -or $version -cne $lock.pythonVersion) { throw 'Unexpected Python version.' }
+$bits = & $python -c 'import struct; print(8 * struct.calcsize("P"))'
+if ($LASTEXITCODE -ne 0 -or [int]$bits -ne $lock.pythonBits) { throw 'Unexpected Python architecture.' }
 
 function Download-Input([string]$Name, [string]$Extension) {
     $item = $lock.$Name
@@ -94,6 +96,7 @@ $evidence = Join-Path $EvidenceFolder 'nsis-stub.json'
     stubs = $hashes
     compilerVersion = (& gcc --version | Select-Object -First 1)
     pythonVersion = $version
+    pythonBits = [int]$bits
 } | ConvertTo-Json -Depth 10 | Set-Content -Encoding utf8 $evidence
 node scripts/nsis-aslr.mjs record $ToolsFolder $evidence $original
 if ($LASTEXITCODE -ne 0) { throw 'Rebuilt NSIS stubs or toolset failed verification.' }

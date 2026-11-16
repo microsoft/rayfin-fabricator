@@ -1,6 +1,7 @@
 {
   "version": "3.13",
-  "pythonVersion": "3.11.9",
+  "pythonVersion": "3.11.10",
+  "pythonBits": 32,
   "sourceDateEpoch": 1760000000,
   "maxStringLength": 1024,
   "nsisSource": {
