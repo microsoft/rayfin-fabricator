@@ -44,7 +44,8 @@ resources beside it. Requires Windows x64, Microsoft Edge WebView2 Runtime, and
 Node.js/npm, git and the usual Rayfin development prerequisites.
 This is a portable review build, not an installer or stable release.
 It uses the normal Fabricator user profile; back up important data before testing.
-Automatic updates are disabled for alpha builds. No updater assets are published.
+Automatic updates are disabled for alpha builds. A signed installer, updater signature
+and release-specific manifest are separate release assets for validation, not stable rollout.
 Smoke test: launch, sign in, open/create a disposable app, start its local backend,
 preview it, close and reopen Fabricator, and record results on the PR.
 "@ | Set-Content -Encoding utf8 (Join-Path $package 'SMOKE-TEST.txt')
@@ -69,7 +70,19 @@ foreach ($file in $signing.files) {
     }
 }
 $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
-"$hash  $archiveName" | Set-Content -Encoding utf8 (Join-Path $OutputFolder 'SHA256SUMS.txt')
+$installer = Get-Content -Raw (Join-Path $ValidationFolder 'windows-installer.json') | ConvertFrom-Json
+if ($installer.installVerification.uninstall -ne $true) {
+    throw 'Installer has not passed the install/update-mode/uninstall checks.'
+}
+$installerFile = Join-Path 'src-tauri/target/release/bundle/nsis' $installer.installer.path
+if ((Get-FileHash -Algorithm SHA256 $installerFile).Hash.ToLowerInvariant() -cne $installer.installer.sha256) {
+    throw 'Verified installer changed before artifact publication.'
+}
+Copy-Item -LiteralPath $installerFile -Destination $OutputFolder
+@(
+    "$hash  $archiveName"
+    "$($installer.installer.sha256)  $($installer.installer.path)"
+) | Set-Content -Encoding utf8 (Join-Path $OutputFolder 'SHA256SUMS.txt')
 [ordered]@{
     sourceCommit = $env:BUILD_SOURCEVERSION
     buildId = $env:BUILD_BUILDID
@@ -78,7 +91,10 @@ $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
     archive = $archiveName
     archiveSha256 = $hash
     signing = $signing
+    installer = $installer
 } | ConvertTo-Json -Depth 10 | Set-Content -Encoding utf8 (Join-Path $OutputFolder 'windows-alpha.json')
 $helpers = New-Item -ItemType Directory -Path (Join-Path $OutputFolder '_release')
 Copy-Item -LiteralPath 'scripts/pr-alpha.mjs' -Destination $helpers
+Copy-Item -LiteralPath 'scripts/sign-windows-updater.mjs', 'scripts/bootstrap-updater-key.mjs',
+    'src-tauri/updater.pub' -Destination $helpers
 Write-Host "##vso[task.setvariable variable=ReleaseTag;isOutput=true]v$($source.version)"

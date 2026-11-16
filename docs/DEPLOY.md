@@ -122,8 +122,9 @@ extraction must preserve every packaged file and both valid timestamped signatur
 The release stage waits for the build and 1ES source-security stage, rechecks
 source/build/PR metadata and the ZIP hash, then creates a GitHub prerelease tagged
 `v<base>-alpha.<Build.BuildId>`, with `makeLatest=false`. Existing releases are never
-overwritten. Its only public assets are the ZIP, `SHA256SUMS.txt` and
-`windows-alpha.json`; no private signing credentials or build logs are uploaded.
+overwritten. Public assets include the ZIP, `SHA256SUMS.txt`,
+`windows-alpha.json`, an NSIS `*-setup.exe`, its updater `.sig`, and a
+Windows-only `latest.json`; no private signing credentials or build logs are uploaded.
 The existing GitHub Actions installer workflow excludes alpha tags, including
 manual dispatch on those tags, so it cannot append unsigned installers or updater
 assets to an ADO alpha release.
@@ -135,10 +136,30 @@ Smoke-test launch, sign-in, a disposable project's local backend and preview,
 and closing/reopening the app; record results on the PR. A release-producing PR
 should link at least one alpha for manual review before merge.
 
-Alpha versions never contact the stable updater endpoint. They publish no
-`latest.json`, installer, updater signatures or macOS assets. This enables manual
-review without claiming that the installer, stable release, or all compliance
-work is finished. Stable build/update behavior is unchanged.
+Alpha versions never contact the stable updater endpoint. Their release-specific
+`latest.json` is validation evidence, not a stable updater rollout. No macOS
+assets are published; macOS work is deferred pending the Microsoft sidecar.
+Installing this Microsoft-channel build is a manual migration from upstream
+builds, which trust a different updater key and repository.
+
+Installer packaging uses `tauri bundle --no-binary-patching` after signing the
+app and sidecar, so bundling cannot invalidate their signatures. A bounded
+agent-local callback bridge pauses Tauri for each required signature while an
+`EsrpCodeSigning@6` task signs a staged copy. Only a verified timestamped Microsoft
+signature releases the callback. NSIS DLLs use the component key; the generated
+uninstaller and final installer use the application key. Tool-cache originals
+are not modified. The Windows job requires actual silent installation,
+update-mode reinstallation without launching the GUI, payload/hash/signature
+verification, and uninstallation. These checks do not replace manual GUI smoke
+testing or an actual two-version in-app update.
+
+Only the separate no-checkout release job receives the updater secrets. It
+signs the final Authenticode-signed installer with pinned Tauri tooling, verifies
+the signature against the committed Microsoft public key, and binds its trusted
+comment to the exact alpha version. The app requires signed versions. PR opt-in,
+artifact hashes and updater assets are checked again immediately before create-only
+publication. The release helper still comes from trusted/reviewed PR artifacts;
+this is not isolation against malicious producer code.
 
 ### Existing GitHub Actions release
 
@@ -196,7 +217,8 @@ key/password and generated public key. Only then does it retain
 `src-tauri/updater.pub` and a nonsecret `src-tauri/updater.pub.vault.json` receipt
 containing versioned secret IDs and the public-key hash. Successful completion
 removes local temporary secret files. The public key is safe to commit; this does
-not automatically change the app's embedded public key or configure pipeline access.
+not automatically configure pipeline access. The Microsoft configuration embeds
+the resulting public key, also committed as `src-tauri/updater.pub`.
 
 Existing or soft-deleted names and existing public-key outputs block creation.
 There is deliberately no overwrite, rotation, deletion or purge switch. Key Vault
@@ -214,8 +236,17 @@ an identity able to read both can sign updates. Restrict the eventual pipeline
 identity to the required secrets, gate signing, and never expose them to arbitrary
 PR build code.
 
+Direct pipeline access to Key Vault is deferred. For now, definition 20869 uses
+two saved **secret** ADO variables, `fabricator-updater-private-key` and
+`fabricator-updater-password`. They map to Tauri environment variables only on the
+updater-signing task, never into PowerShell source, OS arguments, artifacts or
+logs. A child worker receives native API arguments over stdin; raw native
+diagnostics are captured and suppressed on failure. Do not copy secret values
+into YAML. The vault and ESRP connection use different tenants, so future direct
+vault retrieval needs a separate appropriate service connection and read scope.
+
 The following describes the **existing upstream GitHub Actions channel**, not
-the new Key Vault-backed ADO configuration, which still needs to be wired:
+the Microsoft ADO configuration:
 
 Update packages are verified against the public key baked into `src-tauri/tauri.conf.json` (`plugins.updater.pubkey`). The upstream workflow expects these two GitHub Actions secrets; their presence is not established by the public configuration, and they are not configured in the Microsoft repository:
 

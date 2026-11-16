@@ -3,10 +3,17 @@ parameters:
     type: string
   - name: keyCode
     type: string
+  - name: folder
+    type: string
+    default: $(Agent.TempDirectory)/fabricator-signing
+  - name: condition
+    type: string
+    default: succeeded()
 
 steps:
   - task: EsrpCodeSigning@6
     displayName: Sign ${{ parameters.binary }} (${{ parameters.keyCode }})
+    condition: ${{ parameters.condition }}
     inputs:
       ConnectedServiceName: Fabric-ESRP-Secure-AppDev
       UseMSIAuthentication: true
@@ -15,7 +22,7 @@ steps:
       EsrpClientId: f351681f-63af-4d0a-80b2-80bc2ec5cbb2
       AuthAKVName: Fabric-ES-ESRP-PME
       AuthSignCertName: Fabric-ESRP-Signing-PME
-      FolderPath: $(Agent.TempDirectory)/fabricator-signing
+      FolderPath: ${{ parameters.folder }}
       Pattern: ${{ parameters.binary }}
       signConfigType: inlineSignParams
       inlineOperation: |

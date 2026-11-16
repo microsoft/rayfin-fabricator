@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 import { checkReleaseVersion } from './check-release-version.mjs'
 import {
   alphaVersion,
@@ -12,6 +14,7 @@ import {
   validateOptIn,
   verifyRelease
 } from './pr-alpha.mjs'
+import { signWindowsUpdater, verifyWindowsUpdater } from './sign-windows-updater.mjs'
 
 const commit = 'a'.repeat(40)
 function authorization() {
@@ -112,6 +115,9 @@ test('publication refuses tampered archives, wrong build/PR and unsigned metadat
   const folder = await mkdtemp(path.join(os.tmpdir(), 'fabricator-alpha-release-'))
   t.after(() => rm(folder, { recursive: true, force: true }))
   const archive = 'rayfin-fabricator-1.55.0-alpha.123-windows-x64.zip'
+  const installerName = 'Rayfin Fabricator_1.55.0-alpha.123_x64-setup.exe'
+  await writeFile(path.join(folder, installerName), 'test installer')
+  const installerHash = await sha256(path.join(folder, installerName))
   await writeFile(path.join(folder, archive), 'test archive')
   const hash = await sha256(path.join(folder, archive))
   const metadata = {
@@ -121,6 +127,19 @@ test('publication refuses tampered archives, wrong build/PR and unsigned metadat
     version: '1.55.0-alpha.123',
     archive,
     archiveSha256: hash,
+    installer: {
+      signedInputsUnchanged: true,
+      installVerification: { signedUninstaller: true, uninstall: true },
+      installer: {
+        path: installerName,
+        sha256: installerHash,
+        authenticode: {
+          status: 'Valid',
+          timestampSubject: 'CN=Microsoft Time-Stamp Service',
+          signerSubject: 'O=Microsoft Corporation, C=US'
+        }
+      }
+    },
     signing: {
       sourceCommit: commit,
       originalPayloadsUnchanged: true,
@@ -138,7 +157,10 @@ test('publication refuses tampered archives, wrong build/PR and unsigned metadat
       }))
     }
   }
-  await writeFile(path.join(folder, 'SHA256SUMS.txt'), `${hash}  ${archive}\n`)
+  await writeFile(
+    path.join(folder, 'SHA256SUMS.txt'),
+    `${hash}  ${archive}\n${installerHash}  ${installerName}\n`
+  )
   const options = { commit, buildId: '123', pr: 42 }
   const save = (data) => writeFile(path.join(folder, 'windows-alpha.json'), JSON.stringify(data))
   await save(metadata)
@@ -149,7 +171,9 @@ test('publication refuses tampered archives, wrong build/PR and unsigned metadat
     (data) => (data.pullRequest = 43),
     (data) => (data.signing.sourceCommit = 'b'.repeat(40)),
     (data) => (data.signing.files[0].authenticode.status = 'NotSigned'),
-    (data) => (data.archiveSha256 = 'tampered')
+    (data) => (data.archiveSha256 = 'tampered'),
+    (data) => (data.installer.installer.sha256 = 'tampered'),
+    (data) => (data.installer.installVerification.signedUninstaller = false)
   ]) {
     const data = structuredClone(metadata)
     mutate(data)
@@ -159,4 +183,61 @@ test('publication refuses tampered archives, wrong build/PR and unsigned metadat
   await save(metadata)
   await writeFile(path.join(folder, archive), 'modified after signing')
   await assert.rejects(verifyRelease(folder, options))
+
+  await writeFile(path.join(folder, archive), 'test archive')
+  const helpers = path.join(folder, '_release')
+  await mkdir(helpers)
+  const privateKeyFile = path.join(folder, 'test.key')
+  const password = 'ephemeral test password'
+  execFileSync(
+    process.execPath,
+    [fileURLToPath(new URL('./bootstrap-updater-key.mjs', import.meta.url)), '--tauri-worker'],
+    {
+      input: JSON.stringify({ command: 'generate', privateKeyFile, password }),
+      stdio: ['pipe', 'pipe', 'pipe']
+    }
+  )
+  await writeFile(path.join(helpers, 'updater.pub'), await readFile(`${privateKeyFile}.pub`))
+  const env = {
+    BUILD_SOURCEVERSION: commit,
+    BUILD_BUILDID: '123',
+    TEST_RELEASE_PR: '42',
+    TAURI_SIGNING_PRIVATE_KEY: await readFile(privateKeyFile, 'utf8'),
+    TAURI_SIGNING_PRIVATE_KEY_PASSWORD: password
+  }
+  const previous = Object.fromEntries(Object.keys(env).map((name) => [name, process.env[name]]))
+  t.after(() => {
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[name]
+      else process.env[name] = value
+    }
+  })
+  Object.assign(process.env, env)
+  const run = async (args) => {
+    execFileSync(
+      process.execPath,
+      [fileURLToPath(new URL('./sign-windows-updater.mjs', import.meta.url)), '--worker'],
+      {
+        input: JSON.stringify({ args, toolsDirectory: path.resolve('.') }),
+        stdio: ['pipe', 'pipe', 'pipe']
+      }
+    )
+  }
+  const manifest = await signWindowsUpdater(folder, run)
+  assert.equal(manifest.version, '1.55.0-alpha.123')
+  assert.ok(manifest.platforms['windows-x86_64'].url.includes(encodeURIComponent(installerName)))
+  assert.equal(await sha256(path.join(folder, installerName)), installerHash)
+  const altered = structuredClone(manifest)
+  altered.platforms['windows-x86_64'].url = 'https://example.invalid/another-installer.exe'
+  await writeFile(path.join(folder, 'latest.json'), JSON.stringify(altered))
+  await assert.rejects(verifyWindowsUpdater(folder))
+  await writeFile(path.join(folder, 'latest.json'), JSON.stringify(manifest))
+  await writeFile(path.join(helpers, 'updater.pub'), 'wrong public key')
+  await assert.rejects(verifyWindowsUpdater(folder))
+  await assert.rejects(
+    signWindowsUpdater(folder, async () => {
+      throw new Error(password)
+    }),
+    { message: 'Tauri updater signing failed; secret diagnostics suppressed.' }
+  )
 })

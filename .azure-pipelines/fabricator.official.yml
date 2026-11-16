@@ -166,7 +166,7 @@ extends:
               - script: node scripts/rayfin-local/fetch.mjs --target x86_64-pc-windows-msvc
                 displayName: Fetch and verify pinned sidecar
 
-              - script: node --test scripts/check-release-version.test.mjs scripts/wry/download-crate.test.mjs scripts/inventory-windows-release.test.mjs scripts/verify-windows-signing.test.mjs scripts/pr-alpha.test.mjs
+              - script: node --test scripts/check-release-version.test.mjs scripts/wry/download-crate.test.mjs scripts/inventory-windows-release.test.mjs scripts/verify-windows-signing.test.mjs scripts/pr-alpha.test.mjs scripts/windows-installer.test.mjs
                 displayName: Test release validation tooling
 
               - script: npm run typecheck
@@ -236,6 +236,15 @@ extends:
                     displayName: Verify pilot signatures and preserve all original payloads
 
               - ${{ if gt(parameters.testReleasePr, 0) }}:
+                  - template: /.azure-pipelines/templates/windows-installer.yml@self
+
+                  - task: PowerShell@2
+                    displayName: Verify silent install, update-mode reinstall and signed uninstaller
+                    inputs:
+                      pwsh: true
+                      filePath: scripts/test-windows-installer.ps1
+                      arguments: -ValidationFolder "$(Build.ArtifactStagingDirectory)/validation"
+
                   - task: PowerShell@2
                     name: packageAlpha
                     displayName: Package and round-trip verify signed Windows portable alpha
@@ -272,6 +281,18 @@ extends:
                     inputs:
                       version: $(NodeVersion)
                   - pwsh: |
+                      "registry=$(NpmRegistry)" | Set-Content "$(Agent.TempDirectory)/fabricator-updater.npmrc"
+                    displayName: Configure updater tooling registry outside the checkout
+                  - task: npmAuthenticate@0
+                    inputs:
+                      workingFile: $(Agent.TempDirectory)/fabricator-updater.npmrc
+                  - pwsh: |
+                      npm install --prefix "$(Agent.TempDirectory)/fabricator-updater-tools" --ignore-scripts --no-audit --no-fund @tauri-apps/cli@2.12.4
+                      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                    displayName: Install pinned updater signer without package lifecycle scripts
+                    env:
+                      NPM_CONFIG_USERCONFIG: $(Agent.TempDirectory)/fabricator-updater.npmrc
+                  - pwsh: |
                       $ErrorActionPreference = 'Stop'
                       node "$(Pipeline.Workspace)/windows-alpha/_release/pr-alpha.mjs" verify "$(Pipeline.Workspace)/windows-alpha"
                       if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -281,6 +302,30 @@ extends:
                     env:
                       TEST_RELEASE_PR: ${{ parameters.testReleasePr }}
                       RELEASE_TAG: $(ReleaseTag)
+                  - pwsh: |
+                      $ErrorActionPreference = 'Stop'
+                      $folder = "$(Pipeline.Workspace)/windows-alpha"
+                      $metadata = Get-Content -Raw "$folder/windows-alpha.json" | ConvertFrom-Json
+                      $signature = Get-AuthenticodeSignature -LiteralPath (Join-Path $folder $metadata.installer.installer.path)
+                      if ($signature.Status -ne 'Valid' -or -not $signature.TimeStamperCertificate -or
+                          $signature.SignerCertificate.Subject -notmatch '(^|,\s*)O=Microsoft Corporation(,|$)') {
+                        throw 'Downloaded installer is not validly Microsoft-signed and timestamped.'
+                      }
+                      node "$folder/_release/sign-windows-updater.mjs" $folder "$(Agent.TempDirectory)/fabricator-updater-tools"
+                      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                    displayName: Sign final installer for updater and verify against embedded public key
+                    env:
+                      TEST_RELEASE_PR: ${{ parameters.testReleasePr }}
+                      TAURI_SIGNING_PRIVATE_KEY: $(fabricator-updater-private-key)
+                      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: $(fabricator-updater-password)
+                  - pwsh: |
+                      node "$(Pipeline.Workspace)/windows-alpha/_release/pr-alpha.mjs" verify "$(Pipeline.Workspace)/windows-alpha"
+                      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                      node "$(Pipeline.Workspace)/windows-alpha/_release/sign-windows-updater.mjs" verify "$(Pipeline.Workspace)/windows-alpha"
+                      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                    displayName: Recheck revocable PR opt-in and every updater asset immediately before publishing
+                    env:
+                      TEST_RELEASE_PR: ${{ parameters.testReleasePr }}
                   - task: GitHubRelease@1
                     displayName: Create signed Windows review alpha
                     inputs:
@@ -292,18 +337,23 @@ extends:
                       tag: $(ReleaseTag)
                       releaseNotesSource: inline
                       releaseNotesInline: |
-                        Windows x64 portable review alpha for PR #${{ parameters.testReleasePr }}.
+                        Windows x64 signed installer and portable review alpha for PR #${{ parameters.testReleasePr }}.
                         Official build: https://dev.azure.com/powerbi/AppDev/_build/results?buildId=$(Build.BuildId)
                         Source: $(Build.SourceVersion).
                         Extract the entire ZIP and run rayfin-fabricator.exe; keep the sidecar and resources beside it.
                         Requires WebView2 Runtime, Node.js/npm and git. See SMOKE-TEST.txt in the ZIP.
                         Uses the normal Fabricator user profile; back up important data before testing.
-                        Microsoft Authenticode-signed app and sidecar. Manual updates only.
-                        Not an installer, stable release, or completed compliance clearance. No macOS or updater assets.
+                        Microsoft Authenticode-signed installer, uninstaller, NSIS helpers, app and sidecar.
+                        The installer has a verified version-bound updater signature and release-specific latest.json.
+                        Alpha apps remain manual-update only; this prerelease never becomes the stable latest release.
+                        Not a stable release or completed compliance clearance. No macOS assets.
                       assets: |
                         $(Pipeline.Workspace)/windows-alpha/*.zip
                         $(Pipeline.Workspace)/windows-alpha/windows-alpha.json
                         $(Pipeline.Workspace)/windows-alpha/SHA256SUMS.txt
+                        $(Pipeline.Workspace)/windows-alpha/*-setup.exe
+                        $(Pipeline.Workspace)/windows-alpha/*-setup.exe.sig
+                        $(Pipeline.Workspace)/windows-alpha/latest.json
                       isDraft: false
                       isPreRelease: true
                       makeLatest: 'false'

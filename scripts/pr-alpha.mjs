@@ -111,11 +111,21 @@ export async function verifyRelease(folder, { commit, buildId, pr }) {
   assert.equal(metadata.pullRequest, Number(pr))
   assert.match(metadata.version, new RegExp(`^\\d+\\.\\d+\\.\\d+-alpha\\.${buildId}$`))
   const archive = `rayfin-fabricator-${metadata.version}-windows-x64.zip`
+  const installerName = `Rayfin Fabricator_${metadata.version}_x64-setup.exe`
   assert.equal(metadata.archive, archive)
   assert.equal(await sha256(path.join(folder, archive)), metadata.archiveSha256)
-  assert.equal(
-    (await readFile(path.join(folder, 'SHA256SUMS.txt'), 'utf8')).trim(),
-    `${metadata.archiveSha256}  ${archive}`
+  const installer = metadata.installer.installer
+  assert.equal(installer.path, installerName)
+  assert.equal(await sha256(path.join(folder, installerName)), installer.sha256)
+  assert.equal(installer.authenticode.status, 'Valid')
+  assert.ok(installer.authenticode.timestampSubject)
+  assert.match(installer.authenticode.signerSubject, /(?:^|,\s*)O=Microsoft Corporation(?:,|$)/)
+  assert.equal(metadata.installer.signedInputsUnchanged, true)
+  assert.equal(metadata.installer.installVerification.signedUninstaller, true)
+  assert.equal(metadata.installer.installVerification.uninstall, true)
+  assert.deepEqual(
+    (await readFile(path.join(folder, 'SHA256SUMS.txt'), 'utf8')).trim().split(/\r?\n/),
+    [`${metadata.archiveSha256}  ${archive}`, `${installer.sha256}  ${installerName}`]
   )
   assert.equal(metadata.signing.originalPayloadsUnchanged, true)
   assert.equal(metadata.signing.sourceCommit, commit)

@@ -170,8 +170,10 @@ mod tests {
     let endpoints: Vec<&str> = config.endpoints.iter().map(|url| url.as_str()).collect();
     assert_eq!(
       endpoints,
-      ["https://github.com/spatney/rayfin-fabricator/releases/latest/download/latest.json"]
+      ["https://github.com/microsoft/rayfin-fabricator/releases/latest/download/latest.json"]
     );
     assert!(!config.pubkey.is_empty());
+    assert_eq!(config.pubkey.trim(), include_str!("../../updater.pub").trim());
+    assert!(config.require_signed_version);
   }
 }
