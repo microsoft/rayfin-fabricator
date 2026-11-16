@@ -256,6 +256,14 @@ async function finish(state, validation) {
     helpers.filter((file) => file.path.endsWith('.exe')).length >= 2,
     'Installer and uninstaller signing were not both exercised.'
   )
+  console.log(
+    JSON.stringify({
+      installer: { path: installer.path, sha256: installer.sha256, aslr: installer.aslr },
+      uninstaller: helpers
+        .filter((file) => file.path === 'uninstall.exe')
+        .map(({ sha256, aslr }) => ({ sha256, aslr }))
+    })
+  )
   await writeFile(
     path.join(validation, 'windows-installer.json'),
     JSON.stringify(

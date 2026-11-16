@@ -108,3 +108,4 @@ $evidence = Join-Path $EvidenceFolder 'nsis-stub.json'
 } | ConvertTo-Json -Depth 10 | Set-Content -Encoding utf8 $evidence
 node scripts/nsis-aslr.mjs record $ToolsFolder $evidence $original
 if ($LASTEXITCODE -ne 0) { throw 'Rebuilt NSIS stubs or toolset failed verification.' }
+Write-Host ("Verified independently rebuilt NSIS stub hashes: " + ($hashes | ConvertTo-Json -Compress))

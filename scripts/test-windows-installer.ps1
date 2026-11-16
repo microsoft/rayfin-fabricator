@@ -13,20 +13,40 @@ if ((Test-Path $uninstallKey) -or (Test-Path $destination)) {
 }
 $observedBases = [Collections.Generic.List[long]]::new()
 function Run-Installer([string]$File, [string[]]$Arguments, [bool]$CheckAslr = $false) {
-    $process = Start-Process -FilePath $File -ArgumentList $Arguments -PassThru
-    if ($CheckAslr) {
-        $actualBase = $process.MainModule.BaseAddress.ToInt64()
-        if ($actualBase -eq 0 -or $actualBase -eq $report.installer.aslr.imageBase) {
-            if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
-            throw 'Windows did not load the NSIS installer at a relocated image base.'
+    $process = Start-Process -FilePath $File -ArgumentList $Arguments -NoNewWindow -PassThru
+    try {
+        if ($CheckAslr) {
+            $preferredBase = [long]$report.installer.aslr.imageBase
+            if ($preferredBase -le 0) { throw 'Missing verified installer preferred image base.' }
+            $module = $null
+            $deadline = [DateTime]::UtcNow.AddSeconds(15)
+            while ($null -eq $module -and [DateTime]::UtcNow -lt $deadline) {
+                $process.Refresh()
+                if ($process.HasExited) {
+                    throw "Installer PID $($process.Id) exited ($($process.ExitCode)) before its image base could be observed."
+                }
+                $module = $process.MainModule
+                if ($null -eq $module) { Start-Sleep -Milliseconds 50 }
+            }
+            if ($null -eq $module) { throw 'Timed out observing the launched installer image base.' }
+            if ([IO.Path]::GetFullPath($module.FileName) -ine [IO.Path]::GetFullPath($File)) {
+                throw 'Observed process image does not match the launched installer.'
+            }
+            $actualBase = $module.BaseAddress.ToInt64()
+            if ($actualBase -eq 0 -or $actualBase -eq $preferredBase) {
+                throw 'Windows did not load the NSIS installer at a relocated image base.'
+            }
+            $observedBases.Add($actualBase)
+            Write-Host ("Installer PID {0} relocated from 0x{1:x8} to 0x{2:x8}." -f `
+                $process.Id, $preferredBase, $actualBase)
         }
-        $observedBases.Add($actualBase)
+        if (-not $process.WaitForExit(300000)) { throw 'Installer validation timed out.' }
+        if ($process.ExitCode -ne 0) { throw "Installer exited with $($process.ExitCode)." }
     }
-    if (-not $process.WaitForExit(300000)) {
-        Stop-Process -Id $process.Id -Force
-        throw 'Installer validation timed out.'
+    finally {
+        if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+        $process.Dispose()
     }
-    if ($process.ExitCode -ne 0) { throw "Installer exited with $($process.ExitCode)." }
 }
 function Verify-Installed {
     foreach ($file in $signed.files) {
@@ -73,7 +93,7 @@ try {
         signedInstalledPayloads = $true
         signedUninstaller = $true
         relocatedInstaller = $true
-        observedImageBases = @($observedBases)
+        observedImageBases = $observedBases.ToArray()
         uninstall = $true
         guiSmokeTest = 'Not performed'
         crossVersionUpdate = 'Not performed'
