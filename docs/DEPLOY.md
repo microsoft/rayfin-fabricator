@@ -157,8 +157,9 @@ The stock NSIS 3.13 stub has no base relocations and fails mandatory BinSkim
 BA2009. PR alphas rebuild that same NSIS version from immutable source with the
 SHA-256-pinned GNU compiler and SCons inputs in `scripts/nsis-aslr.lock.json`.
 Two independent source/build directories must produce byte-identical LZMA stubs.
-The pipeline uses the exact Python version/architecture already in the approved
-agent image and disables registry download; no public PyPI bootstrap is needed.
+The Python runtime is also a SHA-256-pinned official standalone archive, unpacked
+only in the dedicated build directory. It does not use or alter the agent's
+Python installation, run an installer, install packages or contact PyPI.
 The source changes enable actual relocations and place `.reloc` before the
 `.ndata` and `.rsrc` sections that NSIS edits; they do not merely set an ASLR flag.
 Only those two stubs are replaced in a build-local copy of the pinned toolset.

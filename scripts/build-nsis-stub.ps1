@@ -10,12 +10,6 @@ if ((Test-Path $WorkFolder) -or (Test-Path $ToolsFolder)) {
     throw 'NSIS rebuild requires fresh build and local-tool directories.'
 }
 New-Item -ItemType Directory -Path $WorkFolder | Out-Null
-$python = (Get-Command python).Source
-$version = & $python -c 'import platform; print(platform.python_version())'
-if ($LASTEXITCODE -ne 0 -or $version -cne $lock.pythonVersion) { throw 'Unexpected Python version.' }
-$bits = & $python -c 'import struct; print(8 * struct.calcsize("P"))'
-if ($LASTEXITCODE -ne 0 -or [int]$bits -ne $lock.pythonBits) { throw 'Unexpected Python architecture.' }
-
 function Download-Input([string]$Name, [string]$Extension) {
     $item = $lock.$Name
     $file = Join-Path $WorkFolder "$Name.$Extension"
@@ -30,6 +24,19 @@ function Extract-Source([string]$Archive, [string]$Destination) {
     tar -xzf $Archive -C $Destination --strip-components=1
     if ($LASTEXITCODE -ne 0) { throw 'Cannot extract pinned source archive.' }
 }
+$pythonArchive = Download-Input 'python' 'zip'
+$pythonFolder = Join-Path $WorkFolder 'python'
+Expand-Archive -LiteralPath $pythonArchive -DestinationPath $pythonFolder
+$python = Join-Path $pythonFolder 'python.exe'
+$version = & $python -c 'import platform; print(platform.python_version())'
+if ($LASTEXITCODE -ne 0 -or $version -cne $lock.pythonVersion) {
+    throw "Unexpected Python version: expected $($lock.pythonVersion), observed $version"
+}
+$bits = & $python -c "import struct; print(8 * struct.calcsize('P'))"
+if ($LASTEXITCODE -ne 0 -or [int]$bits -ne $lock.pythonBits) {
+    throw "Unexpected Python architecture: expected $($lock.pythonBits), observed $bits"
+}
+Write-Host "Using hash-verified standalone Python $version ($bits bit)."
 $sourceArchive = Download-Input 'nsisSource' 'tar.gz'
 $sconsArchive = Download-Input 'scons' 'tar.gz'
 $compilerArchive = Download-Input 'compiler' 'zip'
@@ -37,10 +44,10 @@ $toolsetArchive = Download-Input 'toolset' 'zip'
 $plugin = Download-Input 'plugin' 'dll'
 $scons = Join-Path $WorkFolder 'scons'
 Extract-Source $sconsArchive $scons
+Add-Content -LiteralPath (Join-Path $pythonFolder 'python311._pth') -Value "`n$scons" -Encoding utf8
 $compiler = Join-Path $WorkFolder 'compiler'
 Expand-Archive -LiteralPath $compilerArchive -DestinationPath $compiler
-$env:PATH = "$(Join-Path $compiler 'mingw32/bin');$env:PATH"
-$env:PYTHONPATH = $scons
+$env:PATH = "$pythonFolder;$(Join-Path $compiler 'mingw32/bin');$env:PATH"
 $env:SOURCE_DATE_EPOCH = [string]$lock.sourceDateEpoch
 $env:TZ = 'UTC'
 $stubs = @{}

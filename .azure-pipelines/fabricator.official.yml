@@ -93,13 +93,6 @@ extends:
                     env:
                       TEST_RELEASE_PR: ${{ parameters.testReleasePr }}
 
-                  - task: UsePythonVersion@0
-                    inputs:
-                      versionSpec: '3.11.10'
-                      architecture: x86
-                      disableDownloadFromRegistry: true
-                    displayName: Select pinned Python for reproducible NSIS stub builds
-
                   - task: PowerShell@2
                     displayName: Rebuild pinned NSIS with real ASLR twice and compare exact bytes
                     timeoutInMinutes: 20
