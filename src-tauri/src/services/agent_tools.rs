@@ -319,15 +319,15 @@ static CONNECTING: Lazy<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = L
 static DECLINED: Lazy<Mutex<HashMap<String, (String, FabricIqAsk)>>> = Lazy::new(Mutex::default);
 
 fn connection_lock(project_id: &str) -> Arc<tokio::sync::Mutex<()>> {
-  CONNECTING.lock().unwrap().entry(project_id.to_string()).or_default().clone()
+  CONNECTING.lock().unwrap_or_else(|e| e.into_inner()).entry(project_id.to_string()).or_default().clone()
 }
 
 fn declined_in(project_id: &str, turn_id: &str) -> Option<FabricIqAsk> {
-  DECLINED.lock().unwrap().get(project_id).filter(|(turn, _)| turn == turn_id).map(|(_, ask)| *ask)
+  DECLINED.lock().unwrap_or_else(|e| e.into_inner()).get(project_id).filter(|(turn, _)| turn == turn_id).map(|(_, ask)| *ask)
 }
 
 fn remember_declined(project_id: &str, turn_id: &str, ask: FabricIqAsk) {
-  DECLINED.lock().unwrap().insert(project_id.to_string(), (turn_id.to_string(), ask));
+  DECLINED.lock().unwrap_or_else(|e| e.into_inner()).insert(project_id.to_string(), (turn_id.to_string(), ask));
 }
 
 /// A question for the user, and the choices on its card.

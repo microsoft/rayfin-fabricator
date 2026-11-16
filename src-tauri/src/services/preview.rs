@@ -35,11 +35,6 @@ use crate::services::watchdog::{self, Activity};
 const PREVIEW_LABEL: &str = "preview";
 /// Renderer event carrying preview navigation state (matches `IpcChannels.previewNav`).
 const PREVIEW_NAV: &str = "preview:nav";
-/// Renderer event asking the UI to surface the preview at a URL on the agent's
-/// behalf (matches `IpcChannels.previewAgent`). Nothing emits it at the moment:
-/// the agent only captures a preview that is already visible.
-#[cfg_attr(windows, allow(dead_code))]
-const PREVIEW_AGENT: &str = "preview:agent";
 
 /// Far-off-screen origin (logical px) where the preview is parked while it is
 /// hidden ([`preview_hide`]) or suppressed under an HTML overlay

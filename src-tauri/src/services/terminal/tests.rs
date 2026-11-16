@@ -155,3 +155,36 @@ fn windows_reports_a_build_conpty_runs_on() {
     assert_eq!(windows_build(), None);
   }
 }
+
+/// Wait up to `limit` for `pid` to end.
+#[cfg(unix)]
+fn ends_within(pid: u32, limit: Duration) -> bool {
+  process::wait_for_exit(&[pid], limit).is_empty()
+}
+
+#[cfg(unix)]
+#[test]
+fn quitting_ends_jobs_that_ignore_the_hangup() {
+  // A shell that ignores the hangup, with a job in its own process group
+  // (job control) that ignores it too, like `nohup cmd &` in a login shell.
+  let terminals = Terminals::default();
+  let (events, seen) = channel();
+  let script = "set -m; trap '' HUP; nohup sleep 600 >/dev/null 2>&1 & echo \"job:$!:\"; echo ready; wait";
+  terminals.spawn(launch("t-quit", script_shell(script)), events).expect("the shell starts");
+  let deadline = Instant::now() + PATIENCE;
+  let mut output = String::new();
+  while !output.contains("ready") {
+    match seen.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+      Ok(Seen::Output(data)) => output.push_str(&data),
+      other => panic!("the shell didn't get ready: {other:?}, printed {output:?}"),
+    }
+  }
+  let job: u32 = output.split("job:").nth(1).and_then(|rest| rest.split(':').next()).and_then(|pid| pid.trim().parse().ok()).expect("the job's pid");
+  assert!(process::is_alive(job));
+
+  let started = Instant::now();
+  terminals.shutdown();
+  assert!(started.elapsed() < Duration::from_secs(5), "shutting down took {:?}", started.elapsed());
+  // Killed before `shutdown` returned; the kernel may take a moment to reap it.
+  assert!(ends_within(job, Duration::from_secs(2)), "job {job} outlived its terminal");
+}
