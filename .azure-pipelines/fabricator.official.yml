@@ -200,12 +200,12 @@ extends:
                       Copy-Item -LiteralPath $inputs[1] -Destination "$folder/rayfin-local.exe"
                     displayName: Stage exact unsigned pilot inputs outside published artifacts
 
-                  - template: templates/sign-windows-pilot.yml
+                  - template: /.azure-pipelines/templates/sign-windows-pilot.yml@self
                     parameters:
                       binary: rayfin-fabricator.exe
                       keyCode: CP-230012
 
-                  - template: templates/sign-windows-pilot.yml
+                  - template: /.azure-pipelines/templates/sign-windows-pilot.yml@self
                     parameters:
                       binary: rayfin-local.exe
                       keyCode: CP-231522
