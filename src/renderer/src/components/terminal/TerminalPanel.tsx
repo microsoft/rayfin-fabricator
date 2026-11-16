@@ -1,12 +1,14 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
   type CSSProperties,
   type JSX,
+  type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent
 } from 'react'
 import type { StudioProject, TerminalShell } from '@shared/ipc'
@@ -40,6 +42,9 @@ import './terminal.css'
 
 /** Room the project keeps above the panel while it's dragged taller. */
 const PROJECT_ROOM = 140
+/** How far the separator's arrow keys and Page keys resize the panel. */
+const RESIZE_STEP = 20
+const RESIZE_PAGE = 100
 
 const SHELL_ICONS: Record<string, string> = {
   pwsh: 'terminal-powershell',
@@ -121,6 +126,7 @@ export default function TerminalPanel({ project, hidden, onOpenFile, local }: Pr
   const [shells, setShells] = useState<TerminalShell[] | null>(null)
   const [hint, setHint] = useState<{ x: number; y: number; text: string } | null>(null)
   const [dragHeight, setDragHeight] = useState<number | null>(null)
+  const tabsId = useId()
   /** The terminal that's showing, once it is (its first showing makes it). */
   const [shown, setShown] = useState<string | null>(null)
   /** The panel has risen into place since it opened. */
@@ -297,6 +303,58 @@ export default function TerminalPanel({ project, hidden, onOpenFile, local }: Pr
     setDragHeight(height)
   }
 
+  /** The tallest the panel may grow: it leaves the project some room. */
+  const tallestHeight = (): number => {
+    const area = panelRef.current?.parentElement
+    return area ? Math.max(MIN_HEIGHT, area.clientHeight - PROJECT_ROOM) : Infinity
+  }
+
+  // The separator also resizes from the keyboard: arrows by a step, Page keys
+  // by more, Home and End to the shortest and tallest.
+  const onResizeKey = (event: ReactKeyboardEvent<HTMLDivElement>): void => {
+    const tallest = tallestHeight()
+    const from = panelRef.current?.offsetHeight || state.height
+    const to =
+      event.key === 'ArrowUp'
+        ? from + RESIZE_STEP
+        : event.key === 'ArrowDown'
+          ? from - RESIZE_STEP
+          : event.key === 'PageUp'
+            ? from + RESIZE_PAGE
+            : event.key === 'PageDown'
+              ? from - RESIZE_PAGE
+              : event.key === 'Home'
+                ? MIN_HEIGHT
+                : event.key === 'End'
+                  ? tallest
+                  : null
+    if (to === null || !Number.isFinite(to)) return
+    event.preventDefault()
+    if (state.maximized) terminalStore.setMaximized(false)
+    terminalStore.setHeight(Math.round(Math.min(tallest, Math.max(MIN_HEIGHT, to))))
+  }
+
+  // Tabs follow the WAI-ARIA tabs pattern: one Tab stop, arrows move between
+  // tabs, and Enter or Space opens one (opening focuses its terminal).
+  const onTabsKey = (event: ReactKeyboardEvent<HTMLDivElement>): void => {
+    const tabs = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('[role="tab"]'))
+    const at = tabs.indexOf(document.activeElement as HTMLElement)
+    if (at < 0) return
+    const next =
+      event.key === 'ArrowRight'
+        ? (at + 1) % tabs.length
+        : event.key === 'ArrowLeft'
+          ? (at - 1 + tabs.length) % tabs.length
+          : event.key === 'Home'
+            ? 0
+            : event.key === 'End'
+              ? tabs.length - 1
+              : -1
+    if (next < 0) return
+    event.preventDefault()
+    tabs[next].focus()
+  }
+
   const menuEntries: ContextMenuEntry[] = !view
     ? []
     : [
@@ -361,8 +419,20 @@ export default function TerminalPanel({ project, hidden, onOpenFile, local }: Pr
     run: () => terminalStore.add(project.id, shell.id)
   }))
 
+  const tabKeys = [
+    ...(local ? [outputKey(project.id)] : []),
+    ...terminals.tabs.map((tab) => tab.key)
+  ]
+  const stopKey = viewKey && tabKeys.includes(viewKey) ? viewKey : tabKeys[0]
+  const tabProps = (key: string): { id: string; tabIndex: number; 'aria-controls'?: string } => ({
+    id: `${tabsId}-tab-${key}`,
+    tabIndex: key === stopKey ? 0 : -1,
+    'aria-controls': key === viewKey ? `${tabsId}-panel` : undefined
+  })
   const folder = project.path.split(/[\\/]/).filter(Boolean).pop() ?? project.path
   const height = dragHeight ?? state.height
+  const tallest = tallestHeight()
+  const maxHeight = Number.isFinite(tallest) ? Math.round(tallest) : undefined
   const style = { '--terminal-height': `${height}px` } as CSSProperties
   const newTerminalShortcut = ctrlShortcut('Shift+`')
 
@@ -386,8 +456,13 @@ export default function TerminalPanel({ project, hidden, onOpenFile, local }: Pr
             role="separator"
             aria-orientation="horizontal"
             aria-label={t('panel.resize')}
+            aria-valuenow={Math.round(height)}
+            aria-valuemin={MIN_HEIGHT}
+            aria-valuemax={maxHeight}
+            tabIndex={0}
             title={t('panel.resizeTitle')}
             onPointerDown={onResizeStart}
+            onKeyDown={onResizeKey}
             onDoubleClick={() => terminalStore.setHeight(DEFAULT_HEIGHT)}
           />
         )}
@@ -397,73 +472,103 @@ export default function TerminalPanel({ project, hidden, onOpenFile, local }: Pr
             if (event.target === event.currentTarget) toggleMaximized()
           }}
         >
-          <div className="terminal-tabs" role="tablist" aria-label={t('panel.tabs')}>
-            {local && (
-              <div className={`terminal-tab${showingOutput ? ' terminal-tab--active' : ''}`}>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={showingOutput}
-                  className="terminal-tab-main terminal-tab-main--solo"
-                  title={`${t('panel.outputTitle')}\n${localStateLabel(local.status, !local.status || local.busy)}`}
-                  onClick={() => terminalStore.showOutput(project.id)}
-                >
-                  <Codicon name="output" className="terminal-tab-icon" />
-                  <span className="terminal-tab-label">{t('panel.output')}</span>
-                  <span
-                    className={`terminal-dot terminal-dot--${OUTPUT_DOTS[localTone(local.status, !local.status || local.busy)]}`}
-                    aria-label={localStateLabel(local.status, !local.status || local.busy)}
-                  />
-                </button>
-              </div>
-            )}
-            {terminals.tabs.map((tab) => {
-              const label = labels.get(tab.key) ?? fallbackLabel
-              const active = tab.key === activeKey
-              return (
+          <div className="terminal-tabs">
+            <div
+              className="terminal-tablist"
+              role="tablist"
+              aria-label={t('panel.tabs')}
+              onKeyDown={onTabsKey}
+            >
+              {local && (
                 <div
-                  key={tab.key}
-                  className={`terminal-tab${active ? ' terminal-tab--active' : ''}`}
-                  onAuxClick={(event) => {
-                    if (event.button === 1) closeTab(tab.key)
-                  }}
+                  className={`terminal-tab${showingOutput ? ' terminal-tab--active' : ''}`}
+                  role="presentation"
                 >
                   <button
                     type="button"
                     role="tab"
-                    aria-selected={active}
-                    className="terminal-tab-main"
-                    title={[tab.shellName, tab.title, statusText(tab)].filter(Boolean).join('\n')}
-                    onClick={() => {
-                      terminalStore.activate(project.id, tab.key)
-                      existingSession(tab.key)?.focus()
-                    }}
+                    aria-selected={showingOutput}
+                    {...tabProps(outputKey(project.id))}
+                    className="terminal-tab-main terminal-tab-main--solo"
+                    title={`${t('panel.outputTitle')}\n${localStateLabel(local.status, !local.status || local.busy)}`}
+                    onClick={() => terminalStore.showOutput(project.id)}
                   >
-                    <Codicon
-                      name={shellIcon(tab.shellId ?? tab.requestedShell)}
-                      className="terminal-tab-icon"
-                    />
-                    <span className="terminal-tab-label">{label}</span>
+                    <Codicon name="output" className="terminal-tab-icon" />
+                    <span className="terminal-tab-label">{t('panel.output')}</span>
                     <span
-                      className={`terminal-dot terminal-dot--${dotOf(tab)}`}
-                      aria-label={statusText(tab)}
+                      className={`terminal-dot terminal-dot--${OUTPUT_DOTS[localTone(local.status, !local.status || local.busy)]}`}
+                      aria-label={localStateLabel(local.status, !local.status || local.busy)}
                     />
-                    {tab.unread && (
-                      <span className="terminal-unread" aria-label={t('panel.newOutput')} />
-                    )}
-                  </button>
-                  <button
-                    type="button"
-                    className="terminal-tab-close"
-                    aria-label={t('panel.closeTab', { label })}
-                    title={t('panel.closeTerminal')}
-                    onClick={() => closeTab(tab.key)}
-                  >
-                    <Codicon name="close" />
                   </button>
                 </div>
-              )
-            })}
+              )}
+              {terminals.tabs.map((tab) => {
+                const label = labels.get(tab.key) ?? fallbackLabel
+                const active = tab.key === activeKey
+                return (
+                  <div
+                    key={tab.key}
+                    className={`terminal-tab${active ? ' terminal-tab--active' : ''}`}
+                    role="presentation"
+                    onAuxClick={(event) => {
+                      if (event.button === 1) closeTab(tab.key)
+                    }}
+                  >
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={active}
+                      aria-keyshortcuts="Delete"
+                      {...tabProps(tab.key)}
+                      className="terminal-tab-main"
+                      title={[tab.shellName, tab.title, statusText(tab)].filter(Boolean).join('\n')}
+                      onClick={() => {
+                        terminalStore.activate(project.id, tab.key)
+                        existingSession(tab.key)?.focus()
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key !== 'Delete') return
+                        event.preventDefault()
+                        const tabs = terminals.tabs
+                        const at = tabs.findIndex((other) => other.key === tab.key)
+                        const next = tabs[at + 1] ?? tabs[at - 1]
+                        const list = event.currentTarget.closest('[role="tablist"]')
+                        closeTab(tab.key)
+                        // Keep focus in the tabs, on the neighbor.
+                        requestAnimationFrame(() => {
+                          const to = next
+                            ? document.getElementById(`${tabsId}-tab-${next.key}`)
+                            : null
+                          ;(to ?? list?.querySelector<HTMLElement>('[role="tab"]'))?.focus()
+                        })
+                      }}
+                    >
+                      <Codicon
+                        name={shellIcon(tab.shellId ?? tab.requestedShell)}
+                        className="terminal-tab-icon"
+                      />
+                      <span className="terminal-tab-label">{label}</span>
+                      <span
+                        className={`terminal-dot terminal-dot--${dotOf(tab)}`}
+                        aria-label={statusText(tab)}
+                      />
+                      {tab.unread && (
+                        <span className="terminal-unread" aria-label={t('panel.newOutput')} />
+                      )}
+                    </button>
+                    {/* For the mouse; from the keyboard, Delete on the tab closes it. */}
+                    <span
+                      className="terminal-tab-close"
+                      aria-hidden="true"
+                      title={t('panel.closeTab', { label })}
+                      onClick={() => closeTab(tab.key)}
+                    >
+                      <Codicon name="close" />
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
             <span className="terminal-new">
               <button
                 type="button"
@@ -609,6 +714,9 @@ export default function TerminalPanel({ project, hidden, onOpenFile, local }: Pr
         <div
           ref={bodyRef}
           className={`terminal-body${dropping ? ' terminal-body--drop' : ''}`}
+          id={`${tabsId}-panel`}
+          role="tabpanel"
+          aria-labelledby={viewKey ? `${tabsId}-tab-${viewKey}` : undefined}
           onMouseLeave={() => setHint(null)}
         >
           <div ref={surfaceRef} className="terminal-surface" />

@@ -43,9 +43,11 @@ export type PickRole =
 
 /** A picked element, with what Copilot needs to find it in the source and change it. */
 export interface PickTarget {
-  /** Friendly label, e.g. "Button · Add deal". */
+  /** Friendly label in English, for Copilot, e.g. "Button · Add deal". */
   label: string
   role: PickRole
+  /** The element's name, as the label shows it after its role (e.g. "Add deal"). */
+  name?: string
   tag: string
   /** Best-effort CSS path in the live DOM. */
   selector: string
@@ -137,10 +139,33 @@ export interface PickRef {
   route?: string
 }
 
+/** The words the page shows, in Fabricator's language. `{n}` stands for a number. */
+export interface PickStrings {
+  /** Each role's name, for the highlight's tag. */
+  roles: Record<PickRole, string>
+  /** The hint before anything is picked. */
+  start: string
+  /** The hint once `{n}` elements are picked. */
+  picked: { one: string; other: string }
+  /** The Shift key's name, and what dragging with it does. */
+  shift: string
+  clip: string
+  /** How to pick from the keyboard. */
+  keys: string
+  done: string
+  doneTitle: string
+  /** On a picked element's tag: clicking it again drops it. */
+  drop: string
+  /** At most `{n}` picks. */
+  tooMany: string
+  clipAdded: string
+}
+
 /** What `preview.pick.set` hands the page besides armed and on. */
 export interface PickSetOptions {
   theme?: PickHostTheme
   picks?: PickRef[]
+  strings?: PickStrings
 }
 
 export type PickCommand =

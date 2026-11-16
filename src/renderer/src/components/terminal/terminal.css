@@ -74,8 +74,13 @@
 }
 
 .terminal-resize:hover::before,
+.terminal-resize:focus-visible::before,
 .terminal-panel--resizing .terminal-resize::before {
   background: var(--accent);
+}
+
+.terminal-resize:focus-visible {
+  outline: none;
 }
 
 .terminal-panel--resizing {
@@ -107,6 +112,13 @@
 
 .terminal-tabs::-webkit-scrollbar {
   display: none;
+}
+
+.terminal-tablist {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 2px;
 }
 
 .terminal-tab {
@@ -147,7 +159,6 @@
 }
 
 .terminal-tab-main:focus-visible,
-.terminal-tab-close:focus-visible,
 .terminal-btn:focus-visible {
   outline: 2px solid var(--accent-ring);
   outline-offset: -1px;
@@ -231,7 +242,7 @@
 
 .terminal-tab:hover .terminal-tab-close,
 .terminal-tab--active .terminal-tab-close,
-.terminal-tab-close:focus-visible {
+.terminal-tab:focus-within .terminal-tab-close {
   opacity: 1;
 }
 

@@ -11,6 +11,7 @@ import type {
   PickCommand,
   PickLocateResult,
   PickLocateTarget,
+  PickRole,
   PickSetOptions,
   PickStatus
 } from './pick'
@@ -3160,7 +3161,11 @@ export interface ChatMessage {
 export interface ChatPickRef {
   /** Its number, as the preview showed it. */
   n: number
+  /** In English, as Copilot read it. */
   label: string
+  /** Its role and own name, to show the label in Fabricator's language. */
+  role?: PickRole
+  name?: string
   /** Index of its picture in the message's `attachmentThumbs`. */
   shot?: number
 }

@@ -308,15 +308,19 @@ export default function RecentProjects({
             >
               <span className="home-project-title">{project.name}</span>
             </button>
-            {removing ? (
-              <span className="home-project-status home-project-status--removing">
-                {t('recent.removing')}
-              </span>
-            ) : stopped ? (
-              <span className="home-project-status home-project-status--stopped">
-                {t('recent.notRemoved')}
-              </span>
-            ) : (
+            {/* Always there, so screen readers hear "Removing" turn into "Not removed". */}
+            <span role="status" className="home-project-live">
+              {removing ? (
+                <span className="home-project-status home-project-status--removing">
+                  {t('recent.removing')}
+                </span>
+              ) : stopped ? (
+                <span className="home-project-status home-project-status--stopped">
+                  {t('recent.notRemoved')}
+                </span>
+              ) : null}
+            </span>
+            {!removal && (
               <>
                 {active && (
                   <span className="home-project-status home-project-status--active">

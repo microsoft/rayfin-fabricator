@@ -94,6 +94,37 @@
     "drawTitle": "拡大して描き込む",
     "remove": "{{label}} を削除",
     "show": "{{label}} の画像を表示",
-    "showTitle": "拡大表示"
+    "showTitle": "拡大表示",
+    "role": {
+      "button": "ボタン",
+      "link": "リンク",
+      "heading": "見出し",
+      "text": "テキスト",
+      "image": "画像",
+      "icon": "アイコン",
+      "field": "フィールド",
+      "card": "カード",
+      "list": "リスト",
+      "item": "リスト項目",
+      "table": "表",
+      "chart": "グラフ",
+      "nav": "ナビゲーション",
+      "header": "ヘッダー",
+      "footer": "フッター",
+      "section": "セクション",
+      "container": "グループ",
+      "element": "要素"
+    },
+    "overlay": {
+      "start": "変更したい部分をクリックしてください",
+      "picked_other": "{{count}} 個を選択済み · 変更内容をチャットで伝えてください",
+      "clip": "+ ドラッグでスクリーンショットを切り取り",
+      "keys": "Tab で移動、Enter で選択",
+      "done": "完了",
+      "doneTitle": "選択を終了 (Esc)",
+      "drop": "クリックで選択解除",
+      "tooMany": "一度に選択できる要素は {{n}} 個までです",
+      "clipAdded": "切り取りをチャットに追加しました"
+    }
   }
 }

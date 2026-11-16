@@ -150,7 +150,7 @@ describe('useTouchUp', () => {
       ids: ['k1'],
       display: 'make it the primary action',
       shots: [{ path: 'C:/tmp/shot-1.png' }],
-      picks: [{ n: 1, label: 'Button · Save', shot: 0 }]
+      picks: [{ n: 1, label: 'Button · Save', role: 'button', shot: 0 }]
     })
     expect(turn!.prompt).toContain('- Likely source: src/Deals.tsx:12 (text “Save”)')
     expect(turn!.prompt).toContain('- Picture: attached image 1')
@@ -162,7 +162,8 @@ describe('useTouchUp', () => {
     expect(result.current.on).toBe(false)
     expect(api.preview.pick.set).toHaveBeenLastCalledWith(true, false, false, SURFACE.appUrl, {
       theme: expect.any(Object),
-      picks: []
+      picks: [],
+      strings: expect.objectContaining({ start: 'Click anything you want to change' })
     })
   })
 

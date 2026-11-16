@@ -99,6 +99,38 @@
     "drawTitle": "Größer anzeigen und darauf zeichnen",
     "remove": "{{label}} entfernen",
     "show": "Bild von {{label}} anzeigen",
-    "showTitle": "Größer anzeigen"
+    "showTitle": "Größer anzeigen",
+    "role": {
+      "button": "Schaltfläche",
+      "link": "Link",
+      "heading": "Überschrift",
+      "text": "Text",
+      "image": "Bild",
+      "icon": "Symbol",
+      "field": "Feld",
+      "card": "Karte",
+      "list": "Liste",
+      "item": "Listeneintrag",
+      "table": "Tabelle",
+      "chart": "Diagramm",
+      "nav": "Navigation",
+      "header": "Kopfzeile",
+      "footer": "Fußzeile",
+      "section": "Abschnitt",
+      "container": "Gruppe",
+      "element": "Element"
+    },
+    "overlay": {
+      "start": "Klicke auf alles, was du ändern möchtest",
+      "picked_one": "{{count}} ausgewählt · sag im Chat, was sich ändern soll",
+      "picked_other": "{{count}} ausgewählt · sag im Chat, was sich ändern soll",
+      "clip": "+ ziehen, um einen Screenshot auszuschneiden",
+      "keys": "Tab zum Wechseln, Eingabe zum Auswählen",
+      "done": "Fertig",
+      "doneTitle": "Auswahl beenden (Esc)",
+      "drop": "zum Entfernen klicken",
+      "tooMany": "Du kannst bis zu {{n}} Elemente gleichzeitig auswählen",
+      "clipAdded": "Ausschnitt zum Chat hinzugefügt"
+    }
   }
 }
