@@ -129,10 +129,12 @@ test('publication refuses tampered archives, wrong build/PR and unsigned metadat
     archiveSha256: hash,
     installer: {
       signedInputsUnchanged: true,
-      installVerification: { signedUninstaller: true, uninstall: true },
+      installVerification: { signedUninstaller: true, uninstall: true, relocatedInstaller: true },
+      nsis: { reproducible: true },
       installer: {
         path: installerName,
         sha256: installerHash,
+        aslr: { fixups: 1 },
         authenticode: {
           status: 'Valid',
           timestampSubject: 'CN=Microsoft Time-Stamp Service',
@@ -173,7 +175,9 @@ test('publication refuses tampered archives, wrong build/PR and unsigned metadat
     (data) => (data.signing.files[0].authenticode.status = 'NotSigned'),
     (data) => (data.archiveSha256 = 'tampered'),
     (data) => (data.installer.installer.sha256 = 'tampered'),
-    (data) => (data.installer.installVerification.signedUninstaller = false)
+    (data) => (data.installer.installVerification.signedUninstaller = false),
+    (data) => (data.installer.installer.aslr.fixups = 0),
+    (data) => (data.installer.nsis.reproducible = false)
   ]) {
     const data = structuredClone(metadata)
     mutate(data)

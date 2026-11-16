@@ -11,8 +11,17 @@ $uninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Rayfi
 if ((Test-Path $uninstallKey) -or (Test-Path $destination)) {
     throw 'Installer validation requires a clean disposable agent, not an existing installation.'
 }
-function Run-Installer([string]$File, [string[]]$Arguments) {
+$observedBases = [Collections.Generic.List[long]]::new()
+function Run-Installer([string]$File, [string[]]$Arguments, [bool]$CheckAslr = $false) {
     $process = Start-Process -FilePath $File -ArgumentList $Arguments -PassThru
+    if ($CheckAslr) {
+        $actualBase = $process.MainModule.BaseAddress.ToInt64()
+        if ($actualBase -eq 0 -or $actualBase -eq $report.installer.aslr.imageBase) {
+            if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+            throw 'Windows did not load the NSIS installer at a relocated image base.'
+        }
+        $observedBases.Add($actualBase)
+    }
     if (-not $process.WaitForExit(300000)) {
         Stop-Process -Id $process.Id -Force
         throw 'Installer validation timed out.'
@@ -47,10 +56,10 @@ function Verify-Installed {
     }
 }
 try {
-    Run-Installer $installer @('/S', '/NS', "/D=$destination")
+    Run-Installer $installer @('/S', '/NS', "/D=$destination") $true
     Verify-Installed
     # Exercise the updater's NSIS mode without launching the GUI or claiming a version upgrade.
-    Run-Installer $installer @('/S', '/UPDATE', '/NS', "/D=$destination")
+    Run-Installer $installer @('/S', '/UPDATE', '/NS', "/D=$destination") $true
     Verify-Installed
     Run-Installer (Join-Path $destination 'uninstall.exe') @('/S', "_?=$destination")
     if ((Test-Path (Join-Path $destination 'rayfin-fabricator.exe')) -or
@@ -63,6 +72,8 @@ try {
         updateModeReinstall = $true
         signedInstalledPayloads = $true
         signedUninstaller = $true
+        relocatedInstaller = $true
+        observedImageBases = @($observedBases)
         uninstall = $true
         guiSmokeTest = 'Not performed'
         crossVersionUpdate = 'Not performed'

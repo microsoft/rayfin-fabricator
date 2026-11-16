@@ -1,0 +1,26 @@
+{
+  "version": "3.13",
+  "pythonVersion": "3.11.9",
+  "sourceDateEpoch": 1760000000,
+  "maxStringLength": 1024,
+  "nsisSource": {
+    "url": "https://codeload.github.com/nsis-dev/nsis/tar.gz/a4ba28e60bd9e7c271cd2bfc1558889ce3355653",
+    "sha256": "bf9ebdefc2b26850bc5da8f2f505cb34aa364dd8cf49dd49f93d532c94accb4a"
+  },
+  "scons": {
+    "url": "https://codeload.github.com/SCons/scons/tar.gz/ff783e717edcd057df23f3d64d02961c64e5c898",
+    "sha256": "016415b2ffccedd7d054531dd9faae0e3041c7ee118789985c32da414249f647"
+  },
+  "compiler": {
+    "url": "https://github.com/brechtsanders/winlibs_mingw/releases/download/13.2.0posix-18.1.5-11.0.1-msvcrt-r8/winlibs-i686-posix-dwarf-gcc-13.2.0-mingw-w64msvcrt-11.0.1-r8.zip",
+    "sha256": "c29b540409ffe3769407a2e58b76c391ebafd7e7eca8b2b17e71dffe43db419b"
+  },
+  "toolset": {
+    "url": "https://github.com/tauri-apps/binary-releases/releases/download/nsis-3.13/nsis-3.13.zip",
+    "sha256": "ba63dffc4410ee89193e1cb5a41989991bd77c61068da17e3156d136b7b0b3d8"
+  },
+  "plugin": {
+    "url": "https://github.com/tauri-apps/nsis-tauri-utils/releases/download/nsis_tauri_utils-v0.5.3/nsis_tauri_utils.dll",
+    "sha256": "5ba143b5db4a87d32d6e7802e033330aae56cbceabe0d1e3ba41948385ad4709"
+  }
+}

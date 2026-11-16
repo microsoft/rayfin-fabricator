@@ -153,6 +153,24 @@ update-mode reinstallation without launching the GUI, payload/hash/signature
 verification, and uninstallation. These checks do not replace manual GUI smoke
 testing or an actual two-version in-app update.
 
+The stock NSIS 3.13 stub has no base relocations and fails mandatory BinSkim
+BA2009. PR alphas rebuild that same NSIS version from immutable source with the
+SHA-256-pinned GNU compiler and SCons inputs in `scripts/nsis-aslr.lock.json`.
+Two independent source/build directories must produce byte-identical LZMA stubs.
+The source changes enable actual relocations and place `.reloc` before the
+`.ndata` and `.rsrc` sections that NSIS edits; they do not merely set an ASLR flag.
+Only those two stubs are replaced in a build-local copy of the pinned toolset.
+Tauri's shared cache and installer hooks/UX are unchanged.
+
+`scripts/build-nsis-stub.ps1` requires the locked Python version and accepts
+`-WorkFolder`, `-ToolsFolder` and `-EvidenceFolder`; all must refer to dedicated
+build paths, not a shared tool installation. The pipeline records input/output
+hashes in `nsis-stub.json`, checks the complete local toolset before and after
+packaging, and rejects missing, stale or malformed relocations before signing
+the uninstaller or installer. Installation checks require the actual installer
+process to load at a relocated base. Mandatory Guardian/BinSkim checks remain
+enabled; no ASLR baseline or suppression is used.
+
 Only the separate no-checkout release job receives the updater secrets. It
 signs the final Authenticode-signed installer with pinned Tauri tooling, verifies
 the signature against the committed Microsoft public key, and binds its trusted

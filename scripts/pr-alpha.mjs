@@ -121,6 +121,9 @@ export async function verifyRelease(folder, { commit, buildId, pr }) {
   assert.ok(installer.authenticode.timestampSubject)
   assert.match(installer.authenticode.signerSubject, /(?:^|,\s*)O=Microsoft Corporation(?:,|$)/)
   assert.equal(metadata.installer.signedInputsUnchanged, true)
+  assert.ok(installer.aslr.fixups > 0)
+  assert.equal(metadata.installer.nsis.reproducible, true)
+  assert.equal(metadata.installer.installVerification.relocatedInstaller, true)
   assert.equal(metadata.installer.installVerification.signedUninstaller, true)
   assert.equal(metadata.installer.installVerification.uninstall, true)
   assert.deepEqual(

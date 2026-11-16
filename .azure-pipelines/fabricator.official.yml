@@ -93,6 +93,23 @@ extends:
                     env:
                       TEST_RELEASE_PR: ${{ parameters.testReleasePr }}
 
+                  - task: UsePythonVersion@0
+                    inputs:
+                      versionSpec: '3.11.9'
+                      architecture: x64
+                    displayName: Select pinned Python for reproducible NSIS stub builds
+
+                  - task: PowerShell@2
+                    displayName: Rebuild pinned NSIS with real ASLR twice and compare exact bytes
+                    timeoutInMinutes: 20
+                    inputs:
+                      pwsh: true
+                      filePath: scripts/build-nsis-stub.ps1
+                      arguments: >-
+                        -WorkFolder "$(Agent.TempDirectory)/fabricator-nsis-build"
+                        -ToolsFolder "$(Build.SourcesDirectory)/src-tauri/target/.tauri/NSIS"
+                        -EvidenceFolder "$(Build.ArtifactStagingDirectory)/validation"
+
               - pwsh: |
                   $ErrorActionPreference = 'Stop'
                   $cargoBin = Join-Path $env:USERPROFILE '.cargo/bin'
@@ -166,7 +183,7 @@ extends:
               - script: node scripts/rayfin-local/fetch.mjs --target x86_64-pc-windows-msvc
                 displayName: Fetch and verify pinned sidecar
 
-              - script: node --test scripts/check-release-version.test.mjs scripts/wry/download-crate.test.mjs scripts/inventory-windows-release.test.mjs scripts/verify-windows-signing.test.mjs scripts/pr-alpha.test.mjs scripts/windows-installer.test.mjs
+              - script: node --test scripts/check-release-version.test.mjs scripts/wry/download-crate.test.mjs scripts/inventory-windows-release.test.mjs scripts/verify-windows-signing.test.mjs scripts/pr-alpha.test.mjs scripts/windows-installer.test.mjs scripts/nsis-aslr.test.mjs
                 displayName: Test release validation tooling
 
               - script: npm run typecheck

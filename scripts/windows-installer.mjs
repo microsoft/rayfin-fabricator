@@ -7,6 +7,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { inventoryFiles } from './inventory-windows-release.mjs'
 import { sha256 } from './pr-alpha.mjs'
+import { verifyNsisRelocations, verifyNsisTools } from './nsis-aslr.mjs'
 
 const SCRIPT = fileURLToPath(import.meta.url)
 const ROOT = path.resolve(path.dirname(SCRIPT), '..')
@@ -107,6 +108,7 @@ async function signingCallback(state, file) {
     'NotSigned',
     'Refusing to overwrite a received signature.'
   )
+  if (keyCode === 'CP-230012') verifyNsisRelocations(await readFile(file))
   const id = randomUUID()
   const folder = path.join(state, id)
   await mkdir(folder)
@@ -162,6 +164,10 @@ async function bundle(state) {
 
 async function prepare(state, validation, signing) {
   await mkdir(state)
+  await verifyNsisTools(
+    path.join(ROOT, 'src-tauri/target/.tauri/NSIS'),
+    path.join(validation, 'nsis-stub.json')
+  )
   const report = await read(path.join(validation, 'windows-signing-pilot.json'))
   const signedInputs = []
   for (const [name, destinations] of [
@@ -193,6 +199,7 @@ async function prepare(state, validation, signing) {
   await atomicJson(path.join(state, 'tauri.installer.json'), {
     bundle: {
       createUpdaterArtifacts: false,
+      useLocalToolsDir: true,
       windows: {
         allowDowngrades: false,
         signCommand: { cmd: process.execPath, args: [SCRIPT, 'sign', state, '%1'] }
@@ -209,6 +216,8 @@ async function approve(state) {
   requireMicrosoftSignature(signed, request.keyCode)
   assert.equal(signed.machine, request.before.machine)
   assert.notEqual(signed.sha256, request.before.sha256)
+  if (request.keyCode === 'CP-230012')
+    signed.aslr = verifyNsisRelocations(await readFile(request.staged))
   await atomicJson(path.join(state, `${request.id}.approved.json`), {
     ...signed,
     keyCode: request.keyCode
@@ -230,6 +239,11 @@ async function finish(state, validation) {
   assert.equal(names.length, 1, 'Expected exactly one NSIS installer.')
   const [installer] = await inventoryFiles([{ name: names[0], file: path.join(folder, names[0]) }])
   requireMicrosoftSignature(installer)
+  installer.aslr = verifyNsisRelocations(await readFile(path.join(folder, names[0])))
+  const nsis = await verifyNsisTools(
+    path.join(ROOT, 'src-tauri/target/.tauri/NSIS'),
+    path.join(validation, 'nsis-stub.json')
+  )
   const helpers = []
   for (const name of await readdir(state)) {
     if (name.endsWith('.approved.json')) helpers.push(await read(path.join(state, name)))
@@ -244,7 +258,22 @@ async function finish(state, validation) {
   )
   await writeFile(
     path.join(validation, 'windows-installer.json'),
-    JSON.stringify({ installer, helpers, signedInputsUnchanged: true }, null, 2)
+    JSON.stringify(
+      {
+        installer,
+        helpers,
+        signedInputsUnchanged: true,
+        nsis: {
+          inputs: nsis.inputs,
+          stubs: nsis.stubs,
+          reproducible: nsis.reproducible,
+          compilerVersion: nsis.compilerVersion,
+          pythonVersion: nsis.pythonVersion
+        }
+      },
+      null,
+      2
+    )
   )
 }
 
