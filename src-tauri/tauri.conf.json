@@ -90,9 +90,10 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDE4NEEyQzBFMTA1MUFCMzAKUldRd3ExRVFEaXhLR09weDZNcGk3VVkwbTI0OS9tU0RqTHd2cU82Zjk4dml5LzZOSTVjeTM5S2cK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDFFQUQyODlERkVDNUVFNjEKUldSaDdzWCtuU2l0SG1zaDY0SVgzNHlDOElqMXJvZCtzc0l0TFBabHNEcmNud0dHOUdxMXgzOVMK",
+      "requireSignedVersion": true,
       "endpoints": [
-        "https://github.com/spatney/rayfin-fabricator/releases/latest/download/latest.json"
+        "https://github.com/microsoft/rayfin-fabricator/releases/latest/download/latest.json"
       ]
     }
   }

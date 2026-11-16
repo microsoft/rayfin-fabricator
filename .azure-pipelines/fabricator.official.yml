@@ -3,8 +3,20 @@ name: fabricator-validation-$(Date:yyyyMMdd).$(Rev:r)
 trigger: none
 pr: none
 
+parameters:
+  - name: SignWindowsPilot
+    displayName: Sign Windows pilot copies (no distribution)
+    type: boolean
+    default: false
+  - name: testReleasePr
+    displayName: Opted-in PR number for a signed Windows alpha (0 disables publishing)
+    type: number
+    default: 0
+
 variables:
-  NodeVersion: '24.x'
+  NodeVersion: '>=24.15.0 <25.0.0'
+  NpmRegistry: https://pkgs.dev.azure.com/powerbi/AppDev/_packaging/rayfin-official/npm/registry/
+  CargoRegistry: https://pkgs.dev.azure.com/powerbi/AppDev/_packaging/rayfin-official/Cargo/index/
 
 resources:
   repositories:
@@ -41,11 +53,15 @@ extends:
             timeoutInMinutes: 120
             templateContext:
               outputs:
-                # Executables stay on the agent until the signing phases are implemented.
                 - output: pipelineArtifact
                   displayName: Publish source and version metadata
                   targetPath: $(Build.ArtifactStagingDirectory)/validation
                   artifactName: windows-validation
+                - ${{ if gt(parameters.testReleasePr, 0) }}:
+                    - output: pipelineArtifact
+                      displayName: Publish verified Windows alpha assets
+                      targetPath: $(Build.ArtifactStagingDirectory)/windows-alpha
+                      artifactName: windows-alpha
             steps:
               - checkout: self
                 clean: true
@@ -66,6 +82,28 @@ extends:
                   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
                 displayName: Verify source commit and release versions
 
+              - ${{ if gt(parameters.testReleasePr, 0) }}:
+                  - pwsh: |
+                      $ErrorActionPreference = 'Stop'
+                      node scripts/pr-alpha.mjs prepare "$(Build.SourcesDirectory)"
+                      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                      node scripts/check-release-version.mjs > "$(Build.ArtifactStagingDirectory)/validation/source.json"
+                      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                    displayName: Validate author or reviewer opt-in and prepare exact-build alpha version
+                    env:
+                      TEST_RELEASE_PR: ${{ parameters.testReleasePr }}
+
+                  - task: PowerShell@2
+                    displayName: Rebuild pinned NSIS with real ASLR twice and compare exact bytes
+                    timeoutInMinutes: 20
+                    inputs:
+                      pwsh: true
+                      filePath: scripts/build-nsis-stub.ps1
+                      arguments: >-
+                        -WorkFolder "$(Agent.TempDirectory)/fabricator-nsis-build"
+                        -ToolsFolder "$(Build.SourcesDirectory)/src-tauri/target/.tauri/NSIS"
+                        -EvidenceFolder "$(Build.ArtifactStagingDirectory)/validation"
+
               - pwsh: |
                   $ErrorActionPreference = 'Stop'
                   $cargoBin = Join-Path $env:USERPROFILE '.cargo/bin'
@@ -76,7 +114,7 @@ extends:
                     & $installer -y --profile minimal --default-toolchain stable
                     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
                   }
-                  & $rustup toolchain install stable --profile minimal
+                  & $rustup toolchain install stable --profile minimal --no-self-update
                   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
                   & $rustup default stable
                   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -85,14 +123,62 @@ extends:
                   Write-Host "##vso[task.prependpath]$cargoBin"
                 displayName: Install stable Rust toolchain
 
-              - script: npm ci
+              - pwsh: |
+                  $ErrorActionPreference = 'Stop'
+                  New-Item -ItemType Directory -Force -Path .cargo | Out-Null
+                  @'
+                  [registries.rayfin-official]
+                  index = "sparse+$(CargoRegistry)"
+                  credential-provider = "cargo:token"
+                  [source.crates-io]
+                  replace-with = "rayfin-official"
+                  [source.rayfin-official]
+                  registry = "sparse+$(CargoRegistry)"
+                  '@ | Set-Content -Path .cargo/config.toml
+                displayName: Configure official Cargo feed
+
+              - task: CargoAuthenticate@0
+                displayName: Authenticate official Cargo feed
+                inputs:
+                  configFile: $(Build.SourcesDirectory)/.cargo/config.toml
+
+              - pwsh: |
+                  $ErrorActionPreference = 'Stop'
+                  $manifest = Get-Content src-tauri/vendor/wry/Cargo.toml -Raw
+                  $package = ($manifest -split '(?m)^\[' | Where-Object { $_.StartsWith('package]') })
+                  $version = [regex]::Match($package, '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
+                  if (-not $version) { throw 'Cannot determine vendored wry version.' }
+                  cargo info "wry@$version" --registry rayfin-official
+                  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                displayName: Save pinned wry through official Cargo client
+
+              - pwsh: |
+                  $ErrorActionPreference = 'Stop'
+                  Set-Content -Path "$(Agent.TempDirectory)/fabricator.npmrc" -Value "registry=$(NpmRegistry)"
+                displayName: Configure official npm feed
+
+              - task: npmAuthenticate@0
+                displayName: Authenticate official npm feed
+                inputs:
+                  workingFile: $(Agent.TempDirectory)/fabricator.npmrc
+
+              - script: npm view react version --fetch-retries=0 --fetch-timeout=30000
+                displayName: Verify npm registry access
+                timeoutInMinutes: 2
+                env:
+                  NPM_CONFIG_USERCONFIG: $(Agent.TempDirectory)/fabricator.npmrc
+
+              - script: npm ci --loglevel=http --foreground-scripts
                 displayName: Install dependencies
+                timeoutInMinutes: 20
+                env:
+                  NPM_CONFIG_USERCONFIG: $(Agent.TempDirectory)/fabricator.npmrc
 
               - script: node scripts/rayfin-local/fetch.mjs --target x86_64-pc-windows-msvc
                 displayName: Fetch and verify pinned sidecar
 
-              - script: node --test scripts/check-release-version.test.mjs
-                displayName: Test release version validation
+              - script: node --test scripts/check-release-version.test.mjs scripts/wry/download-crate.test.mjs scripts/inventory-windows-release.test.mjs scripts/verify-windows-signing.test.mjs scripts/pr-alpha.test.mjs scripts/windows-installer.test.mjs scripts/nsis-aslr.test.mjs
+                displayName: Test release validation tooling
 
               - script: npm run typecheck
                 displayName: Typecheck
@@ -105,6 +191,9 @@ extends:
 
               - script: npm run vendor:wry -- verify
                 displayName: Verify vendored wry
+                env:
+                  WRY_CARGO_INDEX: $(CargoRegistry)
+                  WRY_CARGO_TOKEN: $(CARGO_REGISTRIES_RAYFIN_OFFICIAL_TOKEN)
 
               - script: cargo test --manifest-path src-tauri/Cargo.toml --lib --locked
                 displayName: Test backend
@@ -114,3 +203,175 @@ extends:
 
               - script: npm run check:build
                 displayName: Verify renderer bundle
+
+              - pwsh: |
+                  $ErrorActionPreference = 'Stop'
+                  node scripts/inventory-windows-release.mjs "$(Build.ArtifactStagingDirectory)/validation/windows-binaries.json"
+                  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                displayName: Inventory Windows payload hashes and signatures
+
+              - ${{ if or(eq(parameters.SignWindowsPilot, true), gt(parameters.testReleasePr, 0)) }}:
+                  - pwsh: |
+                      $ErrorActionPreference = 'Stop'
+                      $folder = "$(Agent.TempDirectory)/fabricator-signing"
+                      if (Test-Path $folder) { throw "Signing pilot directory already exists: $folder" }
+                      New-Item -ItemType Directory -Path $folder | Out-Null
+                      $inputs = @(
+                        "src-tauri/target/release/rayfin-fabricator.exe",
+                        "src-tauri/binaries/rayfin-local-x86_64-pc-windows-msvc.exe"
+                      )
+                      foreach ($file in $inputs) {
+                        $signature = Get-AuthenticodeSignature -LiteralPath $file
+                        if ($signature.Status -ne 'NotSigned') {
+                          throw "Pilot expects an unsigned input, not $($signature.Status): $file"
+                        }
+                      }
+                      Copy-Item -LiteralPath $inputs[0] -Destination "$folder/rayfin-fabricator.exe"
+                      Copy-Item -LiteralPath $inputs[1] -Destination "$folder/rayfin-local.exe"
+                    displayName: Stage exact unsigned pilot inputs outside published artifacts
+
+                  - template: /.azure-pipelines/templates/sign-windows-pilot.yml@self
+                    parameters:
+                      binary: rayfin-fabricator.exe
+                      keyCode: CP-230012
+
+                  - template: /.azure-pipelines/templates/sign-windows-pilot.yml@self
+                    parameters:
+                      binary: rayfin-local.exe
+                      keyCode: CP-231522
+
+                  - pwsh: |
+                      $ErrorActionPreference = 'Stop'
+                      node scripts/verify-windows-signing.mjs "$(Agent.TempDirectory)/fabricator-signing" "$(Build.ArtifactStagingDirectory)/validation/windows-binaries.json" "$(Build.ArtifactStagingDirectory)/validation/windows-signing-pilot.json"
+                      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                    displayName: Verify pilot signatures and preserve all original payloads
+
+              - ${{ if gt(parameters.testReleasePr, 0) }}:
+                  - template: /.azure-pipelines/templates/windows-installer.yml@self
+
+                  - task: PowerShell@2
+                    displayName: Verify silent install, update-mode reinstall and signed uninstaller
+                    inputs:
+                      pwsh: true
+                      filePath: scripts/test-windows-installer.ps1
+                      arguments: -ValidationFolder "$(Build.ArtifactStagingDirectory)/validation"
+
+                  - task: PowerShell@2
+                    name: packageAlpha
+                    displayName: Package and round-trip verify signed Windows portable alpha
+                    inputs:
+                      pwsh: true
+                      filePath: scripts/package-pr-alpha.ps1
+                      arguments: >-
+                        -SigningFolder "$(Agent.TempDirectory)/fabricator-signing"
+                        -ValidationFolder "$(Build.ArtifactStagingDirectory)/validation"
+                        -OutputFolder "$(Build.ArtifactStagingDirectory)/windows-alpha"
+                    env:
+                      TEST_RELEASE_PR: ${{ parameters.testReleasePr }}
+
+      - ${{ if gt(parameters.testReleasePr, 0) }}:
+          - stage: PublishAlpha
+            displayName: Publish explicitly opted-in PR alpha
+            dependsOn: [ValidateWindows, SDLSources]
+            condition: succeeded()
+            variables:
+              ReleaseTag: $[stageDependencies.ValidateWindows.BuildWindows.outputs['packageAlpha.ReleaseTag']]
+            jobs:
+              - job: PublishGitHubAlpha
+                displayName: Publish verified assets as a non-latest prerelease
+                templateContext:
+                  type: releaseJob
+                  isProduction: true
+                  inputs:
+                    - input: pipelineArtifact
+                      artifactName: windows-alpha
+                      targetPath: $(Pipeline.Workspace)/windows-alpha
+                steps:
+                  - checkout: none
+                  - task: UseNode@1
+                    inputs:
+                      version: $(NodeVersion)
+                  - pwsh: |
+                      "registry=$(NpmRegistry)" | Set-Content "$(Agent.TempDirectory)/fabricator-updater.npmrc"
+                    displayName: Configure updater tooling registry outside the checkout
+                  - task: npmAuthenticate@0
+                    inputs:
+                      workingFile: $(Agent.TempDirectory)/fabricator-updater.npmrc
+                  - pwsh: |
+                      npm install --prefix "$(Agent.TempDirectory)/fabricator-updater-tools" --ignore-scripts --no-audit --no-fund @tauri-apps/cli@2.12.4
+                      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                    displayName: Install pinned updater signer without package lifecycle scripts
+                    env:
+                      NPM_CONFIG_USERCONFIG: $(Agent.TempDirectory)/fabricator-updater.npmrc
+                  - pwsh: |
+                      $ErrorActionPreference = 'Stop'
+                      node "$(Pipeline.Workspace)/windows-alpha/_release/pr-alpha.mjs" verify "$(Pipeline.Workspace)/windows-alpha"
+                      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                      $metadata = Get-Content -Raw "$(Pipeline.Workspace)/windows-alpha/windows-alpha.json" | ConvertFrom-Json
+                      if ($env:RELEASE_TAG -cne "v$($metadata.version)") { throw 'Release tag does not match verified alpha.' }
+                    displayName: Recheck live PR authorization and exact artifact hashes before publication
+                    env:
+                      TEST_RELEASE_PR: ${{ parameters.testReleasePr }}
+                      RELEASE_TAG: $(ReleaseTag)
+                  - pwsh: |
+                      $ErrorActionPreference = 'Stop'
+                      $folder = "$(Pipeline.Workspace)/windows-alpha"
+                      $metadata = Get-Content -Raw "$folder/windows-alpha.json" | ConvertFrom-Json
+                      $signature = Get-AuthenticodeSignature -LiteralPath (Join-Path $folder $metadata.installer.installer.path)
+                      if ($signature.Status -ne 'Valid' -or -not $signature.TimeStamperCertificate -or
+                          $signature.SignerCertificate.Subject -notmatch '(^|,\s*)O=Microsoft Corporation(,|$)') {
+                        throw 'Downloaded installer is not validly Microsoft-signed and timestamped.'
+                      }
+                      node "$folder/_release/sign-windows-updater.mjs" $folder "$(Agent.TempDirectory)/fabricator-updater-tools"
+                      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                    displayName: Sign final installer for updater and verify against embedded public key
+                    env:
+                      TEST_RELEASE_PR: ${{ parameters.testReleasePr }}
+                      TAURI_SIGNING_PRIVATE_KEY: $(fabricator-updater-private-key)
+                      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: $(fabricator-updater-password)
+                  - pwsh: |
+                      node "$(Pipeline.Workspace)/windows-alpha/_release/pr-alpha.mjs" verify "$(Pipeline.Workspace)/windows-alpha"
+                      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                      node "$(Pipeline.Workspace)/windows-alpha/_release/sign-windows-updater.mjs" verify "$(Pipeline.Workspace)/windows-alpha"
+                      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                    displayName: Recheck revocable PR opt-in and every updater asset immediately before publishing
+                    env:
+                      TEST_RELEASE_PR: ${{ parameters.testReleasePr }}
+                  - task: GitHubRelease@1
+                    displayName: Create signed Windows review alpha
+                    inputs:
+                      gitHubConnection: github.com_christopheranderson
+                      repositoryName: microsoft/rayfin-fabricator
+                      action: create
+                      target: $(Build.SourceVersion)
+                      tagSource: userSpecifiedTag
+                      tag: $(ReleaseTag)
+                      releaseNotesSource: inline
+                      releaseNotesInline: |
+                        Windows x64 signed installer and portable review alpha for PR #${{ parameters.testReleasePr }}.
+                        Official build: https://dev.azure.com/powerbi/AppDev/_build/results?buildId=$(Build.BuildId)
+                        Source: $(Build.SourceVersion).
+                        Extract the entire ZIP and run rayfin-fabricator.exe; keep the sidecar and resources beside it.
+                        Requires WebView2 Runtime, Node.js/npm and git. See SMOKE-TEST.txt in the ZIP.
+                        Uses the normal Fabricator user profile; back up important data before testing.
+                        Microsoft Authenticode-signed installer, uninstaller, NSIS helpers, app and sidecar.
+                        The installer has a verified version-bound updater signature and release-specific latest.json.
+                        Alpha apps remain manual-update only; this prerelease never becomes the stable latest release.
+                        Not a stable release or completed compliance clearance. No macOS assets.
+                      assets: |
+                        $(Pipeline.Workspace)/windows-alpha/*.zip
+                        $(Pipeline.Workspace)/windows-alpha/windows-alpha.json
+                        $(Pipeline.Workspace)/windows-alpha/SHA256SUMS.txt
+                        $(Pipeline.Workspace)/windows-alpha/*-setup.exe
+                        $(Pipeline.Workspace)/windows-alpha/*-setup.exe.sig
+                        $(Pipeline.Workspace)/windows-alpha/latest.json
+                      isDraft: false
+                      isPreRelease: true
+                      makeLatest: 'false'
+                      addChangeLog: false
+                  - pwsh: |
+                      node "$(Pipeline.Workspace)/windows-alpha/_release/sign-windows-updater.mjs" verify-published "$(Pipeline.Workspace)/windows-alpha"
+                      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                    displayName: Verify actual public updater manifest and installer URL after publication
+                    env:
+                      TEST_RELEASE_PR: ${{ parameters.testReleasePr }}

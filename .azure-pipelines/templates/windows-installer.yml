@@ -1,0 +1,54 @@
+steps:
+  - pwsh: |
+      $ErrorActionPreference = 'Stop'
+      $state = "$(Agent.TempDirectory)/fabricator-installer-signing"
+      node scripts/windows-installer.mjs prepare $state "$(Build.ArtifactStagingDirectory)/validation" "$(Agent.TempDirectory)/fabricator-signing"
+      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      $script = Join-Path "$(Build.SourcesDirectory)" 'scripts/windows-installer.mjs'
+      $env:TEMP = Join-Path $state 'temp'
+      $env:TMP = $env:TEMP
+      $process = Start-Process -FilePath (Get-Command node).Source `
+        -ArgumentList @("`"$script`"", 'bundle', "`"$state`"") -PassThru `
+        -RedirectStandardOutput "$state/installer.stdout" -RedirectStandardError "$state/installer.stderr"
+      $process.Id | Set-Content "$state/bundler.pid"
+    displayName: Start packaging pre-signed inputs with synchronous ESRP callbacks
+
+  - ${{ each round in split('1,2,3,4,5,6,7,8,9,10', ',') }}:
+      - pwsh: |
+          node scripts/windows-installer.mjs wait "$(Agent.TempDirectory)/fabricator-installer-signing"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        displayName: Await installer signing request ${{ round }} or packaging completion
+        timeoutInMinutes: 12
+
+      - template: /.azure-pipelines/templates/sign-windows-pilot.yml@self
+        parameters:
+          binary: $(InstallerSigningPattern)
+          keyCode: $(InstallerSigningKeyCode)
+          folder: $(InstallerSigningFolder)
+          condition: and(succeeded(), eq(variables['InstallerSigningPending'], 'true'))
+
+      - pwsh: |
+          node scripts/windows-installer.mjs approve "$(Agent.TempDirectory)/fabricator-installer-signing"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        displayName: Verify ESRP response and release signing callback ${{ round }}
+        condition: and(succeeded(), eq(variables['InstallerSigningPending'], 'true'))
+
+  - pwsh: |
+      node scripts/windows-installer.mjs finish "$(Agent.TempDirectory)/fabricator-installer-signing" "$(Build.ArtifactStagingDirectory)/validation"
+      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    displayName: Require completed installer and helper signing with unchanged product inputs
+
+  - pwsh: |
+      $state = "$(Agent.TempDirectory)/fabricator-installer-signing"
+      foreach ($name in @('installer.stdout', 'installer.stderr')) {
+        if (Test-Path "$state/$name") { Get-Content "$state/$name" }
+      }
+      if (Test-Path "$state/bundler.pid") {
+        $bundlerId = [int](Get-Content "$state/bundler.pid")
+        $bundler = Get-CimInstance Win32_Process -Filter "ProcessId=$bundlerId"
+        if ($bundler -and $bundler.CommandLine.Contains('windows-installer.mjs')) {
+          Stop-Process -Id $bundlerId -Force
+        }
+      }
+    displayName: Collect installer diagnostics and stop any remaining bundler
+    condition: always()

@@ -25,3 +25,6 @@ Closes #
 ## Screenshots or notes
 
 Add screenshots for UI changes or notes for reviewers.
+
+For release-pipeline changes, link at least one signed review alpha and record the
+manual smoke-test result here before merging.

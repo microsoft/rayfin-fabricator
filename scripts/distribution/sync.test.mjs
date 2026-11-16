@@ -45,7 +45,7 @@ test('copies new hosting into every derived file', (t) => {
   assert.deepEqual(sync(root, { check: true }), [])
 
   const updater = JSON.parse(read('src-tauri/tauri.conf.json')).plugins.updater
-  assert.deepEqual(updater, { pubkey: 'NEWKEY', endpoints: ['https://updates.contoso.example/latest.json'] })
+  assert.deepEqual(updater, { pubkey: 'NEWKEY', requireSignedVersion: true, endpoints: ['https://updates.contoso.example/latest.json'] })
   const template = read('.github/ISSUE_TEMPLATE/config.yml')
   assert.match(template, /url: https:\/\/docs\.contoso\.example\/fabricator\/docs\/troubleshooting\n/)
   assert.match(template, /url: https:\/\/github\.com\/contoso\/fabricator\/issues\n/)
