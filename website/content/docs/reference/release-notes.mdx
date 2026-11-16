@@ -1,0 +1,114 @@
+---
+title: "Release notes"
+description: "What changed in Fabricator 1.48 to 1.55: features that were removed or renamed, what to do about them after you update, and what's new in each release."
+---
+
+These notes cover Fabricator 1.48.0 to 1.55.0. If you update from 1.47 or earlier, read [Removed and renamed](#removed-and-renamed) first: some features you used are gone, and Fabricator doesn't tell you when you open it.
+
+## Removed and renamed
+
+| What you used | What happens now | Since |
+| --- | --- | --- |
+| **Goals** (experiment) | Removed. There's no Goals tab and no check before you publish. | 1.52.0 |
+| **Design mode** | Replaced by **Point & Edit**, which was called Touch Up in 1.48. | 1.48.0 |
+| Fabricator's own semantic model search in chat | Removed. Chat finds Power BI data with **Fabric IQ**, which needs an Azure CLI sign-in. | 1.49.0 |
+| Team workspace previews deployed on every save (experiment) | A draft pull request deploys nothing, and **Publish** deploys your preview. Workspaces set up before 1.50 need an owner to select **Repair**. | 1.50.0 |
+| **Parallel UI builder** (experiment) | Added in 1.49.0 and removed in 1.53.0. | 1.53.0 |
+
+### Goals
+
+The Goals experiment is gone: the **Goals** tab, its checks, and the question before you publish an app whose checks hadn't all passed. Publishing no longer stops to offer **Publish anyway**, so nothing checks your app against its goals before it goes out. Settings saved with Goals turned on still load.
+
+Your goals aren't deleted. Each app that had them keeps its `GOALS.md` file, at the root of the app's folder, but Fabricator and Copilot no longer read it. Choose what to do with each one:
+
+- **Rules for every app you build**, such as "Employees never see each other's expenses", fit in [custom instructions](/docs/reference/settings#custom-instructions). Copilot reads them with every message, in every app. Custom instructions arrived in 1.53.0.
+- **Rules for one app** fit in a project skill. Copy the text of `GOALS.md` into a [custom skill](/docs/build/skills#add-a-custom-skill) and leave **Save to my skill library** off, so it stays with that app.
+- **Neither**: delete `GOALS.md`, or keep it as notes. It does nothing either way.
+
+To check an app against its goals before you publish, ask in chat, for example:
+
+```prompt title="Check the app against GOALS.md"
+Read GOALS.md and check each goal against the app as it is now. Tell me which still hold and which don't, and why. Don't change anything yet.
+```
+
+Fabricator kept each app's last Goals results in its app data. You can delete them:
+
+| OS | Folders to delete |
+| --- | --- |
+| Windows | `%APPDATA%\Rayfin Fabricator\goals` and `%APPDATA%\Rayfin Fabricator\logs\goals` |
+| macOS | `~/Library/Application Support/Rayfin Fabricator/goals` and `~/Library/Application Support/Rayfin Fabricator/logs/goals` |
+
+See [Files and folders](/docs/reference/files).
+
+### Design mode is now Point & Edit
+
+Design mode and its commands are gone. To show Copilot what to change, use **Point & Edit** in the preview toolbar, or press **Ctrl+Shift+C** (**⌘+Shift+C** on macOS). Pick parts of your app, clip a screenshot or draw on one, and say in chat what should change. See [Point & Edit](/docs/build/touch-up).
+
+Design had its own model picker. It's gone too, with the model you chose in it, including a model on [your own API key](/docs/build/your-own-api-keys). Point & Edit sends your picks with your next chat message, so the chat's model does the work. Choose it in the chat composer.
+
+1.48.0 called the feature Touch Up, and 1.49.0 renamed it Point & Edit.
+
+### Power BI data in chat
+
+Fabricator's own tools that searched for and located semantic models are gone. When you ask for something that needs Power BI data, chat looks it up with **Fabric IQ**. Fabric IQ uses the Azure CLI's sign-in, so you need to [sign in to Azure](/docs/start/accounts), not only to Fabric.
+
+When Fabric IQ is off in a chat, or the Azure CLI isn't signed in, chat asks you on a card in the conversation. Select **Turn on Fabric IQ** or **Sign in to Azure**, and chat carries on. See [When chat needs Fabric IQ](/docs/build/fabric-iq-and-work-iq#when-chat-needs-fabric-iq).
+
+### Team workspaces: select Repair
+
+> [!IMPORTANT]
+> If you own a team workspace that was set up before Fabricator 1.50, open its overview, select **Manage** → **Settings**, and select **Repair** in **Pipeline health**.
+
+From 1.50.0, team apps run on your computer while you work on them, like any other app. Saves still go to a draft pull request, and a draft deploys nothing. **Publish** marks the pull request ready for review, which deploys your preview before it merges.
+
+That needs pipeline template 6. Until an owner selects **Repair**, a workspace keeps its older pipeline, which deploys every draft pull request: each save still costs a pipeline run. See [Manage the workspace](/docs/team/overview#manage-the-workspace) and [What the workflow does](/docs/team/administrators#what-the-workflow-does).
+
+GitHub Free private repositories have no draft pull requests, so they still deploy every save.
+
+The preview toolbar of a team app has **Local** and **Published**, like other apps. **My preview** is gone.
+
+## 1.55.0
+
+- Fabricator speaks Spanish, German and Japanese. Choose **Settings → Appearance → Language**. See [Language](/docs/reference/settings#language).
+
+## 1.54.0
+
+- Apps on Rayfin 2.0 run on this computer, alongside Rayfin 1.36.
+- The Rayfin control in the status bar offers a release newer than Rayfin's latest, such as a preview, with a warning. See [Update to a newer release](/docs/ship/rayfin-versions#update-to-a-newer-release-such-as-a-preview).
+
+## 1.53.0
+
+- **Custom instructions**, in **Settings**, tell Copilot what you want in every app you build. See [Custom instructions](/docs/reference/settings#custom-instructions).
+- The Parallel UI builder experiment is removed.
+- A turn that only edits files counts them as changed, and an Autopilot run shows its summary as the answer.
+- On Home, **Try again** and **Keep** on a project that couldn't be moved to trash work again.
+
+## 1.52.0
+
+- Each project has a terminal under its views, and your app's **Output** moves into it. Press `` Ctrl+` `` to show or hide it. See [Run commands in the terminal](/docs/build/terminal).
+- The Goals experiment is removed. See [Goals](#goals).
+
+## 1.51.0
+
+- New project suggests a name, and can create a GitHub repository for the app. An app that isn't on GitHub yet can get one from the git item in the status bar. See [Put an app on GitHub](/docs/build/code-and-history#put-an-app-on-github).
+- Signing in to Fabric waits until you have a project, because it uses a project's Rayfin CLI.
+- The Rayfin CLI labels the telemetry of the commands Fabricator runs as Fabricator's. See [Privacy](/docs/reference/privacy#rayfins-tools-send-their-own-telemetry).
+
+## 1.50.0
+
+- Team apps run on this computer, and publishing deploys your preview. See [Team workspaces: select Repair](#team-workspaces-select-repair).
+- The status bar's workspace link opens the published app's item in Fabric, and the published apps panel shows its item ID.
+- **Settings → About** and bug reports show the rayfin-local version.
+
+## 1.49.0 to 1.49.2
+
+- Touch Up is renamed **Point & Edit**.
+- Chat turns on Fabric IQ, or asks you to sign in to Azure, when it needs Power BI data. Fabricator's own semantic model search is removed. See [Power BI data in chat](#power-bi-data-in-chat).
+- The Parallel UI builder experiment arrives.
+- When Power BI turns down your Azure sign-in, apps on this computer retry semantic model queries with the Rayfin CLI's sign-in. See [Power BI turned down your sign-in](/docs/troubleshooting/preview#power-bi-turned-down-your-sign-in).
+
+## 1.48.0 and 1.48.1
+
+- Design mode is replaced by Touch Up. See [Design mode is now Point & Edit](#design-mode-is-now-point--edit).
+- [MCP servers](/docs/build/mcp-servers) and exporting a project as an app leave Experiments, for everyone.
+- **Create project** stays in view on the New project screen.
