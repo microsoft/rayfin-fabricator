@@ -1755,7 +1755,7 @@ describe('ChatPanel Touch Up', () => {
     render(<PickHarness buildPickTurn={build} onPicksSent={sent} onPickRemove={removed} />)
 
     const tray = screen.getByRole('list', { name: 'Picked elements to send' })
-    expect(tray.textContent).toBe('1Button · Save')
+    expect(tray.textContent).toBe('1Pick 1Button · Save')
     expect(tray.querySelector('img')?.getAttribute('src')).toBe(SAVE_SHOT.thumb)
     fireEvent.click(screen.getByRole('button', { name: 'Remove Button · Save' }))
     expect(removed).toHaveBeenCalledWith('a')
@@ -1779,7 +1779,7 @@ describe('ChatPanel Touch Up', () => {
     // The transcript shows the words and what was picked, not the prompt; the
     // picture shows in its chip, not again as a loose screenshot.
     const chips = await screen.findByRole('list', { name: 'Picked elements' })
-    expect(chips.textContent).toBe('1Button · Save')
+    expect(chips.textContent).toBe('1Pick 1Button · Save')
     expect(chips.querySelector('img')?.getAttribute('src')).toBe(SAVE_SHOT.thumb)
     expect(screen.getByText('make it the primary action')).toBeTruthy()
     expect(document.querySelectorAll('.msg-shots img')).toHaveLength(0)
@@ -1889,7 +1889,7 @@ describe('ChatPanel Touch Up', () => {
     // Both messages show the pick; the rerun has no picture to show.
     const sent = screen.getAllByRole('list', { name: 'Picked elements' })
     expect(sent).toHaveLength(2)
-    expect(sent[1].textContent).toBe('1Button · Save')
+    expect(sent[1].textContent).toBe('1Pick 1Button · Save')
     expect(sent[1].querySelector('img')).toBeNull()
   })
 })

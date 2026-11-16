@@ -128,3 +128,63 @@ describe('TerminalPanel Output', () => {
     })
   })
 })
+
+describe('TerminalPanel keyboard', () => {
+  it('moves between tabs with the arrow keys, one Tab stop, each tab labelling the terminal', async () => {
+    terminalStore.open('p1')
+    terminalStore.showOutput('p1')
+    render(panel(local({})))
+    await act(async () => {})
+    const list = screen.getByRole('tablist', { name: 'Terminals' })
+    const [output, shell] = within(list).getAllByRole('tab')
+    expect([output.tabIndex, shell.tabIndex]).toEqual([0, -1])
+    const body = screen.getByRole('tabpanel')
+    expect(output.getAttribute('aria-controls')).toBe(body.id)
+    expect(body.getAttribute('aria-labelledby')).toBe(output.id)
+    // Only tabs belong in the tablist.
+    expect(within(list).queryAllByRole('button')).toEqual([])
+
+    output.focus()
+    fireEvent.keyDown(output, { key: 'ArrowRight' })
+    expect(document.activeElement).toBe(shell)
+    fireEvent.keyDown(shell, { key: 'ArrowRight' })
+    expect(document.activeElement).toBe(output)
+    fireEvent.keyDown(output, { key: 'End' })
+    expect(document.activeElement).toBe(shell)
+    // Moving focus doesn't open the tab; Enter (a click) does.
+    expect(projectTerminals(terminalStore.getState(), 'p1').output).toBe(true)
+  })
+
+  it('closes a terminal with Delete on its tab', async () => {
+    terminalStore.open('p1')
+    render(panel())
+    await act(async () => {})
+    const tab = screen.getByRole('tab', { name: /terminal/ })
+    expect(tab.getAttribute('aria-keyshortcuts')).toBe('Delete')
+    fireEvent.keyDown(tab, { key: 'Delete' })
+    expect(projectTerminals(terminalStore.getState(), 'p1').tabs).toEqual([])
+  })
+
+  it('resizes from the keyboard on its separator', async () => {
+    terminalStore.open('p1')
+    terminalStore.setHeight(300)
+    const { container } = render(panel())
+    Object.defineProperty(container, 'clientHeight', { configurable: true, value: 640 })
+    await act(async () => {})
+    const handle = screen.getByRole('separator', { name: /resize/i })
+    expect(handle.tabIndex).toBe(0)
+    expect(handle.getAttribute('aria-valuenow')).toBe('300')
+    expect(handle.getAttribute('aria-valuemin')).toBe('120')
+
+    fireEvent.keyDown(handle, { key: 'ArrowUp' })
+    expect(terminalStore.getState().height).toBe(320)
+    fireEvent.keyDown(handle, { key: 'PageDown' })
+    expect(terminalStore.getState().height).toBe(220)
+    fireEvent.keyDown(handle, { key: 'End' })
+    expect(terminalStore.getState().height).toBe(500)
+    fireEvent.keyDown(handle, { key: 'Home' })
+    expect(terminalStore.getState().height).toBe(120)
+    expect(handle.getAttribute('aria-valuenow')).toBe('120')
+    expect(handle.getAttribute('aria-valuemax')).toBe('500')
+  })
+})

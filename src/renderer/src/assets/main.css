@@ -7778,6 +7778,9 @@ button.deploy-trouble-ray:focus-visible {
 }
 
 /* Status: a small dot and a word. */
+.home-project-live {
+  display: contents;
+}
 .home-project-status {
   --dot: var(--text-faint);
   display: inline-flex;

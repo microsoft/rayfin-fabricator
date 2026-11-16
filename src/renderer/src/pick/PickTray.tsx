@@ -2,6 +2,7 @@ import type { JSX } from 'react'
 import type { ChatPickRef } from '@shared/ipc'
 import { CloseIcon, PickIcon } from '../components/icons'
 import { useTranslation } from '../i18n'
+import { shownPickLabel } from './strings'
 import type { PickedElement } from './useTouchUp'
 import './pick.css'
 
@@ -26,51 +27,65 @@ export function PickTray({
   if (picks.length === 0) return null
   return (
     <ul className="pick-tray" aria-label={t('pick.toSend')}>
-      {picks.map((p) => (
-        <li
-          key={p.id}
-          className="pick-chip"
-          title={p.target.label}
-          onMouseEnter={() => onFocus?.(p.id)}
-          onMouseLeave={() => onFocus?.(null)}
-        >
-          <span className="pick-chip-n" aria-label={t('pick.number', { n: p.n })}>
-            {p.n}
-          </span>
-          {p.shot && onOpen ? (
+      {picks.map((p) => {
+        const label = shownPickLabel(p.target)
+        return (
+          <li
+            key={p.id}
+            className="pick-chip"
+            title={label}
+            onMouseEnter={() => onFocus?.(p.id)}
+            onMouseLeave={() => onFocus?.(null)}
+          >
+            <PickNumber n={p.n} />
+            {p.shot && onOpen ? (
+              <button
+                type="button"
+                className="pick-chip-shot pick-chip-shot--open"
+                onClick={() => onOpen(p.id)}
+                aria-label={t('pick.draw', { label })}
+                title={t('pick.drawTitle')}
+              >
+                <img src={p.shot.thumb} alt="" draggable={false} />
+              </button>
+            ) : (
+              <span
+                className={`pick-chip-shot${p.capturing ? ' pick-chip-shot--loading' : ''}`}
+                aria-hidden="true"
+              >
+                {p.shot ? <img src={p.shot.thumb} alt="" draggable={false} /> : <PickIcon />}
+              </span>
+            )}
+            <span className="pick-chip-label">{label}</span>
             <button
               type="button"
-              className="pick-chip-shot pick-chip-shot--open"
-              onClick={() => onOpen(p.id)}
-              aria-label={t('pick.draw', { label: p.target.label })}
-              title={t('pick.drawTitle')}
+              className="pick-chip-x"
+              onClick={() => {
+                onFocus?.(null)
+                onRemove(p.id)
+              }}
+              aria-label={t('pick.remove', { label })}
+              title={t('actions.remove')}
             >
-              <img src={p.shot.thumb} alt="" draggable={false} />
+              <CloseIcon />
             </button>
-          ) : (
-            <span
-              className={`pick-chip-shot${p.capturing ? ' pick-chip-shot--loading' : ''}`}
-              aria-hidden="true"
-            >
-              {p.shot ? <img src={p.shot.thumb} alt="" draggable={false} /> : <PickIcon />}
-            </span>
-          )}
-          <span className="pick-chip-label">{p.target.label}</span>
-          <button
-            type="button"
-            className="pick-chip-x"
-            onClick={() => {
-              onFocus?.(null)
-              onRemove(p.id)
-            }}
-            aria-label={t('pick.remove', { label: p.target.label })}
-            title={t('actions.remove')}
-          >
-            <CloseIcon />
-          </button>
-        </li>
-      ))}
+          </li>
+        )
+      })}
     </ul>
+  )
+}
+
+/** A pick's number badge; screen readers hear "Pick 2" instead of a bare number. */
+function PickNumber({ n }: { n: number }): JSX.Element {
+  const { t } = useTranslation('app')
+  return (
+    <>
+      <span className="pick-chip-n" aria-hidden="true">
+        {n}
+      </span>
+      <span className="sr-only">{t('pick.number', { n })}</span>
+    </>
   )
 }
 
@@ -95,18 +110,17 @@ export function SentPicks({
     <ul className="msg-picks" aria-label={t('pick.sent')}>
       {picks.map((p) => {
         const thumb = p.shot == null ? undefined : thumbs?.[p.shot]
+        const label = shownPickLabel(p)
         return (
-          <li key={p.n} className="pick-chip pick-chip--sent" title={p.label}>
-            <span className="pick-chip-n" aria-label={t('pick.number', { n: p.n })}>
-              {p.n}
-            </span>
+          <li key={p.n} className="pick-chip pick-chip--sent" title={label}>
+            <PickNumber n={p.n} />
             {thumb &&
               (onOpen && p.shot != null ? (
                 <button
                   type="button"
                   className="pick-chip-shot pick-chip-shot--open"
                   onClick={() => onOpen(p.shot!)}
-                  aria-label={t('pick.show', { label: p.label })}
+                  aria-label={t('pick.show', { label })}
                   title={t('pick.showTitle')}
                 >
                   <img src={thumb} alt="" draggable={false} />
@@ -116,7 +130,7 @@ export function SentPicks({
                   <img src={thumb} alt="" draggable={false} />
                 </span>
               ))}
-            <span className="pick-chip-label">{p.label}</span>
+            <span className="pick-chip-label">{label}</span>
           </li>
         )
       })}

@@ -99,6 +99,38 @@
     "drawTitle": "Show it larger and draw on it",
     "remove": "Remove {{label}}",
     "show": "Show the picture of {{label}}",
-    "showTitle": "Show it larger"
+    "showTitle": "Show it larger",
+    "role": {
+      "button": "Button",
+      "link": "Link",
+      "heading": "Heading",
+      "text": "Text",
+      "image": "Image",
+      "icon": "Icon",
+      "field": "Field",
+      "card": "Card",
+      "list": "List",
+      "item": "List item",
+      "table": "Table",
+      "chart": "Chart",
+      "nav": "Navigation",
+      "header": "Header",
+      "footer": "Footer",
+      "section": "Section",
+      "container": "Group",
+      "element": "Element"
+    },
+    "overlay": {
+      "start": "Click anything you want to change",
+      "picked_one": "{{count}} picked · say in chat what to change",
+      "picked_other": "{{count}} picked · say in chat what to change",
+      "clip": "+ drag to clip a screenshot",
+      "keys": "Tab to move, Enter to pick",
+      "done": "Done",
+      "doneTitle": "Finish picking (Esc)",
+      "drop": "click to drop it",
+      "tooMany": "You can pick up to {{n}} elements at a time",
+      "clipAdded": "Clip added to chat"
+    }
   }
 }

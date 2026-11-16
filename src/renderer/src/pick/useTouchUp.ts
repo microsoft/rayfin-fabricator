@@ -13,6 +13,7 @@ import { isMac } from '../platform'
 import { cropItems, type StagedShot } from './capture'
 import { readFabricatorTheme } from './hostTheme'
 import { composePickPrompt, picksDisplay } from './prompt'
+import { pickOverlayStrings } from './strings'
 
 /**
  * Touch Up, owned by the Workbench: point at elements in the app in the
@@ -178,17 +179,19 @@ export function useTouchUp(
     [listFor, writeList]
   )
 
-  /** Hand the page our state: armed, on or off, our picks and Fabricator's theme. */
+  /** Hand the page our state: armed, on or off, our picks, and Fabricator's theme and words. */
   const apply = useCallback(async (): Promise<void> => {
     const s = surfaceRef.current
     if (!s || !projectRef.current) return
     const theme = readFabricatorTheme()
-    themeRef.current = JSON.stringify(theme)
+    const strings = pickOverlayStrings()
+    themeRef.current = JSON.stringify([theme, strings])
     lastArmRef.current = performance.now()
     await window.api.preview.pick
       .set(true, onRef.current, s.embedded, s.appUrl, {
         theme,
-        picks: refs(listFor(projectRef.current))
+        picks: refs(listFor(projectRef.current)),
+        strings
       })
       .catch(() => {})
   }, [listFor])
@@ -360,7 +363,8 @@ export function useTouchUp(
       pageRef.current = status.page
       seqRef.current = 0
     } else if (
-      (!status.armed || JSON.stringify(readFabricatorTheme()) !== themeRef.current) &&
+      (!status.armed ||
+        JSON.stringify([readFabricatorTheme(), pickOverlayStrings()]) !== themeRef.current) &&
       performance.now() - lastArmRef.current > REARM_MS
     ) {
       reapply = true
@@ -509,6 +513,8 @@ export function useTouchUp(
         picks: picks.map((p) => ({
           n: p.n,
           label: p.target.label,
+          role: p.target.role,
+          name: p.target.name,
           shot: p.shot ? pictured.indexOf(p) : undefined
         }))
       }

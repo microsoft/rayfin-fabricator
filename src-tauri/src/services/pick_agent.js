@@ -10,12 +10,17 @@
  *     to the chat composer; clicking a picked element again drops it;
  *   - Shift+drag clips any region of the app instead, and the host attaches a
  *     screenshot of it;
+ *   - from the keyboard, Tab and Shift+Tab move the highlight between the
+ *     page's elements, Enter or Space picks the highlighted one, and Shift+Enter
+ *     clips it;
  *   - Escape, Done or the shortcut again finishes; holding Alt uses the app.
+ * Its words come from the host (`options.strings`), in Fabricator's language;
+ * the English ones here are the fallback. The label sent to Copilot stays English.
  * It never changes the app: Copilot does, in the chat turn that follows.
  *
  * Host comms are pull-based and JSON-only, like the rest of the preview:
- * `set(mode, appOrigin, options)` arms the page, switches picking on or off and
- * restores the host's picks; `peek()` returns the state plus the events since
+ * `set(mode, appOrigin, options)` arms the page, switches picking on or off,
+ * restores the host's picks and takes its words; `peek()` returns the state plus the events since
  * the page loaded (the host remembers the last `seq` it handled, per `page`);
  * `command(cmd)` prepares and ends a capture, outlines a pick, or syncs the
  * host's numbering. The wire types live in `src/shared/pick.ts`.
@@ -238,9 +243,15 @@
     }
     return clip(ownText(el) || readableText(el), 36);
   }
+  /** The English label Copilot reads, e.g. "Button · Save". */
   function labelOf(el) {
     var role = roleOf(el), name = nameOf(el, role);
     return (ROLE_NAMES[role] || 'Element') + (name ? ' · ' + name : '');
+  }
+  /** The same label in Fabricator's language, for the highlight's tag. */
+  function shownLabelOf(el) {
+    var role = roleOf(el), name = nameOf(el, role);
+    return roleName(role) + (name ? ' · ' + name : '');
   }
 
   /** Normalize what the pointer is over into the element a person means. */
@@ -322,14 +333,16 @@
   /** Everything chat needs to know about a picked element (see `PickTarget`). */
   function describe(el) {
     var role = roleOf(el), r = el.getBoundingClientRect();
+    var name = nameOf(el, role);
     var target = {
-      label: labelOf(el),
+      label: (ROLE_NAMES[role] || 'Element') + (name ? ' · ' + name : ''),
       role: role,
       tag: el.tagName.toLowerCase(),
       selector: cssPath(el),
       route: route(),
       box: { w: Math.round(r.width), h: Math.round(r.height) }
     };
+    if (name) target.name = name;
     var text = role === 'chart' ? '' : clip(ownText(el) || readableText(el), 120);
     if (text) target.text = text;
     var classes = (el.getAttribute('class') || '').trim();
@@ -355,6 +368,34 @@
     return target;
   }
 
+  // ---- words ------------------------------------------------------------------------
+  /** English, until the host hands over Fabricator's own words (`options.strings`). */
+  var DEFAULT_STRINGS = {
+    roles: ROLE_NAMES,
+    start: 'Click anything you want to change',
+    picked: { one: '{n} picked · say in chat what to change', other: '{n} picked · say in chat what to change' },
+    shift: 'Shift',
+    clip: '+ drag to clip a screenshot',
+    keys: 'Tab to move, Enter to pick',
+    done: 'Done',
+    doneTitle: 'Finish picking (Esc)',
+    drop: 'click to drop it',
+    tooMany: 'You can pick up to {n} elements at a time',
+    clipAdded: 'Clip added to chat'
+  };
+  function str(key, n) {
+    var own = state.strings && state.strings[key], text = typeof own === 'string' && own ? own : DEFAULT_STRINGS[key];
+    if (key === 'picked') {
+      var forms = own && typeof own === 'object' ? own : DEFAULT_STRINGS.picked;
+      text = (n === 1 ? forms.one : forms.other) || forms.other || DEFAULT_STRINGS.picked.other;
+    }
+    return String(text).replace(/\{n\}/g, n == null ? '' : String(n));
+  }
+  function roleName(role) {
+    var own = state.strings && state.strings.roles;
+    return (own && typeof own[role] === 'string' && own[role]) || ROLE_NAMES[role] || ROLE_NAMES.element;
+  }
+
   // ---- state ------------------------------------------------------------------------
   var PAGE = uid('p');
   var state = {
@@ -367,8 +408,12 @@
     caps: {},
     /** A Shift+drag clip in progress: where it started and where the pointer is. */
     clip: null,
+    /** The highlight was moved from the keyboard (Tab), not the pointer. */
+    kbd: false,
     hover: null,
     hoverLabel: '',
+    /** The host's words (see `DEFAULT_STRINGS`). */
+    strings: null,
     seq: 0,
     events: [],
     results: {},
@@ -474,6 +519,7 @@
     '.clip.inside .size{top:auto;bottom:4px;right:4px;margin:0}',
     '.hint .what{min-width:0;overflow:hidden;text-overflow:ellipsis}',
     '@media (max-width:640px){.hint .more,.hint .sep{display:none}}',
+    '.sr{position:fixed;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}',
     '.toast{position:fixed;left:50%;bottom:16px;transform:translateX(-50%);padding:calc(6px*var(--fp-scale)) calc(12px*var(--fp-scale));border:1px solid var(--fp-border);border-radius:999px;background:var(--fp-panel);color:var(--fp-txt);font-weight:600;white-space:nowrap;animation:fpin .18s ease-out}',
     '@keyframes fppop{0%{transform:translate(-45%,-45%) scale(.2);opacity:0}100%{transform:translate(-45%,-45%) scale(1);opacity:1}}',
     '@keyframes fpfocus{0%{outline-offset:12px;opacity:0}100%{outline-offset:4px;opacity:1}}',
@@ -503,7 +549,8 @@
     ui.effects = h('div');
     ui.hint = h('div');
     ui.toast = h('div');
-    [ui.frame, ui.picks, ui.hover, ui.focus, ui.tag, ui.clip, ui.effects, ui.hint, ui.toast].forEach(function (n) { ui.layer.appendChild(n); });
+    ui.live = h('div', { class: 'sr', role: 'status', 'aria-live': 'polite' });
+    [ui.frame, ui.picks, ui.hover, ui.focus, ui.tag, ui.clip, ui.effects, ui.hint, ui.toast, ui.live].forEach(function (n) { ui.layer.appendChild(n); });
     // Keep pointer and keyboard events on our own UI out of the app's handlers.
     ['keydown', 'keyup', 'click', 'mousedown', 'mouseup', 'pointerdown', 'pointerup', 'dblclick', 'contextmenu'].forEach(function (type) {
       host.addEventListener(type, function (e) { e.stopPropagation(); });
@@ -519,10 +566,18 @@
   var toastTimer = 0;
   function toast(message) {
     if (!ui.toast) return;
+    if (message) announce(message);
     clearTimeout(toastTimer);
     ui.toast.className = message ? 'toast' : '';
     ui.toast.textContent = message || '';
     if (message) toastTimer = setTimeout(function () { toast(''); }, 1800);
+  }
+
+  /** Tell a screen reader what the keyboard is on, or what just happened. */
+  function announce(message) {
+    if (!ui.live) return;
+    ui.live.textContent = '';
+    if (message) ui.live.textContent = message;
   }
 
   function key(label) { return h('kbd', { text: label }); }
@@ -533,12 +588,14 @@
     if (!state.on) return;
     ui.hint.className = 'hint' + (state.under ? ' under' : '');
     var n = state.picks.length;
-    var what = n ? n + ' picked · say in chat what to change' : 'Click anything you want to change';
+    var what = n ? str('picked', n) : str('start');
     ui.hint.appendChild(h('span', { class: 'dot' }));
     ui.hint.appendChild(h('span', { class: 'what', text: what }));
     ui.hint.appendChild(h('span', { class: 'sep' }));
-    ui.hint.appendChild(h('span', { class: 'more' }, [key('Shift'), '+ drag to clip a screenshot']));
-    ui.hint.appendChild(h('button', { type: 'button', text: 'Done', title: 'Finish picking (Esc)', onclick: function () { exitPicking(); } }));
+    ui.hint.appendChild(h('span', { class: 'more' }, [key(str('shift')), str('clip')]));
+    ui.hint.appendChild(h('span', { class: 'sep' }));
+    ui.hint.appendChild(h('span', { class: 'more' }, [str('keys')]));
+    ui.hint.appendChild(h('button', { type: 'button', text: str('done'), title: str('doneTitle'), onclick: function () { exitPicking(); } }));
   }
 
   function flash(rect) {
@@ -568,7 +625,7 @@
     var r = el.getBoundingClientRect();
     place(ui.hover, r);
     var label = state.hoverLabel;
-    var detail = pickOf(el) ? 'click to drop it' : Math.round(r.width) + ' × ' + Math.round(r.height);
+    var detail = pickOf(el) ? str('drop') : Math.round(r.width) + ' × ' + Math.round(r.height);
     if (ui.tag.__label !== label || ui.tag.__detail !== detail) {
       ui.tag.__label = label;
       ui.tag.__detail = detail;
@@ -652,7 +709,7 @@
   function setHover(el) {
     if (el === state.hover) return;
     state.hover = el;
-    state.hoverLabel = el ? labelOf(el) : '';
+    state.hoverLabel = el ? shownLabelOf(el) : '';
   }
   function onPointerMove(e) {
     if (state.capturing) return;
@@ -667,6 +724,7 @@
       var under = e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom && !inOurUi(e);
       if (under !== state.under) { state.under = under; ui.hint.classList.toggle('under', under); }
     }
+    state.kbd = false;
     // Shift held clips rather than picks, so nothing is highlighted.
     setHover(inOurUi(e) || e.altKey || e.shiftKey ? null : pick(e.target));
   }
@@ -711,7 +769,12 @@
       if (state.on) exitPicking(); else enterPicking();
       return;
     }
-    if (state.on && e.key === 'Shift') setHover(null);
+    if (state.on && e.key === 'Shift' && !state.kbd) setHover(null);
+    if (state.on && !state.clip && !e.altKey && !e.ctrlKey && !e.metaKey && onPickKey(e)) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
     if (state.on && e.key === 'Escape') {
       e.preventDefault();
       e.stopPropagation();
@@ -721,6 +784,69 @@
   }
   function onBlur() { setHover(null); cancelClip(); }
 
+  // ---- the keyboard: Tab through the page's elements, Enter picks ------------------------
+  var SKIP_TAGS = /^(script|style|noscript|template|br|wbr|option|optgroup|source|track|param|area|map)$/;
+  /** What Tab stops on: the elements a person would name, visible, in page order. */
+  function keyStops() {
+    var out = [];
+    var all = document.body ? document.body.getElementsByTagName('*') : [];
+    for (var i = 0; i < all.length; i++) {
+      var el = all[i];
+      if (SKIP_TAGS.test(el.tagName.toLowerCase()) || isOurs(el) || pick(el) !== el) continue;
+      var role = roleOf(el);
+      if (role === 'container' || role === 'element') continue;
+      var r = el.getBoundingClientRect();
+      if (r.width < 1 || r.height < 1) continue;
+      var cs = getComputedStyle(el);
+      if (cs.visibility === 'hidden' || cs.display === 'none') continue;
+      out.push(el);
+    }
+    return out;
+  }
+  function moveKeyHighlight(back) {
+    var stops = keyStops();
+    if (!stops.length) return;
+    var from = state.hover && live(state.hover) ? stops.indexOf(state.hover) : -1, next;
+    if (from >= 0) next = (from + (back ? -1 : 1) + stops.length) % stops.length;
+    else {
+      // Start on what the app has focused, when Tab can stop on it.
+      var focused = pick(document.activeElement);
+      next = focused ? stops.indexOf(focused) : -1;
+      if (next < 0) next = back ? stops.length - 1 : 0;
+    }
+    var el = stops[next];
+    state.kbd = true;
+    setHover(el);
+    var r = el.getBoundingClientRect();
+    if (r.bottom < 0 || r.top > window.innerHeight) {
+      try { el.scrollIntoView({ block: 'center' }); } catch (e) {}
+    }
+    announce(state.hoverLabel + (pickOf(el) ? ', ' + str('drop') : ''));
+    loop();
+  }
+  /** Clip the highlighted element's area, as Shift+drag over it would. */
+  function clipHighlighted(el) {
+    var r = visibleRect(el);
+    if (!r || r.w < MIN_CLIP || r.h < MIN_CLIP) return;
+    var id = uid('c');
+    state.caps[id] = r;
+    setTimeout(function () { delete state.caps[id]; }, 20000);
+    emit('capture', { capture: { id: id, label: 'Clip', rect: r } });
+  }
+  /** Picking's own keys; true when the key was ours. */
+  function onPickKey(e) {
+    if (e.key === 'Tab') { moveKeyHighlight(e.shiftKey); return true; }
+    var el = state.kbd && live(state.hover) ? state.hover : null;
+    if (!el) return false;
+    if (e.key === 'Enter' && e.shiftKey) { clipHighlighted(el); return true; }
+    if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+      togglePick(el);
+      if (!pickOf(el)) announce(state.picks.length ? str('picked', state.picks.length) : str('start'));
+      return true;
+    }
+    return false;
+  }
+
   // ---- picking ----------------------------------------------------------------------
   function togglePick(el) {
     var existing = pickOf(el);
@@ -729,11 +855,12 @@
       emit('unpick', { id: existing.id });
       return;
     }
-    if (state.picks.length >= MAX_PICKS) { toast('You can pick up to ' + MAX_PICKS + ' elements at a time'); return; }
+    if (state.picks.length >= MAX_PICKS) { toast(str('tooMany', MAX_PICKS)); return; }
     var p = { id: uid('k'), n: state.picks.length + 1, el: el, target: describe(el), fresh: true };
     state.picks.push(p);
-    setHover(null);
+    if (!state.kbd) setHover(null);
     renderHint();
+    announce(str('picked', state.picks.length));
     emit('pick', { pick: { id: p.id, n: p.n, target: p.target, rect: visibleRect(el) } });
   }
   function dropPick(id) {
@@ -823,7 +950,7 @@
     var r = capRect(flashId);
     if (r) {
       flash(r);
-      if (!pickById(flashId)) toast('Clip added to chat');
+      if (!pickById(flashId)) toast(str('clipAdded'));
     }
     delete state.caps[flashId];
   }
@@ -913,6 +1040,7 @@
   function applyLocal(o) {
     o = o || {};
     if (o.theme) { state.theme = o.theme; applyTheme(); }
+    if (o.strings && typeof o.strings === 'object') { state.strings = o.strings; renderHint(); }
     if (o.picks) syncPicks(o.picks);
     if (!o.armed) { disarm(); return; }
     arm();

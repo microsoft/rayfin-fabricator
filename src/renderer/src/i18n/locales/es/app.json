@@ -99,6 +99,38 @@
     "drawTitle": "Ampliar y dibujar encima",
     "remove": "Quitar {{label}}",
     "show": "Mostrar la imagen de {{label}}",
-    "showTitle": "Ampliar"
+    "showTitle": "Ampliar",
+    "role": {
+      "button": "Botón",
+      "link": "Vínculo",
+      "heading": "Encabezado",
+      "text": "Texto",
+      "image": "Imagen",
+      "icon": "Icono",
+      "field": "Campo",
+      "card": "Tarjeta",
+      "list": "Lista",
+      "item": "Elemento de lista",
+      "table": "Tabla",
+      "chart": "Gráfico",
+      "nav": "Navegación",
+      "header": "Cabecera",
+      "footer": "Pie de página",
+      "section": "Sección",
+      "container": "Grupo",
+      "element": "Elemento"
+    },
+    "overlay": {
+      "start": "Haz clic en lo que quieras cambiar",
+      "picked_one": "{{count}} seleccionado · di en el chat qué cambiar",
+      "picked_other": "{{count}} seleccionados · di en el chat qué cambiar",
+      "clip": "+ arrastrar para recortar una captura de pantalla",
+      "keys": "Tab para moverte, Entrar para seleccionar",
+      "done": "Listo",
+      "doneTitle": "Terminar la selección (Esc)",
+      "drop": "haz clic para quitarlo",
+      "tooMany": "Puedes seleccionar hasta {{n}} elementos a la vez",
+      "clipAdded": "Recorte agregado al chat"
+    }
   }
 }

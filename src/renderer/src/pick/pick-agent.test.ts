@@ -2,7 +2,14 @@
 import { readFileSync } from 'fs'
 import { resolve } from 'path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { PickCaptureLayout, PickEvent, PickRef, PickStatus, PickTarget } from '@shared/pick'
+import type {
+  PickCaptureLayout,
+  PickEvent,
+  PickRef,
+  PickStatus,
+  PickStrings,
+  PickTarget
+} from '@shared/pick'
 
 /**
  * The Touch Up agent injected into the preview
@@ -24,7 +31,7 @@ interface Agent {
   set: (
     mode: string,
     appOrigin: string | null,
-    options: { armed?: boolean; on?: boolean; picks?: PickRef[] }
+    options: { armed?: boolean; on?: boolean; picks?: PickRef[]; strings?: PickStrings }
   ) => void
   peek: (opts?: { page: string | null; since: number }) => PickStatus | null
   command: (cmd: Record<string, unknown>) => { accepted: boolean }
@@ -104,6 +111,18 @@ function shortcut(target: EventTarget = document.body): KeyboardEvent {
   })
   target.dispatchEvent(event)
   return event
+}
+function key(k: string, init: KeyboardEventInit = {}): KeyboardEvent {
+  const event = new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true, ...init })
+  document.body.dispatchEvent(event)
+  return event
+}
+function tag(): string {
+  flushFrames()
+  return shadow()?.querySelector('.tag')?.textContent ?? ''
+}
+function live(): string {
+  return shadow()?.querySelector('[role="status"]')?.textContent ?? ''
 }
 function events(agent: Agent): PickEvent[] {
   return agent.peek()?.events ?? []
@@ -352,6 +371,94 @@ describe('Touch Up agent in the app’s page', () => {
     expect(events(agent)).toEqual([{ seq: 1, type: 'unpick', id: 'k1' }])
     pointerDown(other)
     expect(picked(agent)[0].pick).toMatchObject({ n: 2, target: { label: 'Link · Deals' } })
+  })
+
+  it('picks from the keyboard: Tab moves, Enter or Space picks, Shift+Enter clips', () => {
+    const [a, b, c] = ['Alpha', 'Beta', 'Gamma'].map((name, i) => {
+      const el = add(`<button>${name}</button>`)
+      rect(el, { x: 10, y: 10 + i * 40, w: 80, h: 30 })
+      return el
+    })
+    add('<div>no box, so no stop</div>')
+    agent.set('direct', null, { armed: true, on: true })
+    expect(hint()).toContain('Tab to move, Enter to pick')
+
+    expect(key('Tab').defaultPrevented).toBe(true)
+    expect(tag()).toBe('Button · Alpha80 × 30')
+    expect(live()).toBe('Button · Alpha')
+    key('Tab')
+    key('Tab')
+    expect(tag()).toContain('Button · Gamma')
+    key('Tab')
+    expect(tag()).toContain('Button · Alpha')
+    key('Tab', { shiftKey: true })
+    expect(tag()).toContain('Button · Gamma')
+
+    key('Enter')
+    expect(picked(agent)[0].pick).toMatchObject({ n: 1, target: { label: 'Button · Gamma' } })
+    expect(live()).toBe('1 picked · say in chat what to change')
+    expect(tag()).toContain('click to drop it')
+    key('Tab', { shiftKey: true })
+    expect(key(' ').defaultPrevented).toBe(true)
+    expect(picked(agent).map((e) => e.pick.target.name)).toEqual(['Gamma', 'Beta'])
+    expect(live()).toBe('2 picked · say in chat what to change')
+
+    key('Enter', { shiftKey: true })
+    const clip = events(agent).slice(-1)[0] as Extract<PickEvent, { type: 'capture' }>
+    expect(clip.type).toBe('capture')
+    expect(clip.capture.rect).toEqual({ x: 10, y: 50, w: 80, h: 30 })
+
+    // Space again drops it; the app never saw the keys.
+    const appKey = vi.fn()
+    b.addEventListener('keydown', appKey)
+    key(' ')
+    expect(events(agent).slice(-1)[0]).toMatchObject({ type: 'unpick' })
+    expect(appKey).not.toHaveBeenCalled()
+    expect([a, c].every((el) => el.isConnected)).toBe(true)
+  })
+
+  it('starts the keyboard from what the app has focused', () => {
+    const first = add('<button>First</button>')
+    const second = add('<button>Second</button>')
+    rect(first, { x: 0, y: 0, w: 50, h: 20 })
+    rect(second, { x: 0, y: 30, w: 50, h: 20 })
+    second.focus()
+    agent.set('direct', null, { armed: true, on: true })
+    key('Tab')
+    expect(tag()).toContain('Button · Second')
+  })
+
+  it('shows the host’s words, but tells Copilot in English', () => {
+    const strings: PickStrings = {
+      roles: { button: 'Schaltfläche' } as PickStrings['roles'],
+      start: 'Klicke auf alles',
+      picked: { one: '{n} Element ausgewählt', other: '{n} Elemente ausgewählt' },
+      shift: 'Umschalt',
+      clip: '+ ziehen',
+      keys: 'Tab zum Wechseln',
+      done: 'Fertig',
+      doneTitle: 'Auswahl beenden (Esc)',
+      drop: 'zum Entfernen klicken',
+      tooMany: 'Höchstens {n}',
+      clipAdded: 'Ausschnitt hinzugefügt'
+    }
+    const save = add('<button>Save</button>')
+    rect(save, { x: 0, y: 0, w: 50, h: 20 })
+    agent.set('direct', null, { armed: true, on: true, strings })
+    expect(hint()).toBe('Klicke auf allesUmschalt+ ziehenTab zum WechselnFertig')
+    expect(shadow()!.querySelector('.hint button')?.getAttribute('title')).toBe(
+      'Auswahl beenden (Esc)'
+    )
+
+    key('Tab')
+    expect(tag()).toBe('Schaltfläche · Save50 × 20')
+    key('Enter')
+    expect(picked(agent)[0].pick.target).toMatchObject({ label: 'Button · Save', name: 'Save' })
+    expect(hint()).toContain('1 Element ausgewählt')
+    expect(tag()).toBe('Schaltfläche · Savezum Entfernen klicken')
+    for (let i = 0; i < 8; i++) pointerDown(add(`<button>B${i}</button>`))
+    expect(hint()).toContain('8 Elemente ausgewählt')
+    expect(shadow()!.querySelector('.toast')?.textContent).toBe('Höchstens 8')
   })
 
   it('names elements the way people see them', () => {
