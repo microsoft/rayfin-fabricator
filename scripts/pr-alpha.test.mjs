@@ -122,6 +122,7 @@ test('publication refuses tampered archives, wrong build/PR and unsigned metadat
     archive,
     archiveSha256: hash,
     signing: {
+      sourceCommit: commit,
       originalPayloadsUnchanged: true,
       files: [
         ['rayfin-fabricator.exe', 'CP-230012'],
@@ -146,6 +147,7 @@ test('publication refuses tampered archives, wrong build/PR and unsigned metadat
     (data) => (data.sourceCommit = 'b'.repeat(40)),
     (data) => (data.buildId = '124'),
     (data) => (data.pullRequest = 43),
+    (data) => (data.signing.sourceCommit = 'b'.repeat(40)),
     (data) => (data.signing.files[0].authenticode.status = 'NotSigned'),
     (data) => (data.archiveSha256 = 'tampered')
   ]) {

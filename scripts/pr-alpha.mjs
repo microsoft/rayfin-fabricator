@@ -118,6 +118,8 @@ export async function verifyRelease(folder, { commit, buildId, pr }) {
     `${metadata.archiveSha256}  ${archive}`
   )
   assert.equal(metadata.signing.originalPayloadsUnchanged, true)
+  assert.equal(metadata.signing.sourceCommit, commit)
+  assert.equal(metadata.signing.files.length, 2)
   for (const [name, keyCode] of [
     ['rayfin-fabricator.exe', 'CP-230012'],
     ['rayfin-local.exe', 'CP-231522']

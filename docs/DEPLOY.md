@@ -124,6 +124,9 @@ source/build/PR metadata and the ZIP hash, then creates a GitHub prerelease tagg
 `v<base>-alpha.<Build.BuildId>`, with `makeLatest=false`. Existing releases are never
 overwritten. Its only public assets are the ZIP, `SHA256SUMS.txt` and
 `windows-alpha.json`; no private signing credentials or build logs are uploaded.
+The existing GitHub Actions installer workflow excludes alpha tags, including
+manual dispatch on those tags, so it cannot append unsigned installers or updater
+assets to an ADO alpha release.
 
 Extract the whole ZIP and run `rayfin-fabricator.exe` beside `rayfin-local.exe`
 and `resources/`. Windows x64, WebView2 Runtime, Node.js/npm and git are required.
