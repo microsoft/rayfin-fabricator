@@ -1,8 +1,8 @@
 //! A commit message for a project's uncommitted changes, written by Copilot on
 //! its Auto model from what the commit would take: the changed files, the diff
 //! and the start of each new file, within a budget. It runs on a throwaway,
-//! tool-less session, like Design's one-shot calls, so it never touches the
-//! project's chat.
+//! tool-less session ([`crate::commands::transient`]), so it never touches
+//! the project's chat.
 
 use std::path::{Path, PathBuf};
 
@@ -189,24 +189,24 @@ pub async fn projects_git_message(
   id: String,
 ) -> Result<GitMessageResult, String> {
   let Some(project) = find_project(&id) else {
-    return Ok(failed("Project folder not found."));
+    return Ok(failed(t!("commands.shared.projectFolderNotFound")));
   };
   if !Path::new(&project.path).exists() {
-    return Ok(failed("Project folder not found."));
+    return Ok(failed(t!("commands.shared.projectFolderNotFound")));
   }
   let changes = pending_changes(&project.path).await;
   if changes.is_empty() {
-    return Ok(failed("There's nothing to commit."));
+    return Ok(failed(t!("commands.commitMessage.nothingToCommit")));
   }
   let prompt = format!("{PROMPT}\n{changes}");
   let reply =
-    crate::commands::design::run_transient(state.inner(), &project.path, None, None, prompt, &[], None).await;
+    crate::commands::transient::run_transient(state.inner(), &project.path, None, None, prompt, &[], None).await;
   Ok(match reply {
     Ok(reply) => match subject_line(&reply) {
       Some(message) => GitMessageResult { ok: true, message: Some(message), error: None },
-      None => failed("Copilot didn't write a message. Please try again."),
+      None => failed(t!("commands.commitMessage.noMessage")),
     },
-    Err(error) => failed(format!("Couldn't write a message: {error}")),
+    Err(error) => failed(t!("commands.commitMessage.cantWrite", error = error)),
   })
 }
 

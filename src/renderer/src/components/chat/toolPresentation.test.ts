@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import type { ChatToolCall } from '@shared/ipc'
+import { setLanguage } from '../../i18n'
 import {
   describeStep,
   isHiddenTool,
@@ -47,7 +48,6 @@ describe('toolKind', () => {
       fabricator_console: 'console',
       fabricator_local_status: 'local-status',
       fabricator_local_call: 'local-call',
-      fabricator_goals_call: 'local-call',
       fabricator_local_seed: 'local-seed',
       // MCP tools are named after their server; these would otherwise read as project searches or web reads.
       'FabricIQ-ValueSearch': 'fabric-iq',
@@ -139,6 +139,21 @@ describe('describeStep', () => {
         describeStep(tool('write_powershell', 'write_powershell', { state: 'running' }), ROOT)
       )
     ).toBe('Sending input to a command')
+  })
+
+  it('says what a step did with an agent already started, rather than delegating again', () => {
+    expect(stepLabel(describeStep(tool('task', 'Build the screens'), ROOT))).toBe(
+      'Delegated Build the screens'
+    )
+    const waiting = tool('read_agent', 'read_agent', { state: 'running' })
+    expect(stepLabel(describeStep(waiting, ROOT))).toBe('Waiting for an agent')
+    expect(phaseLabel('read_agent')).toBe('Waiting for an agent')
+    expect(stepLabel(describeStep(tool('read_agent', 'read_agent'), ROOT))).toBe(
+      'Checked on an agent'
+    )
+    expect(stepLabel(describeStep(tool('write_agent', 'write_agent'), ROOT))).toBe(
+      'Messaged an agent'
+    )
   })
 
   it('describes the local backend tools in plain words', () => {
@@ -239,5 +254,23 @@ describe('summarizeKinds', () => {
       'Ran 2 searches',
       'Read 1 web page'
     ])
+  })
+})
+
+describe('in other languages', () => {
+  afterEach(async () => {
+    await setLanguage('en')
+    localStorage.clear()
+  })
+
+  it('pluralizes header counts and labels steps in the interface language', async () => {
+    await setLanguage('de')
+    const tools = [tool('view', 'a'), tool('view', 'b'), tool('powershell', 'x')]
+    expect(summarizeKinds(tools).map((k) => k.label)).toEqual([
+      '2 Dateien gelesen',
+      '1 Befehl ausgeführt'
+    ])
+    const chart = tool('chart-generate_bar_chart', 'generate_bar_chart', { server: 'Charts' })
+    expect(stepLabel(describeStep(chart, ROOT))).toBe('Verwendet: generate_bar_chart von Charts')
   })
 })

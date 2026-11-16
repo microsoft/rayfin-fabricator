@@ -8,7 +8,7 @@
  * Tauri convention: command arguments are passed as a JSON object with camelCase
  * keys, which Tauri maps to the Rust command's snake_case parameters.
  */
-import { invoke } from '@tauri-apps/api/core'
+import { Channel, invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { serializePreviewMutations } from './previewSurface'
@@ -47,13 +47,10 @@ import {
   type PreviewAgentEvent,
   type ProcLogEvent,
   type DeleteProgressEvent,
-  type DesignVariationsOptions,
   type ExportOptions,
   type FileDropEvent,
-  type GoalsEventEnvelope,
-  type GoalsRunRequest,
+  type GithubRepoRequest,
   type RayfinStudioApi,
-  type ReasoningEffort,
   type SecurityEventEnvelope,
   type TeamCreateRequest,
   type TeamDiagnoseRequest,
@@ -61,19 +58,13 @@ import {
   type TeamProgressEvent,
   type TeamResourceRequest,
   type TeamRunner,
+  type TerminalEvent,
+  type TerminalSpawnRequest,
   type ToolId,
   type UpdateProgress,
   type ZipProgressEvent
 } from '@shared/ipc'
-import type {
-  DesignCommand,
-  DesignEnableOptions,
-  DesignHostTheme,
-  DesignLocateTarget,
-  DesignPageOutline,
-  DesignRestyleContext,
-  DesignVariationEvent
-} from '@shared/design'
+import type { PickCommand, PickLocateTarget, PickSetOptions } from '@shared/pick'
 import { toLocalBackendError } from './localBackend'
 
 /** Subscribe to a Tauri event, returning a synchronous unsubscribe function. */
@@ -224,7 +215,12 @@ export const api: RayfinStudioApi = {
     switchAccount: (login: string) => invoke('github_switch_account', { login }),
     signOutAccount: (login: string) => invoke('github_sign_out_account', { login }),
     listRepos: () => invoke('github_list_repos'),
-    clone: (repo: string) => invoke('github_clone', { input: repo })
+    clone: (repo: string) => invoke('github_clone', { input: repo }),
+    owners: (account?: string) => invoke('github_owners', { account }),
+    checkRepo: (account: string, owner: string, name: string) =>
+      invoke('github_check_repo', { account, owner, name }),
+    createRepo: (projectId: string, request: GithubRepoRequest) =>
+      invoke('github_create_repo', { id: projectId, request })
   },
 
   fabric: {
@@ -497,41 +493,15 @@ export const api: RayfinStudioApi = {
     onState: (cb: (event: DevStateEvent) => void) => subscribe<DevStateEvent>(IpcChannels.devState, cb)
   },
 
-  design: {
-    variations: (
-      projectId: string,
-      context: DesignRestyleContext,
-      hint?: string,
-      count?: number,
-      model?: string,
-      options?: DesignVariationsOptions
-    ) =>
-      invoke('design_variations', {
-        projectId,
-        context,
-        hint,
-        count,
-        model,
-        effort: options?.effort,
-        requestId: options?.requestId,
-        screenshotPath: options?.screenshotPath
-      }),
-    onVariation: (cb: (event: DesignVariationEvent) => void) =>
-      subscribe<DesignVariationEvent>(IpcChannels.designVariation, cb),
-    polish: (
-      projectId: string,
-      page: DesignPageOutline,
-      screenshotPath?: string,
-      model?: string,
-      effort?: ReasoningEffort
-    ) => invoke('design_polish', { projectId, page, screenshotPath, model, effort }),
-    locate: (projectId: string, targets: DesignLocateTarget[]) =>
-      invoke('design_locate', { projectId, targets })
+  pick: {
+    locate: (projectId: string, targets: PickLocateTarget[]) =>
+      invoke('pick_locate', { projectId, targets })
   },
 
   settings: {
     get: () => invoke('settings_get'),
-    set: (patch: Partial<AppSettings>) => invoke('settings_set', { patch })
+    set: (patch: Partial<AppSettings>) => invoke('settings_set', { patch }),
+    systemLanguage: () => invoke('settings_system_language')
   },
 
   byok: {
@@ -568,24 +538,25 @@ export const api: RayfinStudioApi = {
       subscribe<PreviewNavState>(IpcChannels.previewNav, cb),
     onAgentPreview: (cb: (event: PreviewAgentEvent) => void) =>
       subscribe<PreviewAgentEvent>(IpcChannels.previewAgent, cb),
-    design: {
-      setEnabled: (
-        enabled: boolean,
+    pick: {
+      set: (
+        armed: boolean,
+        on: boolean,
         embedded?: boolean,
         appUrl?: string,
-        options?: DesignEnableOptions
+        options?: PickSetOptions
       ) =>
-        invoke('preview_design_set', {
-          enabled,
+        invoke('preview_pick_set', {
+          armed,
+          on,
           embedded: embedded ?? false,
           appUrl: appUrl ?? null,
           options: options ?? null
         }),
-      poll: () => invoke('preview_design_poll'),
-      snapshot: () => invoke('preview_design_snapshot'),
-      command: (command: DesignCommand) => invoke('preview_design_command', { command }),
-      setTheme: (theme: DesignHostTheme) => invoke('preview_design_set_theme', { theme })
-    }
+      poll: (page: string | null, since: number) => invoke('preview_pick_poll', { page, since }),
+      command: (command: PickCommand) => invoke('preview_pick_command', { command })
+    },
+    releaseFocus: () => invoke('preview_release_focus')
   },
 
   onProcLog: (cb: (event: ProcLogEvent) => void) =>
@@ -635,8 +606,6 @@ export const api: RayfinStudioApi = {
     update: (projectId: string, keepConflicts: boolean) =>
       invoke('team_update', { projectId, keepConflicts }),
     discard: (projectId: string) => invoke('team_discard', { projectId }),
-    setView: (projectId: string, view: 'preview' | 'production') =>
-      invoke('team_set_view', { projectId, view }),
     runLog: (projectId: string, runId: number) => invoke('team_run_log', { projectId, runId }),
     publish: (projectId: string, confirmDataLoss: boolean) =>
       invoke('team_publish', { projectId, confirmDataLoss }),
@@ -778,21 +747,20 @@ export const api: RayfinStudioApi = {
       subscribe<SecurityEventEnvelope>(IpcChannels.securityEvent, cb)
   },
 
-  goals: {
-    load: (projectId: string) => invoke('goals_load', { projectId }),
-    save: (projectId: string, purpose: string, checks: string[]) =>
-      invoke('goals_save', { projectId, purpose, checks }),
-    run: (projectId: string, request: GoalsRunRequest) =>
-      invoke('goals_run', {
-        projectId,
-        request: { checkIds: request.checkIds, ...modelChoiceArgs(request) }
-      }),
-    cancel: (projectId: string) => invoke('goals_cancel', { projectId }),
-    draft: (projectId: string, purpose: string, checks: string[], choice?: AdvisorModelChoice) =>
-      invoke('goals_draft', { projectId, purpose, checks, ...modelChoiceArgs(choice) }),
-    draftCancel: (projectId: string) => invoke('goals_draft_cancel', { projectId }),
-    onEvent: (cb: (envelope: GoalsEventEnvelope) => void) =>
-      subscribe<GoalsEventEnvelope>(IpcChannels.goalsEvent, cb)
+  terminal: {
+    shells: () => invoke('terminal_shells'),
+    spawn: (request: TerminalSpawnRequest, onEvent: (event: TerminalEvent) => void) => {
+      // A channel of its own: output arrives in order, and only here.
+      const events = new Channel<TerminalEvent>()
+      events.onmessage = onEvent
+      return invoke('terminal_spawn', { ...request, onEvent: events })
+    },
+    write: (id: string, data: string) => invoke('terminal_write', { id, data }),
+    resize: (id: string, cols: number, rows: number) =>
+      invoke('terminal_resize', { id, cols, rows }),
+    pause: (id: string, paused: boolean) => invoke('terminal_pause', { id, paused }),
+    kill: (id: string) => invoke('terminal_kill', { id }),
+    killAll: (projectId?: string) => invoke('terminal_kill_all', { projectId })
   }
 }
 

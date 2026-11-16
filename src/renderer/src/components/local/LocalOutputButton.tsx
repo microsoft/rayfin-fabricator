@@ -1,27 +1,14 @@
 import type { JSX } from 'react'
 import type { LocalStatus } from '@shared/ipc'
-import { localStateLabel, runningProblems, type LocalRunningProblem } from '../../localBackend'
+import { translator, useTranslation } from '../../i18n'
+import {
+  localStateLabel,
+  localTone,
+  runningProblems,
+  type LocalRunningProblem
+} from '../../localBackend'
 import { TerminalIcon } from '../icons'
 import './local.css'
-
-/** The button's look for a state: a running app with a problem gets a warning dot. */
-function tone(
-  status: LocalStatus | null,
-  pending: boolean,
-  problems: LocalRunningProblem[]
-): 'ok' | 'warn' | 'busy' | 'err' | 'idle' {
-  switch (status?.state) {
-    case 'running':
-      return problems.length > 0 ? 'warn' : 'ok'
-    case 'starting':
-    case 'restarting':
-      return 'busy'
-    case 'error':
-      return 'err'
-    default:
-      return pending ? 'busy' : 'idle'
-  }
-}
 
 /** The first line of a problem's detail, kept short for a tooltip, as a sentence. */
 function firstLine(detail: string | null): string {
@@ -39,36 +26,35 @@ function explain(
   pending: boolean,
   problems: LocalRunningProblem[]
 ): string {
+  const t = translator('preview')
   switch (status?.state) {
     case 'running':
       return problems.length > 0
         ? problems.map((p) => [p.summary, firstLine(p.detail)].filter(Boolean).join(' ')).join(' ')
-        : 'Your app runs on this computer, with its own backend and data.'
+        : t('output.running')
     case 'starting':
     case 'restarting':
-      return 'Your app is starting on this computer.'
+      return t('output.starting')
     case 'error':
-      return 'Your app couldn’t start on this computer.'
+      return t('output.couldntStart')
     default:
-      return pending
-        ? 'Your app is starting on this computer.'
-        : 'Your app isn’t running on this computer.'
+      return pending ? t('output.starting') : t('output.notRunning')
   }
 }
 
 /** What the button says for a running app's problems: "1 problem", "2 problems". */
 function problemCount(problems: LocalRunningProblem[]): string | null {
   if (problems.length === 0) return null
-  return problems.length === 1 ? '1 problem' : `${problems.length} problems`
+  return translator('preview')('output.problems', { count: problems.length })
 }
 
 /**
- * The preview toolbar's **Output** button for the app on this computer: it opens
- * and closes the output of its backend, Vite and functions under the preview.
- * The app's state shows on it only when it needs a look: a blinking dot while it
- * starts, a red one when it couldn't start, and an amber one with the number of
- * problems when it runs but its latest change didn't apply. Running fine, the
- * app on screen says so itself.
+ * The preview toolbar's **Output** button for the app on this computer: it shows
+ * and hides the output of its backend, Vite and functions, the terminal panel's
+ * Output tab. The app's state shows on it only when it needs a look: a blinking
+ * dot while it starts, a red one when it couldn't start, and an amber one with
+ * the number of problems when it runs but its latest change didn't apply.
+ * Running fine, the app on screen says so itself.
  */
 export default function LocalOutputButton({
   status,
@@ -83,17 +69,19 @@ export default function LocalOutputButton({
   open: boolean
   onToggle: () => void
 }): JSX.Element {
+  const { t } = useTranslation('preview')
   const problems = runningProblems(status)
-  const look = tone(status, pending, problems)
+  const look = localTone(status, pending)
   const marked = look === 'busy' || look === 'warn' || look === 'err'
   const count = problemCount(problems)
+  const explanation = explain(status, pending, problems)
   return (
     <button
       type="button"
       className={`seg-btn local-output-btn local-output-btn--${look}${marked ? '' : ' seg-btn--icon'}${open ? ' seg-btn--on' : ''}`}
       aria-pressed={open}
-      aria-label={`Output: ${count ?? localStateLabel(status, pending)}`}
-      title={`${explain(status, pending, problems)} Select to ${open ? 'hide' : 'view'} its output.`}
+      aria-label={t('output.label', { state: count ?? localStateLabel(status, pending) })}
+      title={open ? t('output.hide', { explanation }) : t('output.show', { explanation })}
       onClick={onToggle}
     >
       <TerminalIcon className="btn-ico local-output-ico" />

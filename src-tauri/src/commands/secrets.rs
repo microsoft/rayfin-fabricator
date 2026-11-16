@@ -10,11 +10,12 @@
 //! Fabricator commits just those files when the CLI changes them, so History
 //! records "Add secret: NAME" the way it records skills.
 //!
-//! Every personal app also runs on this computer, where rayfin-local gives the
+//! Every app also runs on this computer, where rayfin-local gives the
 //! functions each declared secret's local value (`commands::local`). An app that
 //! hasn't been published has no published values, but secrets can still be
 //! added: [`secrets_declare`] records a name in `rayfin.yml` with the code the CLI's
-//! `secret set` runs, and its value goes to rayfin-local.
+//! `secret set` runs, and its value goes to rayfin-local. A team app's published
+//! values belong to its pipeline's deployments, which Fabricator only lists.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -46,9 +47,13 @@ const DEFAULT_FUNCTIONS_PATH: &str = "rayfin/functions";
 /// Each command signs in and calls Fabric, with the CLI's own retries.
 const CLI_TIMEOUT_MS: u64 = 120_000;
 
-const TIMED_OUT: &str = "The Rayfin CLI didn't finish in time. Check your connection, then try again.";
+fn timed_out() -> String {
+  t!("commands.secrets.timedOut")
+}
 
-const NOT_DEPLOYED: &str = "Publish your app first. Published values are stored with the published app.";
+fn not_deployed_error() -> String {
+  t!("commands.secrets.notDeployed")
+}
 
 const MAX_DESCRIPTION: usize = 200;
 
@@ -92,13 +97,13 @@ try {
 pub fn validate_name(name: &str) -> Result<(), String> {
   static NAME: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[A-Za-z][A-Za-z0-9_]*$").unwrap());
   if name.is_empty() {
-    return Err("Enter a name for the secret.".into());
+    return Err(t!("commands.secrets.enterName"));
   }
   if name.len() > 128 {
-    return Err("Use a name of 128 characters or fewer.".into());
+    return Err(t!("commands.secrets.nameTooLong"));
   }
   if !NAME.is_match(name) {
-    return Err("Start the name with a letter, then use only letters, numbers and underscores.".into());
+    return Err(t!("commands.secrets.nameRule"));
   }
   Ok(())
 }
@@ -170,23 +175,25 @@ fn supported(version: &str) -> bool {
   parse_core(Some(version)).is_some_and(|v| Some(v) >= parse_core(Some(MIN_RAYFIN)))
 }
 
-/// Why this app's secrets can't be managed from here: `(status, message)`.
+/// Why this app's published secrets can't be changed from here: `(status, message)`.
 fn unavailable(project: &StudioProject, version: Option<&str>) -> Option<(&'static str, String)> {
   if project.team.is_some() {
     return Some((
       "team",
-      "Fabricator can’t change a team app’s secrets yet. Change them in the Fabric portal.".into(),
+      t!("commands.secrets.teamApp"),
     ));
   }
-  if !version.is_some_and(supported) {
-    return Some((
+  outdated(version)
+}
+
+/// Why the app's Rayfin CLI can't manage secrets, when it's too old.
+fn outdated(version: Option<&str>) -> Option<(&'static str, String)> {
+  (!version.is_some_and(supported)).then(|| {
+    (
       "update-rayfin",
-      format!(
-        "Secrets need Rayfin {MIN_RAYFIN_LABEL} or newer. Select Rayfin in the status bar and choose Update with Copilot."
-      ),
-    ));
-  }
-  None
+      t!("commands.secrets.needsRayfin", version = MIN_RAYFIN_LABEL),
+    )
+  })
 }
 
 /// A description the CLI can store in `rayfin.yml`: one line, never empty.
@@ -261,13 +268,13 @@ fn outcome(res: &exec::RunResult) -> Result<Value, Failure> {
     .or_else(|| stderr_error(&res.stderr))
     .unwrap_or_else(|| {
       if res.not_found {
-        "Node.js was not found on PATH.".into()
+        t!("commands.shared.nodeMissing")
       } else if res.ok {
-        "The Rayfin CLI didn't confirm the change.".into()
+        t!("commands.secrets.notConfirmed")
       } else if let Some(code) = res.exit_code {
-        format!("The Rayfin CLI failed (exit code {code}).")
+        t!("commands.secrets.cliFailed", code = code)
       } else {
-        TIMED_OUT.into()
+        timed_out()
       }
     });
   let message = fabric_auth::redact(&message);
@@ -391,7 +398,7 @@ async fn team_environment(
   environment.deployed = true;
   match crate::services::team::fabric::app_secrets(workspace, item).await {
     Ok(result) => environment.secrets = merge(declared, &parse_stored(&result)),
-    Err(error) => environment.error = Some(fabric_auth::redact(&error.describe("Couldn't read the secrets"))),
+    Err(error) => environment.error = Some(fabric_auth::redact(&error.describe(&t!("commands.secrets.cantRead")))),
   }
   environment
 }
@@ -420,7 +427,7 @@ async fn with_sign_in<T>(dir: &Path, cli: impl Future<Output = Result<T, Failure
   // Without a published app, the CLI stops before it signs in: that's the
   // problem to report, and Fabric (and its sign-in) isn't needed to find it.
   if !has_deployment(dir) {
-    return Err(Failure { message: NOT_DEPLOYED.into(), not_deployed: true, sign_in: false });
+    return Err(Failure { message: not_deployed_error(), not_deployed: true, sign_in: false });
   }
   let _auth = crate::commands::auth::rayfin_auth_read().await;
   if let Err(failure) = crate::commands::fabric::probe_rayfin_auth(Some(dir)).await {
@@ -446,7 +453,7 @@ async fn run_cli(dir: &Path, args: &[&str], stdin: Option<String>) -> Result<Val
   .await;
   // A process stopped at the timeout can still report an exit code (1 on Windows).
   if !res.ok && ran >= Duration::from_millis(CLI_TIMEOUT_MS) {
-    return Err(Failure { message: TIMED_OUT.into(), not_deployed: false, sign_in: false });
+    return Err(Failure { message: timed_out(), not_deployed: false, sign_in: false });
   }
   outcome(&res)
 }
@@ -474,15 +481,15 @@ fn declare_error(name: &str, res: &exec::RunResult) -> String {
   let reason = json_result(&res.stdout).and_then(|v| v.get("reason").and_then(Value::as_str).map(String::from));
   match reason.as_deref() {
     Some("invalid-shape") => {
-      format!("Fabricator can’t add {name}: the secrets: entry in rayfin/rayfin.yml isn’t a list. Fix the file, then try again.")
+      t!("commands.secrets.notAList", name = name)
     }
-    Some("config-not-found" | "project-root-not-found") => "Fabricator can’t find rayfin/rayfin.yml in this project.".into(),
+    Some("config-not-found" | "project-root-not-found") => t!("commands.secrets.noConfig"),
     _ => {
       let detail = match outcome(res) {
         Err(failure) => failure.message,
-        Ok(_) => "The Rayfin CLI didn't confirm the change.".into(),
+        Ok(_) => t!("commands.secrets.notConfirmed"),
       };
-      format!("Couldn’t add {name} to rayfin.yml: {detail}")
+      t!("commands.secrets.cantAdd", name = name, detail = detail)
     }
   }
 }
@@ -542,16 +549,27 @@ fn failed(error: impl Into<String>) -> SecretActionResult {
 fn from_failure(failure: Failure) -> SecretActionResult {
   SecretActionResult {
     ok: false,
-    error: Some(if failure.not_deployed { NOT_DEPLOYED.to_string() } else { failure.message }),
+    error: Some(if failure.not_deployed { not_deployed_error() } else { failure.message }),
     sign_in: failure.sign_in.then_some(true),
   }
 }
 
-/// The project's folder, when its secrets can be changed from here.
+/// The project's folder, when its published secrets can be changed from here.
 fn writable(project_id: &str) -> Result<PathBuf, String> {
-  let project = store::find_project(project_id).ok_or("Project not found.")?;
+  let project = store::find_project(project_id).ok_or_else(|| t!("commands.shared.projectNotFound"))?;
   let dir = PathBuf::from(&project.path);
   if let Some((_, message)) = unavailable(&project, installed_version(&dir).as_deref()) {
+    return Err(message);
+  }
+  Ok(dir)
+}
+
+/// The project's folder, when its `rayfin.yml` can declare a secret: any app's,
+/// a team app's included, on a Rayfin CLI that manages secrets.
+fn declarable(project_id: &str) -> Result<PathBuf, String> {
+  let project = store::find_project(project_id).ok_or_else(|| t!("commands.shared.projectNotFound"))?;
+  let dir = PathBuf::from(&project.path);
+  if let Some((_, message)) = outdated(installed_version(&dir).as_deref()) {
     return Err(message);
   }
   Ok(dir)
@@ -563,7 +581,7 @@ fn writable(project_id: &str) -> Result<PathBuf, String> {
 #[tauri::command]
 pub async fn secrets_list(project_id: String) -> SecretsState {
   let Some(project) = store::find_project(&project_id) else {
-    return SecretsState { status: "error".into(), error: Some("Project not found.".into()), ..Default::default() };
+    return SecretsState { status: "error".into(), error: Some(t!("commands.shared.projectNotFound")), ..Default::default() };
   };
   list(&project).await
 }
@@ -628,7 +646,7 @@ pub async fn secrets_set(
     return failed(error);
   }
   if value.trim().is_empty() {
-    return failed("Enter a value for the secret.");
+    return failed(t!("commands.secrets.enterValue"));
   }
   let dir = match writable(&project_id) {
     Ok(dir) => dir,
@@ -682,7 +700,8 @@ pub async fn secrets_delete(app: AppHandle, project_id: String, name: String) ->
 /// Add a secret to `rayfin.yml` (with `description`) without a published app,
 /// and commit it as "Add secret: NAME". Its value goes to this computer's
 /// local backend separately (`local_set_secret`); its published value, once the
-/// app is published, through [`secrets_set`]. A declared name stays as it is.
+/// app is published, through [`secrets_set`], or for a team app, in the Fabric
+/// portal. A declared name stays as it is.
 #[tauri::command]
 pub async fn secrets_declare(
   app: AppHandle,
@@ -694,7 +713,7 @@ pub async fn secrets_declare(
   if let Err(error) = validate_name(&name) {
     return failed(error);
   }
-  let dir = match writable(&project_id) {
+  let dir = match declarable(&project_id) {
     Ok(dir) => dir,
     Err(error) => return failed(error),
   };
@@ -767,6 +786,21 @@ mod tests {
       let config = Config { functions_path: Some(outside.into()), ..Default::default() };
       assert_eq!(tracked_paths(&config), ["rayfin/rayfin.yml"], "{outside}");
     }
+  }
+
+  #[test]
+  fn a_team_app_declares_secrets_but_its_published_values_stay_in_fabric() {
+    let mut project: StudioProject = serde_json::from_value(serde_json::json!({
+      "id": "p", "name": "App", "path": "C:\\apps\\app", "addedAt": "2026-01-01T00:00:00.000Z"
+    }))
+    .unwrap();
+    assert_eq!(unavailable(&project, Some("1.36.2")), None);
+    project.team = Some(crate::types::TeamBinding::default());
+    assert_eq!(unavailable(&project, Some("1.36.2")).map(|(status, _)| status), Some("team"));
+    // Declaring a name (for its value on this computer) only needs a Rayfin CLI that can.
+    assert_eq!(outdated(Some("1.36.2")), None);
+    assert_eq!(outdated(Some("1.35.1")).map(|(status, _)| status), Some("update-rayfin"));
+    assert_eq!(outdated(None).map(|(status, _)| status), Some("update-rayfin"));
   }
 
   #[test]

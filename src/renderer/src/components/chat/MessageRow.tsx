@@ -1,5 +1,6 @@
 import { memo, useCallback, useMemo, type JSX } from 'react'
-import { DesignSummary, designShotIndexes } from '../../design/DesignSummary'
+import { useTranslation } from '../../i18n'
+import { SentPicks, pickShotIndexes } from '../../pick/PickTray'
 import { AdvisorFixSummary } from '../advisor/AdvisorFixSummary'
 import { MentionText } from '../MentionText'
 import PlanCard from '../PlanCard'
@@ -10,8 +11,23 @@ import { CopyButton } from './CopyButton'
 import { SentData, SentMigration } from './DataTray'
 import { SentFiles } from './FileTray'
 import { formatClock, formatFullDate } from './format'
+import { ShotStrip, useImageViewer } from './ImageViewer'
 import { TurnFooter } from './TurnFooter'
 import type { UIChatMessage } from './types'
+
+/** Messages the app sends for you when a plan resumes: stored (and re-sent) in
+ *  English, shown in your language. */
+const APP_MESSAGES = {
+  'Resume the approved plan': 'messageRow.resumeApprovedPlan',
+  'Revise the recovered plan': 'messageRow.reviseRecoveredPlan',
+  'Resume planning': 'messageRow.resumePlanning'
+} as const
+
+function appMessage(text: string): (typeof APP_MESSAGES)[keyof typeof APP_MESSAGES] | undefined {
+  return Object.prototype.hasOwnProperty.call(APP_MESSAGES, text)
+    ? APP_MESSAGES[text as keyof typeof APP_MESSAGES]
+    : undefined
+}
 
 /** Your message: a tinted bubble on the right, with its time and Copy on hover.
  *  An Advisor hand-off shows as its card instead of the bubble. */
@@ -24,25 +40,29 @@ function UserMessage({
   working: boolean
   onOpenMention?: (ref: string) => void
 }): JSX.Element {
+  const { t } = useTranslation('chat')
   const hasText = Boolean(m.text) && m.text !== '(screenshot)'
-  // A Design message shows its captures inside the card; the strip keeps the rest.
-  const designShots = m.design ? designShotIndexes(m.design) : null
-  const shots = (m.attachmentThumbs ?? []).filter((_, i) => !designShots?.has(i))
+  const appKey = appMessage(m.text)
+  const text = appKey ? t(appKey) : m.text
+  const thumbs = m.attachmentThumbs ?? []
+  // Picked elements show their pictures in their chips; the strip keeps the rest.
+  const pickShots = m.picks ? pickShotIndexes(m.picks) : null
+  const shots = thumbs.flatMap((_, i) => (pickShots?.has(i) ? [] : [i]))
+  // Any of the message's pictures opens large, with the rest a step away.
+  const { open, viewer } = useImageViewer(m.attachmentThumbs)
   return (
     <div className="turn turn--user">
       <div className="turn-main">
-        {m.design && <DesignSummary design={m.design} thumbs={m.attachmentThumbs} prompt={m.prompt} />}
+        {m.picks && m.picks.length > 0 && (
+          <SentPicks picks={m.picks} thumbs={m.attachmentThumbs} onOpen={open} />
+        )}
         {m.advisor && <AdvisorFixSummary summary={m.advisor} prompt={m.prompt} working={working} />}
         {shots.length > 0 ? (
-          <div className="msg-shots">
-            {shots.map((src, i) => (
-              <img key={i} className="msg-shot" src={src} alt="Screenshot attachment" />
-            ))}
-          </div>
-        ) : m.attachments && !m.design ? (
+          <ShotStrip images={thumbs} indexes={shots} onOpen={open} />
+        ) : m.attachments && !m.picks ? (
           <div className="msg-attach">
             <ImageIcon className="msg-attach-ico" />
-            {m.attachments} screenshot{m.attachments > 1 ? 's' : ''}
+            {t('messageRow.screenshots', { count: m.attachments })}
           </div>
         ) : null}
         {m.data && m.data.length > 0 && <SentData data={m.data} />}
@@ -50,9 +70,10 @@ function UserMessage({
         {m.migration && <SentMigration migration={m.migration} />}
         {hasText && !m.advisor && (
           <div className="msg-text user-bubble">
-            <MentionText text={m.text} onOpen={onOpenMention} />
+            <MentionText text={text} onOpen={onOpenMention} />
           </div>
         )}
+        {viewer}
         {(hasText || m.createdAt != null) && (
           <div className="msg-meta">
             {m.createdAt != null && (
@@ -64,7 +85,12 @@ function UserMessage({
               </time>
             )}
             {hasText && (
-              <CopyButton text={m.text} compact title="Copy message" className="msg-meta-copy" />
+              <CopyButton
+                text={text}
+                compact
+                title={t('copyButton.copyMessage')}
+                className="msg-meta-copy"
+              />
             )}
           </div>
         )}
@@ -134,6 +160,7 @@ export const MessageRow = memo(function MessageRow({
   onExportPlan: (msgId: string, content: string) => Promise<void> | void
   onOpenMention?: (ref: string) => void
 }): JSX.Element {
+  const { t } = useTranslation('chat')
   const answerQuestion = useCallback(
     (requestId: string, answer: string, wasFreeform: boolean) =>
       onAnswerPlanQuestion(m.id, requestId, answer, wasFreeform),
@@ -210,9 +237,9 @@ export const MessageRow = memo(function MessageRow({
                 type="button"
                 className="btn btn--xs btn--ghost msg-error-retry"
                 onClick={() => onRetry(m.id)}
-                title="Re-send this message"
+                title={t('messageRow.resend')}
               >
-                <Codicon name="refresh" /> Retry
+                <Codicon name="refresh" /> {t('actions.retry')}
               </button>
             )}
           </div>
@@ -220,17 +247,15 @@ export const MessageRow = memo(function MessageRow({
         {m.interrupted && !m.plan && !m.pending && !m.error && (
           <div className="msg-interrupted">
             <Codicon name="debug-pause" />
-            <span className="msg-interrupted-text">
-              This response was interrupted when the app closed.
-            </span>
+            <span className="msg-interrupted-text">{t('messageRow.interrupted')}</span>
             {canResume && (
               <button
                 type="button"
                 className="btn btn--xs btn--ghost msg-interrupted-resume"
                 onClick={() => onResume(m.id)}
-                title="Re-run this prompt and continue"
+                title={t('messageRow.resumeTitle')}
               >
-                <Codicon name="debug-continue" /> Resume
+                <Codicon name="debug-continue" /> {t('messageRow.resume')}
               </button>
             )}
           </div>

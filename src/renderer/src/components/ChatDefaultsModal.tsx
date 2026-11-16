@@ -1,5 +1,6 @@
 import { useEffect, useId, useState, type JSX } from 'react'
 import type { ChatDefaults, ChatPluginId, ExperimentFlags } from '@shared/ipc'
+import { useTranslation } from '../i18n'
 import { useMcpServers } from '../mcpServers'
 import { useModalFocus } from '../modalFocus'
 import { selectionArgs, selectionOf, type ModelSelection } from '../modelSelection'
@@ -29,9 +30,10 @@ export default function ChatDefaultsModal({
   onClose: () => void
   /** Open Accounts at Model providers (the model picker's Manage API keys…). */
   onManageKeys?: () => void
-  /** Open the MCP servers dialog, while the MCP servers experiment is on. */
+  /** Open the MCP servers dialog. */
   onManageMcpServers?: () => void
 }): JSX.Element {
+  const { t } = useTranslation('models')
   useSuppressPreview()
   const titleId = useId()
   const dialogRef = useModalFocus<HTMLDivElement>()
@@ -39,8 +41,7 @@ export default function ChatDefaultsModal({
   // Follow what's saved, which may differ: removing an MCP server turns it off here too.
   const saved = JSON.stringify(defaults ?? {})
   useEffect(() => setCurrent(JSON.parse(saved) as ChatDefaults), [saved])
-  const mcpOn = Boolean(experiments?.mcpServers)
-  const servers = useMcpServers(mcpOn)
+  const servers = useMcpServers()
   const plugins = current.plugins ?? []
 
   // The model picker keeps Escape while its menu is open.
@@ -77,24 +78,21 @@ export default function ChatDefaultsModal({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="modal-header">
-          <h2 id={titleId}>Chat defaults</h2>
+          <h2 id={titleId}>{t('chatDefaults.title')}</h2>
           <button
             type="button"
             className="btn btn--sm btn--ghost"
             onClick={onClose}
-            aria-label="Close chat defaults"
+            aria-label={t('chatDefaults.close')}
           >
             ✕
           </button>
         </div>
 
         <div className="modal-body settings-body">
-          <p className="modal-sub">
-            A new project’s chat starts with these. After that, each project’s chat keeps its own,
-            which you change in the chat.
-          </p>
-          <Section title="Model">
-            <Item title="Model" desc="With Auto, Copilot chooses a model for each request.">
+          <p className="modal-sub">{t('chatDefaults.sub')}</p>
+          <Section title={t('chatDefaults.model')}>
+            <Item title={t('chatDefaults.model')} desc={t('chatDefaults.modelHint')}>
               <ModelPicker
                 value={selectionOf(current)}
                 disabled={false}
@@ -103,11 +101,11 @@ export default function ChatDefaultsModal({
                 placement="down"
                 overDialog
                 onManageKeys={onManageKeys}
-                label="Default model"
+                label={t('chatDefaults.defaultModel')}
               />
             </Item>
           </Section>
-          <Section title="Plugins">
+          <Section title={t('chatDefaults.plugins')}>
             {offeredPlugins(experiments).map((p) => (
               <ToggleRow
                 key={p.id}
@@ -118,36 +116,31 @@ export default function ChatDefaultsModal({
               />
             ))}
           </Section>
-          {mcpOn && (
-            <Section title="MCP servers">
-              {servers.map((s) => (
-                <ToggleRow
-                  key={s.id}
-                  label={s.name}
-                  hint={serverSummary(s)}
-                  checked={plugins.includes(mcpPluginId(s.id))}
-                  onChange={(on) => toggle(mcpPluginId(s.id), on)}
-                />
-              ))}
-              {servers.length === 0 && (
-                <Item
-                  title="No MCP servers yet"
-                  desc="Add the MCP servers chat can use, then choose the ones new chats start with."
-                >
-                  {onManageMcpServers && (
-                    <button type="button" className="btn btn--sm" onClick={onManageMcpServers}>
-                      Manage MCP servers
-                    </button>
-                  )}
-                </Item>
-              )}
-            </Section>
-          )}
+          <Section title={t('chatDefaults.mcpServers')}>
+            {servers.map((s) => (
+              <ToggleRow
+                key={s.id}
+                label={s.name}
+                hint={serverSummary(s)}
+                checked={plugins.includes(mcpPluginId(s.id))}
+                onChange={(on) => toggle(mcpPluginId(s.id), on)}
+              />
+            ))}
+            {servers.length === 0 && (
+              <Item title={t('chatDefaults.noServers')} desc={t('chatDefaults.noServersHint')}>
+                {onManageMcpServers && (
+                  <button type="button" className="btn btn--sm" onClick={onManageMcpServers}>
+                    {t('chatDefaults.manageServers')}
+                  </button>
+                )}
+              </Item>
+            )}
+          </Section>
         </div>
 
         <div className="modal-footer">
           <button type="button" className="btn btn--primary" onClick={onClose}>
-            Done
+            {t('actions.done')}
           </button>
         </div>
       </div>

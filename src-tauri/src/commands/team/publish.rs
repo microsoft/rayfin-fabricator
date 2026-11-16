@@ -3,7 +3,8 @@
 //!
 //! 1. Save your latest changes to the working branch.
 //! 2. Bring in teammates' published changes (conflicts go back to the user).
-//! 3. Wait for the pull request's preview deploy (the check).
+//! 3. Mark the draft pull request ready, which deploys your preview, and wait
+//!    for that deploy (the check). A draft's own runs deploy nothing.
 //! 4. Wait for a teammate's approval, when the workspace requires reviews.
 //! 5. Squash-merge, then start a fresh working branch.
 //! 6. Follow the pipeline's production deploy.
@@ -14,7 +15,7 @@ use serde_json::json;
 use tauri::{AppHandle, Manager};
 
 use super::session::save_and_share;
-use super::{fail, finish_run, git_identity, progress, sleep_or_cancel, viewer, wait_for_run, with_project, CANCELLED};
+use super::{cancelled, fail, finish_run, git_identity, progress, run_status, sleep_or_cancel, viewer, wait_for_run, with_project};
 use crate::commands::util::now_iso;
 use crate::services::exec::CancelToken;
 use crate::services::store;
@@ -22,17 +23,17 @@ use crate::services::team::{self, gh, naming, repo};
 use crate::state::AppState;
 use crate::types::{StudioProject, TeamActionResult, TeamDeployRecord, TeamPublishState, TeamReviewRequest, TeamWorkspace};
 
-pub const PUBLISH_STEPS: &[(&str, &str)] = &[
-  ("save", "Save your latest changes"),
-  ("update", "Bring in your teammates' changes"),
-  ("checks", "Check that your preview deploys"),
-  ("review", "Get a teammate's approval"),
-  ("merge", "Publish your changes"),
-  ("deploy", "Deploy the published app"),
+pub const PUBLISH_STEPS: &[(&str, fn() -> String)] = &[
+  ("save", || t!("team.publish.step.save")),
+  ("update", || t!("team.publish.step.update")),
+  ("checks", || t!("team.publish.step.checks")),
+  ("review", || t!("team.publish.step.review")),
+  ("merge", || t!("team.publish.step.merge")),
+  ("deploy", || t!("team.publish.step.deploy")),
 ];
 
-fn label(step: &str) -> &'static str {
-  PUBLISH_STEPS.iter().find(|(id, _)| *id == step).map(|(_, l)| *l).unwrap_or("Publish")
+fn label(step: &str) -> String {
+  PUBLISH_STEPS.iter().find(|(id, _)| *id == step).map(|(_, l)| l()).unwrap_or_else(|| t!("team.publish.step.publish"))
 }
 
 fn set_publish(project_id: &str, state: Option<TeamPublishState>) -> Option<StudioProject> {
@@ -57,13 +58,13 @@ pub async fn team_publish(app: AppHandle, project_id: String, confirm_data_loss:
     state.end_team_op(&project_id, &cancel);
     result
   }));
-  task.await.unwrap_or_else(|e| fail(format!("Publishing failed: {e}")))
+  task.await.unwrap_or_else(|e| fail(t!("team.publish.taskFailed", error = e)))
 }
 
 async fn publish(app: &AppHandle, project_id: &str, cancel: &CancelToken) -> TeamActionResult {
-  let step = |id: &str, state: &str, detail: Option<String>| progress(app, project_id, id, state, label(id), detail);
+  let step = |id: &str, state: &str, detail: Option<String>| progress(app, project_id, id, state, &label(id), detail);
   let fail_at = |id: &str, message: String| {
-    progress(app, project_id, id, "error", label(id), Some(message.clone()));
+    progress(app, project_id, id, "error", &label(id), Some(message.clone()));
     let mut result = fail(message);
     result.project = store::find_project(project_id);
     result
@@ -98,12 +99,13 @@ async fn publish(app: &AppHandle, project_id: &str, cancel: &CancelToken) -> Tea
   if let Err(e) = repo::fetch(&tp.workspace).await {
     return fail_at("update", e);
   }
+  let before_update = repo::head(&wt).await;
   match repo::merge_main(&wt, false, &name, &email).await {
     Ok(repo::MergeOutcome::Conflicts(files)) => {
-      progress(app, project_id, "update", "error", label("update"), Some("Your teammates changed some of the same files.".into()));
+      progress(app, project_id, "update", "error", &label("update"), Some(t!("team.publish.conflictsShort")));
       return TeamActionResult {
         ok: false,
-        error: Some("Your teammates changed some of the same files as you. Bring in their changes and resolve the conflicts first.".into()),
+        error: Some(t!("team.publish.conflicts")),
         conflicts: Some(files),
         project: store::find_project(project_id),
         ..Default::default()
@@ -114,7 +116,7 @@ async fn publish(app: &AppHandle, project_id: &str, cancel: &CancelToken) -> Tea
   }
   let branch = match repo::current_branch(&wt).await {
     Some(b) => b,
-    None => return fail_at("update", "This app's working branch is missing. Reopen the app from Home.".into()),
+    None => return fail_at("update", t!("team.branchMissing")),
   };
   if repo::unpushed(&wt, &branch).await > 0 {
     if let Err(e) = repo::push(&wt, &branch).await {
@@ -122,40 +124,46 @@ async fn publish(app: &AppHandle, project_id: &str, cancel: &CancelToken) -> Tea
     }
   }
   step("update", "done", None);
+  // Teammates' changes may bring new packages, which the app on this computer needs.
+  let packages_changed =
+    super::packages_changed(&tp.project.path, before_update.as_deref(), repo::head(&wt).await.as_deref()).await;
 
   let (unpublished, _) = repo::divergence(&wt, &folder).await;
   if unpublished == 0 {
     set_publish(project_id, None);
-    return fail("There's nothing new to publish: this app matches the published version.");
+    let mut result = fail(t!("team.publish.nothingNew"));
+    result.packages_changed = packages_changed;
+    return result;
   }
   // Saving opens the pull request once there's something to publish.
   let Some(tp) = team::team_project(project_id).ok() else {
-    return fail("Project not found.");
+    return fail(t!("team.services.projectNotFound"));
   };
   let pr_number = match tp.binding.pr_number {
     Some(n) => n,
     None => match save_and_share(project_id, "").await.ok().and_then(|p| p.team.and_then(|t| t.pr_number)) {
       Some(n) => n,
-      None => return fail_at("save", "Couldn't open the pull request for your changes.".into()),
+      None => return fail_at("save", t!("team.publish.cantOpenPr")),
     },
   };
   let pr = match gh::get_pr(&full, pr_number).await {
     Ok(pr) => pr,
-    Err(e) => return fail_at("checks", e.describe("Open the pull request")),
+    Err(e) => return fail_at("checks", e.describe(&t!("team.actions.openPr"))),
   };
   if pr.draft {
     if let Err(e) = gh::mark_ready(&full, pr_number).await {
-      return fail_at("checks", e.describe("Mark the pull request ready"));
+      return fail_at("checks", e.describe(&t!("team.actions.markReady")));
     }
   }
   let Some(head) = repo::head(&wt).await else {
-    return fail_at("checks", "Couldn't read your latest change.".into());
+    return fail_at("checks", t!("team.publish.cantReadHead"));
   };
 
-  // 3. The preview deploy is the check.
+  // 3. Marking the pull request ready deploys your preview, which is the check
+  //    (wait_for_run passes over a draft's runs, which deploy nothing).
   set_publish(project_id, Some(stage("checks", Some(pr_number))));
   step("checks", "running", None);
-  let on_checks = |r: &gh::Run| step("checks", "running", Some(r.status.replace('_', " ")));
+  let on_checks = |r: &gh::Run| step("checks", "running", Some(run_status(&r.status)));
   match wait_for_run(&full, &head, "pull_request", cancel, &on_checks).await {
     Err(e) => {
       set_publish(project_id, None);
@@ -163,10 +171,7 @@ async fn publish(app: &AppHandle, project_id: &str, cancel: &CancelToken) -> Tea
     }
     Ok(None) => {
       set_publish(project_id, None);
-      return fail_at(
-        "checks",
-        "The team pipeline didn't start for your changes. Check that GitHub Actions is turned on for the workspace's repository.".into(),
-      );
+      return fail_at("checks", t!("team.publish.checksNotStarted"));
     }
     Ok(Some(run)) if run.conclusion.as_deref() != Some("success") => {
       // A run GitHub never started (no runner) isn't the app's problem.
@@ -174,7 +179,7 @@ async fn publish(app: &AppHandle, project_id: &str, cancel: &CancelToken) -> Tea
       set_publish(
         project_id,
         Some(TeamPublishState {
-          error: Some("Your preview didn't deploy, so Fabricator didn't publish.".into()),
+          error: Some(t!("team.publish.previewFailedShort")),
           run_url: Some(run.url.clone()),
           ..stage("failed", Some(pr_number))
         }),
@@ -182,11 +187,8 @@ async fn publish(app: &AppHandle, project_id: &str, cancel: &CancelToken) -> Tea
       return fail_at(
         "checks",
         match unstarted {
-          Some(reason) => super::unstarted_message(
-            "Fabricator didn't publish because GitHub didn't start the team pipeline for your preview",
-            &reason,
-          ),
-          None => "Your preview didn't deploy, so Fabricator didn't publish. Open the preview's logs, fix the problem with Copilot, then publish again.".into(),
+          Some(reason) => super::unstarted_message(&t!("team.publish.previewUnstarted"), &reason),
+          None => t!("team.publish.previewFailed"),
         },
       );
     }
@@ -199,9 +201,11 @@ async fn publish(app: &AppHandle, project_id: &str, cancel: &CancelToken) -> Tea
   if require_review {
     let approvals = gh::approvals(&full, pr_number, &pr.author).await.unwrap_or(0);
     if approvals == 0 {
-      step("review", "running", Some("Waiting for a teammate to approve. Publish again once they have.".into()));
+      step("review", "running", Some(t!("team.publish.waitingReview")));
       let project = set_publish(project_id, Some(stage("review", Some(pr_number))));
-      return with_project(project);
+      let mut result = with_project(project);
+      result.packages_changed = packages_changed;
+      return result;
     }
     step("review", "done", None);
   } else {
@@ -219,12 +223,12 @@ async fn publish(app: &AppHandle, project_id: &str, cancel: &CancelToken) -> Tea
     Err(e) if matches!(e.status, Some(405) | Some(409)) => {
       crate::services::telemetry::track_team(identity.as_ref(), "publish", false);
       set_publish(project_id, None);
-      return fail_at("merge", format!("GitHub couldn't publish yet ({}). Try Publish again in a moment.", e.message));
+      return fail_at("merge", t!("team.publish.notYet", error = e.message));
     }
     Err(e) => {
       crate::services::telemetry::track_team(identity.as_ref(), "publish", false);
       set_publish(project_id, None);
-      return fail_at("merge", e.describe("Merge your changes"));
+      return fail_at("merge", e.describe(&t!("team.actions.merge")));
     }
   };
   let _ = gh::delete_branch(&full, &branch).await;
@@ -239,7 +243,6 @@ async fn publish(app: &AppHandle, project_id: &str, cancel: &CancelToken) -> Tea
     b.branch = Some(fresh.clone());
     b.pr_number = None;
     b.pr_url = None;
-    b.view = Some("production".into());
     b.publish = Some(TeamPublishState { merge_sha: Some(merge_sha.clone()), ..stage("deploying", Some(pr_number)) });
   });
   team::apply_view(project_id);
@@ -247,7 +250,9 @@ async fn publish(app: &AppHandle, project_id: &str, cancel: &CancelToken) -> Tea
   drop(lease);
 
   // 6. Follow the production deploy (the lease is released: chat can continue).
-  follow_production(app, project_id, &full, &folder, &merge_sha, "push", pr_number, cancel).await
+  let mut result = follow_production(app, project_id, &full, &folder, &merge_sha, "push", pr_number, cancel).await;
+  result.packages_changed = packages_changed;
+  result
 }
 
 /// Wait for the production run for `sha`, record its outcome and report.
@@ -262,7 +267,7 @@ async fn follow_production(
   pr_number: u64,
   cancel: &CancelToken,
 ) -> TeamActionResult {
-  let step = |state: &str, detail: Option<String>| progress(app, project_id, "deploy", state, label("deploy"), detail);
+  let step = |state: &str, detail: Option<String>| progress(app, project_id, "deploy", state, &label("deploy"), detail);
   step("running", None);
   // Record the run as soon as it's known, so a status refresh can settle the
   // publish if nobody is waiting here any more.
@@ -279,7 +284,7 @@ async fn follow_production(
         }
       });
     }
-    step("running", Some(r.status.replace('_', " ")));
+    step("running", Some(run_status(&r.status)));
   };
   let run = match event {
     "push" => wait_for_run(full, sha, "push", cancel, &on_run).await,
@@ -299,7 +304,7 @@ async fn follow_production(
     }
     Ok(None) => {
       let project = set_publish(project_id, Some(stage("done", Some(pr_number))));
-      step("skipped", Some("The pipeline didn't start a deploy for this change.".into()));
+      step("skipped", Some(t!("team.publish.noDeploy")));
       return with_project(project);
     }
     Ok(Some(run)) => run,
@@ -314,10 +319,7 @@ async fn follow_production(
   let mut outcome = settled(&current, &finished, production.as_ref());
   if outcome.stage == "failed" && outcome.data_loss != Some(true) {
     if let Some(reason) = gh::unstarted_reason(full, finished.id).await {
-      outcome.error = Some(super::unstarted_message(
-        "Your changes are published, but GitHub didn't start the pipeline that deploys them",
-        &reason,
-      ));
+      outcome.error = Some(super::unstarted_message(&t!("team.publish.deployUnstarted"), &reason));
     }
   }
   let failed = outcome.stage == "failed";
@@ -328,7 +330,7 @@ async fn follow_production(
     step("done", None);
     return with_project(project.and_then(|p| store::find_project(&p.id)));
   }
-  let message = message.unwrap_or_else(|| "The pipeline couldn't deploy the published app.".into());
+  let message = message.unwrap_or_else(|| t!("team.publish.deployFailed"));
   step("error", Some(message.clone()));
   let mut result = fail(message);
   result.project = store::find_project(project_id);
@@ -346,12 +348,8 @@ fn settled(publish: &TeamPublishState, run: &gh::Run, production: Option<&TeamDe
   let data_loss = production.is_some_and(|r| {
     r.reason.as_deref() == Some("data-loss") && (publish.merge_sha.is_none() || r.sha == publish.merge_sha || r.sha.as_deref() == Some(run.head_sha.as_str()))
   });
-  let error = if data_loss {
-    "Your changes are published, but the pipeline stopped before deploying because they would delete data in the published app. Confirm to deploy anyway."
-  } else {
-    "Your changes are published, but the pipeline couldn't deploy them. Open the logs to see what happened."
-  };
-  TeamPublishState { stage: "failed".into(), error: Some(error.into()), data_loss: Some(data_loss), ..base }
+  let error = if data_loss { t!("team.publish.dataLoss") } else { t!("team.publish.deployFailedLogs") };
+  TeamPublishState { stage: "failed".into(), error: Some(error), data_loss: Some(data_loss), ..base }
 }
 
 /// Settle a publish whose production deploy finished (or never started) while
@@ -381,7 +379,7 @@ pub(crate) async fn settle_deploying(
     Some(_) => None,
     None => (chrono::Utc::now().signed_duration_since(since) > chrono::Duration::minutes(15)).then(|| TeamPublishState {
       stage: "failed".into(),
-      error: Some("The pipeline didn't start a deploy for the published changes. Check GitHub Actions for the workspace.".into()),
+      error: Some(t!("team.publish.deployNeverStarted")),
       at: now_iso(),
       ..publish.clone()
     }),
@@ -403,7 +401,7 @@ async fn find_dispatch_run(full: &str, cancel: &CancelToken) -> Result<Option<gh
       }
     }
     if sleep_or_cancel(4_000, cancel).await {
-      return Err(CANCELLED.into());
+      return Err(cancelled());
     }
   }
   Ok(None)
@@ -417,13 +415,13 @@ async fn publish_with_data_loss(app: &AppHandle, project_id: &str, cancel: &Canc
     Err(e) => return fail(e),
   };
   let Some(publish) = tp.binding.publish.clone().filter(|p| p.data_loss == Some(true)) else {
-    return fail("There's no blocked deploy to confirm.");
+    return fail(t!("team.publish.noBlockedDeploy"));
   };
   let full = tp.workspace.repo.clone();
   let folder = tp.binding.folder.clone();
   let pr_number = publish.pr_number.unwrap_or(0);
   if let Err(e) = gh::dispatch(&full, json!({ "action": "deploy", "project": folder, "force": true })).await {
-    return fail(e.describe("Start the deploy"));
+    return fail(e.describe(&t!("team.actions.startDeploy")));
   }
   set_publish(project_id, Some(TeamPublishState { merge_sha: publish.merge_sha.clone(), ..stage("deploying", Some(pr_number)) }));
   follow_production(app, project_id, &full, &folder, publish.merge_sha.as_deref().unwrap_or_default(), "workflow_dispatch", pr_number, cancel).await
@@ -468,11 +466,11 @@ pub async fn team_approve(workspace_id: String, pr_number: u64) -> TeamActionRes
     return fail(e);
   }
   let Some(ws) = store::find_team_workspace(&workspace_id) else {
-    return fail("That team workspace is no longer on this computer.");
+    return fail(t!("team.workspaceMissing"));
   };
   match gh::as_account(ws.account.clone(), gh::approve(&ws.repo, pr_number)).await {
     Ok(()) => super::with_workspace(ws),
-    Err(e) => fail(e.describe("Approve the changes")),
+    Err(e) => fail(e.describe(&t!("team.actions.approve"))),
   }
 }
 

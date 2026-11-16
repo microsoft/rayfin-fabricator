@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import type { LocalSecret, SecretInfo, SecretsState, StudioProject } from '@shared/ipc'
+import { setLanguage } from '../i18n'
 import { OverlayProvider } from '../overlay'
 import SecretsView from './SecretsView'
 import { nameProblem, toSecretName } from './secrets/SecretDialog'
@@ -380,28 +381,32 @@ describe('SecretsView', () => {
     )
   })
 
-  it('shows each deployment of a team app, read-only', async () => {
-    const api = installApi({
-      status: 'team',
-      secrets: [],
-      functionsEnabled: true,
-      environments: [
-        {
-          kind: 'published',
-          deployed: true,
-          portalUrl: 'https://app.fabric.microsoft.com/groups/w/apps/1',
-          secrets: [
-            {
-              name: 'HELLO_WORLD',
-              declared: false,
-              stored: true,
-              updatedAt: '2026-10-05T05:14:53Z'
-            }
-          ]
-        },
-        { kind: 'preview', deployed: false, secrets: [] }
-      ]
-    })
+  it('lists a team app’s values on this computer, and each of its deployments read-only', async () => {
+    const api = installApi(
+      {
+        status: 'team',
+        secrets: [{ name: 'OPENAI_KEY', declared: true, stored: false }],
+        functionsEnabled: true,
+        rayfinVersion: '1.36.2',
+        environments: [
+          {
+            kind: 'published',
+            deployed: true,
+            portalUrl: 'https://app.fabric.microsoft.com/groups/w/apps/1',
+            secrets: [
+              {
+                name: 'HELLO_WORLD',
+                declared: false,
+                stored: true,
+                updatedAt: '2026-10-05T05:14:53Z'
+              }
+            ]
+          },
+          { kind: 'preview', deployed: false, secrets: [] }
+        ]
+      },
+      [value('OPENAI_KEY', 'local')]
+    )
     const onSendToChat = vi.fn()
     await act(async () => {
       render(
@@ -415,15 +420,20 @@ describe('SecretsView', () => {
       )
     })
 
-    const published = await screen.findByRole('region', { name: 'Published app' })
+    // It runs on this computer, so its values here are yours to set.
+    const here = await screen.findByRole('region', { name: 'Secrets' })
+    expect(within(here).getByText('On this computer')).toBeTruthy()
+    expect(row('OPENAI_KEY').textContent).toContain('Local value: Set on this computer')
+    expect(row('OPENAI_KEY').textContent).not.toContain('Published value')
+    expect(api.local.secrets).toHaveBeenCalledWith('p1')
+    expect((screen.getByRole('button', { name: /New secret/ }) as HTMLButtonElement).disabled).toBe(
+      false
+    )
+
+    const published = screen.getByRole('region', { name: 'Published app' })
     expect(within(published).getByText('Not in rayfin.yml')).toBeTruthy()
     const preview = screen.getByRole('region', { name: 'Your preview' })
-    expect(within(preview).getByText(/Not deployed yet/)).toBeTruthy()
-    expect((screen.getByRole('button', { name: /New secret/ }) as HTMLButtonElement).disabled).toBe(
-      true
-    )
-    // A team app doesn't run on this computer.
-    expect(api.local.secrets).not.toHaveBeenCalled()
+    expect(within(preview).getByText(/Your preview deploys when you publish/)).toBeTruthy()
 
     const details = await openDetails('HELLO_WORLD')
     expect(within(details).getByText('Secret · Published app')).toBeTruthy()
@@ -435,5 +445,27 @@ describe('SecretsView', () => {
     )
     fireEvent.click(within(details).getByRole('button', { name: /Ask Copilot to use it/ }))
     expect(onSendToChat.mock.calls[0][1]).toContain("rayfin/rayfin.yml doesn't list it yet")
+  })
+})
+
+describe('SecretsView in German', () => {
+  afterEach(async () => {
+    cleanup()
+    await setLanguage('en')
+    localStorage.clear()
+  })
+
+  it('names each value’s state in the interface’s language', async () => {
+    installApi(ready([OPENAI, MISSING]), [
+      value('OPENAI_KEY', 'local'),
+      value('STRIPE_KEY', 'none')
+    ])
+    await act(() => setLanguage('de'))
+    await renderView()
+
+    await screen.findByRole('region', { name: 'Geheimnisse' })
+    expect(row('OPENAI_KEY').textContent).toContain('Lokaler Wert: Hier festgelegt')
+    expect(row('STRIPE_KEY').textContent).toContain('Veröffentlichter Wert: Nicht festgelegt')
+    expect(nameProblem('2FA_CODE')).toBe('Der Name muss mit einem Buchstaben beginnen.')
   })
 })

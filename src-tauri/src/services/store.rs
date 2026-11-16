@@ -40,9 +40,6 @@ fn default_flags() -> ExperimentFlags {
     team_workspaces: Some(false),
     report_migration: Some(false),
     work_iq: Some(false),
-    mcp_servers: Some(false),
-    app_export: Some(false),
-    goals: Some(false),
   }
 }
 
@@ -50,12 +47,14 @@ fn default_settings() -> AppSettings {
   AppSettings {
     theme: "system".to_string(),
     ui_scale: Some(1.0),
+    language: None,
     experiments: Some(default_flags()),
     full_diagnostics: Some(false),
     deploy_mode: None,
     byok: None,
     mcp_servers: Vec::new(),
     chat_defaults: None,
+    custom_instructions: None,
   }
 }
 
@@ -155,9 +154,12 @@ pub fn get_settings() -> AppSettings {
 }
 
 /// Patch fields of the settings (deep-merging experiment flags) and persist.
+/// A `language` Fabricator doesn't come in, such as "system", leaves it to the
+/// computer.
 pub fn set_settings(
   theme: Option<String>,
   ui_scale: Option<f64>,
+  language: Option<String>,
   experiments: Option<ExperimentFlags>,
   full_diagnostics: Option<bool>,
   deploy_mode: Option<String>,
@@ -168,6 +170,9 @@ pub fn set_settings(
     }
     if let Some(s) = ui_scale {
       c.settings.ui_scale = Some(s.clamp(0.8, 2.0));
+    }
+    if let Some(language) = language {
+      c.settings.language = crate::i18n::LANGUAGES.contains(&language.as_str()).then_some(language);
     }
     if let Some(v) = full_diagnostics {
       c.settings.full_diagnostics = Some(v);
@@ -188,14 +193,6 @@ fn merge_experiments(experiments: &mut Option<ExperimentFlags>, patch: Experimen
   if let Some(v) = patch.team_workspaces { current.team_workspaces = Some(v); }
   if let Some(v) = patch.report_migration { current.report_migration = Some(v); }
   if let Some(v) = patch.work_iq { current.work_iq = Some(v); }
-  if let Some(v) = patch.mcp_servers { current.mcp_servers = Some(v); }
-  if let Some(v) = patch.app_export { current.app_export = Some(v); }
-  if let Some(v) = patch.goals { current.goals = Some(v); }
-}
-
-/// The Goals experiment is on.
-pub fn goals_enabled() -> bool {
-  with_cache(|c| c.settings.experiments.as_ref().and_then(|f| f.goals).unwrap_or(false))
 }
 
 /// Each provider's models and the ones shown in the model pickers.
@@ -280,6 +277,17 @@ pub fn remove_mcp_server(id: &str) -> Vec<McpServerEntry> {
 pub fn set_chat_defaults(defaults: ChatDefaults) -> AppSettings {
   with_cache(|c| {
     c.settings.chat_defaults = Some(defaults);
+    persist(c);
+    c.settings.clone()
+  })
+}
+
+/// Save the user's custom instructions (already checked: see
+/// `agent_skills::custom_instructions`), none clearing them, and return the
+/// settings.
+pub fn set_custom_instructions(instructions: Option<String>) -> AppSettings {
+  with_cache(|c| {
+    c.settings.custom_instructions = instructions;
     persist(c);
     c.settings.clone()
   })
@@ -524,46 +532,14 @@ mod tests {
     );
   }
 
-  /// The App gallery was an experiment until it shipped to everyone; settings
-  /// saved with its old flag still load, and the flag is gone once they're saved.
+  /// Settings saved with flags for graduated or removed experiments still load,
+  /// and the obsolete flags are gone once they're saved.
   #[test]
-  fn the_graduated_app_gallery_flag_still_loads_and_is_dropped() {
-    let flags: ExperimentFlags =
-      serde_json::from_value(serde_json::json!({"appGallery":true,"workIq":true})).unwrap();
+  fn obsolete_experiment_flags_still_load_and_are_dropped() {
+    let flags: ExperimentFlags = serde_json::from_value(serde_json::json!({
+      "appGallery":true,"mcpServers":true,"appExport":true,"goals":true,"parallelUi":true,"workIq":true
+    })).unwrap();
     assert_eq!(serde_json::to_value(flags).unwrap(), serde_json::json!({"workIq":true}));
-  }
-
-  #[test]
-  fn mcp_servers_flag_merges_and_defaults_off() {
-    assert_eq!(default_settings().experiments.unwrap().mcp_servers, Some(false));
-    let mut flags: Option<ExperimentFlags> =
-      Some(serde_json::from_value(serde_json::json!({"workIq":true})).unwrap());
-    merge_experiments(&mut flags, serde_json::from_value(serde_json::json!({"mcpServers":true})).unwrap());
-    assert_eq!(
-      serde_json::to_value(flags.unwrap()).unwrap(),
-      serde_json::json!({"workIq":true,"mcpServers":true})
-    );
-  }
-
-  #[test]
-  fn app_export_flag_merges_and_defaults_off() {
-    assert_eq!(default_settings().experiments.unwrap().app_export, Some(false));
-    let mut flags: Option<ExperimentFlags> =
-      Some(serde_json::from_value(serde_json::json!({"mcpServers":true})).unwrap());
-    merge_experiments(&mut flags, serde_json::from_value(serde_json::json!({"appExport":true})).unwrap());
-    assert_eq!(
-      serde_json::to_value(flags.unwrap()).unwrap(),
-      serde_json::json!({"mcpServers":true,"appExport":true})
-    );
-  }
-
-  #[test]
-  fn goals_flag_merges_and_defaults_off() {
-    assert_eq!(default_settings().experiments.unwrap().goals, Some(false));
-    let mut flags: Option<ExperimentFlags> =
-      Some(serde_json::from_value(serde_json::json!({"appExport":true})).unwrap());
-    merge_experiments(&mut flags, serde_json::from_value(serde_json::json!({"goals":true})).unwrap());
-    assert_eq!(serde_json::to_value(flags.unwrap()).unwrap(), serde_json::json!({"appExport":true,"goals":true}));
   }
 
   #[test]

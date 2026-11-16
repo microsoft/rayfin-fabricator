@@ -12,18 +12,16 @@ enum Owner {
   Team,
   Secrets,
   Export,
-  Goals,
 }
 
 impl Owner {
-  fn busy_message(self) -> &'static str {
+  fn busy_message(self) -> String {
     match self {
-      Owner::Chat => "Copilot is still working on this project. Wait for the turn to finish (or stop it), then try again.",
-      Owner::Deploy => "Fabricator is publishing this project. Wait for it to finish, then try again.",
-      Owner::Team => "Fabricator is saving or publishing this project. Wait for it to finish, then try again.",
-      Owner::Secrets => "Fabricator is updating this app's secrets. Wait for it to finish, then try again.",
-      Owner::Export => "Fabricator is exporting this project. Wait for it to finish, then try again.",
-      Owner::Goals => "Fabricator is copying this project to run its Goals checks. Wait a moment, then try again.",
+      Owner::Chat => t!("services.projectMutation.busyChat"),
+      Owner::Deploy => t!("services.projectMutation.busyDeploy"),
+      Owner::Team => t!("services.projectMutation.busyTeam"),
+      Owner::Secrets => t!("services.projectMutation.busySecrets"),
+      Owner::Export => t!("services.projectMutation.busyExport"),
     }
   }
 }
@@ -56,9 +54,9 @@ impl Drop for MutationGuard {
 
 impl ProjectMutations {
   fn acquire(&self, project_id: &str, owner: Owner) -> Result<MutationGuard, String> {
-    let mut map = self.inner.lock().map_err(|_| "Project mutation ownership is unavailable.")?;
+    let mut map = self.inner.lock().map_err(|_| t!("services.projectMutation.unavailable"))?;
     if let Some(existing) = map.get(project_id) {
-      return Err(existing.owner.busy_message().into());
+      return Err(existing.owner.busy_message());
     }
     let generation = uuid::Uuid::new_v4().to_string();
     map.insert(project_id.to_string(), Lease { generation: generation.clone(), owner });
@@ -91,12 +89,6 @@ impl ProjectMutations {
   /// never holds a half-written turn or a half-updated publishing record.
   pub fn export(&self, project_id: &str) -> Result<MutationGuard, String> {
     self.acquire(project_id, Owner::Export)
-  }
-
-  /// Lease the project while a Goals run fingerprints and copies it, so the
-  /// copy never holds a half-written turn.
-  pub fn goals(&self, project_id: &str) -> Result<MutationGuard, String> {
-    self.acquire(project_id, Owner::Goals)
   }
 
   #[cfg(test)]

@@ -7,6 +7,7 @@ import type {
   StudioProject,
   TeamRunStatus
 } from '@shared/ipc'
+import { Trans, translator, useTranslation } from '../i18n'
 import { usePreviewSuppressed } from '../overlay'
 import { measurePreviewBounds, watchPreviewPixelRatio } from '../previewBounds'
 import {
@@ -15,21 +16,18 @@ import {
   refusedSchemaLosses,
   type LocalBackend
 } from '../localBackend'
-import { DEVICES, deviceHostHeight, deviceHostWidth, type DeviceId } from '../design/devices'
-import { readFabricatorTheme } from '../design/hostTheme'
-import type { DesignSession, DesignSurface } from '../design/useDesignSession'
-import type { ModelSelection } from '../modelSelection'
-import { ModelPicker } from './models/ModelPicker'
+import { DEVICES, deviceHostHeight, deviceHostWidth, type DeviceId } from '../previewDevices'
+import { terminalStore, useOutputShowing } from '../terminal/store'
+import { readFabricatorTheme } from '../pick/hostTheme'
+import type { TouchUp, PickSurface } from '../pick/useTouchUp'
+import { touchUpLabel, TouchUpButton } from '../pick/TouchUpButton'
 import {
   ChevronLeftIcon,
   ChevronRightIcon,
   ReloadIcon,
   FabricIcon,
-  DesignIcon,
   ExpandIcon,
   CollapseIcon,
-  PaletteIcon,
-  SparkleIcon,
   DesktopIcon,
   TabletIcon,
   PhoneIcon,
@@ -44,7 +42,6 @@ import LocalStatePanel from './local/LocalStatePanel'
 import LocalOutputButton from './local/LocalOutputButton'
 import LocalPublishedInfo from './local/LocalPublishedInfo'
 import PreviewAsMenu from './local/PreviewAsMenu'
-import LocalOutput from './local/LocalOutput'
 import SeedOffer from './local/SeedOffer'
 import {
   FallbackNote,
@@ -64,12 +61,13 @@ export interface DeployUiState {
   workspace?: string
 }
 
-/** Which app a personal app's preview shows: the one on this computer, or the published one. */
+/** Which app a published app's preview shows: the one on this computer, or the published one. */
 export type PreviewView = 'local' | 'published'
 
 /**
  * A screenshot pending attachment to the next chat message — one the user
- * added to the composer, or a Design capture — consumed by the chat composer.
+ * added to the composer, or a Touch Up screenshot — consumed by the chat
+ * composer.
  */
 export interface PendingShot {
   /** Absolute temp-file path passed to copilot as `--attachment`. */
@@ -150,35 +148,23 @@ interface Props {
   /** Notify the parent that the persisted preview mode changed (so it can refresh
    *  project state — the selection lives on the project, store-backed). */
   onPreviewModeChanged?: () => void
-  /** Design mode ("visual chat"). The session lives in the Workbench, which
-   *  shares its queue with the chat composer. */
-  design?: DesignSession
-  /** The Design bar's model picker. Auto lets Design pick a fast model itself. */
-  designModel?: {
-    value: ModelSelection
-    onChange: (next: ModelSelection) => void
-    onManageKeys: () => void
-  }
-  /** Why sending the queued design changes is blocked right now (a turn is
-   *  running, the first publish is pending, a publish is running…), or null
-   *  when it can go. */
-  designSendBlocked?: string | null
-  /** Send the queued design changes to chat (the composer text is the note). */
-  onDesignSend?: () => void
-  /** Report the surface Design can run on — the app on this computer or the
-   *  published one, directly or embedded in the Fabric portal shell — or null
-   *  while it can't (publishing, loading, mid-turn on a local page). */
-  onDesignSurface?: (surface: DesignSurface | null) => void
+  /** Touch Up: point at elements in the app and hand them to chat. It
+   *  lives in the Workbench, which shares the picks with the chat composer. */
+  touchUp?: TouchUp
+  /** Report the surface Touch Up can run on (the app on this computer or
+   *  the published one, directly or embedded in the Fabric portal shell), or
+   *  null while it can't (publishing, loading, nothing to show). */
+  onPickSurface?: (surface: PickSurface | null) => void
   /** Report the project-load overlay state so the parent can render a centered
    *  "Loading <name>…" over the whole build view (a project switch reloads the
    *  chat + preview, so the indicator belongs at the content level, not the
    *  preview pane). `null` when not loading. */
   onLoadingChange?: (state: { name: string; fading: boolean } | null) => void
   /**
-   * A personal app's local backend (rayfin-local): by default the preview shows
-   * the app running on this computer, with its own backend and data. Absent for
-   * team apps, and for a published app it can't run, whose preview falls back
-   * to the published backend (`fallbackReason`).
+   * The app's local backend (rayfin-local): by default the preview shows the
+   * app running on this computer, with its own backend and data, team apps
+   * included. Absent for an app it can't run, whose preview falls back to its
+   * backend in Fabric (`fallbackReason`).
    */
   local?: LocalBackend
   /** With `local`: which app the preview shows. Published is offered once the app is. */
@@ -194,15 +180,14 @@ interface Props {
   onReviewSchema?: () => void
   /** Hand a request to the chat, such as fixing the seed data's problems. */
   onSendToChat?: (display: string, prompt: string) => void
-  /** An app on its published backend (team apps, every app without Local
-   *  development, and the fallback): the `localhost` URL of the project's Vite
-   *  dev server, or null/undefined when none. When set (and no publish is
-   *  running), the preview surface shows this instead of the published app.
-   *  See {@link RayfinStudioApi.dev}. */
+  /** An app on a Fabric backend (one its local backend can't run, `fallbackReason`):
+   *  the `localhost` URL of the project's Vite dev server, or null/undefined when none.
+   *  When set (and no publish is running), the preview surface shows this instead
+   *  of the published app. See {@link RayfinStudioApi.dev}. */
   localPreviewUrl?: string | null
-  /** Chat turns don't publish ("Publish after each chat turn" is off): the live
-   *  preview on the published backend runs whenever the app is open, instead
-   *  of only during turns. */
+  /** Chat turns don't publish ("Publish after each chat turn" is off, and never
+   *  for a team app): the live preview on a Fabric backend runs whenever the
+   *  app is open, instead of only during turns. */
   manualDeploy?: boolean
   /** Changes when the local page should load again: a chat turn ended that
    *  changed what hot updates don't bring, or the backend rebuilt. */
@@ -212,13 +197,10 @@ interface Props {
   turnRunning?: boolean
   /** A team app (experimental): its pipeline publishes it, so there's no Publish here. */
   team?: boolean
-  /** Team apps: the deployment the local preview's data comes from. */
+  /** Team apps on a Fabric backend: the deployment the live preview's data comes from. */
   localBackend?: DevServerResult['backend']
   /** Team apps: the pipeline run publishing this app right now, if any. */
   teamRun?: TeamRunStatus
-  /** Team apps: which deployment the preview shows — your own preview or the
-   *  published app (the team menu's "Preview shows"). */
-  teamView?: 'preview' | 'production'
   /** Team apps: open the workspace overview. */
   onOpenTeamMap?: () => void
   /**
@@ -244,24 +226,18 @@ interface Props {
   onPageLoad?: (page: { url: string; loading: boolean; app: boolean }) => void
 }
 
-/** What a team app's preview status says once its deployment is up: which one
- *  the preview shows. (A solo app's published state is on the app bar's
- *  publish control, so its preview has no such status.) */
-function liveLabel(teamView: Props['teamView']): string {
-  return teamView === 'production' ? 'Published' : 'My preview'
-}
-
-function statusLabel(running: boolean, status: string | undefined, live: string): string {
-  if (running) return 'Publishing…'
+function statusLabel(running: boolean, status: string | undefined): string {
+  const t = translator('preview')
+  if (running) return t('pane.status.publishing')
   switch (status) {
     case 'success':
-      return live
+      return t('pane.status.published')
     case 'error':
-      return 'Couldn’t publish'
+      return t('pane.status.failed')
     case 'deploying':
-      return 'Publishing…'
+      return t('pane.status.publishing')
     default:
-      return 'Not published'
+      return t('pane.status.notPublished')
   }
 }
 
@@ -304,18 +280,6 @@ function useUiScale(enabled: boolean): number {
   return scale
 }
 
-/** Whole seconds since `since` (a `performance.now()` stamp), ticking while set. */
-function useElapsed(since: number | null): number {
-  const [now, setNow] = useState(() => performance.now())
-  useEffect(() => {
-    if (since == null) return
-    setNow(performance.now())
-    const timer = window.setInterval(() => setNow(performance.now()), 1000)
-    return () => window.clearInterval(timer)
-  }, [since])
-  return since == null ? 0 : Math.max(0, Math.floor((now - since) / 1000))
-}
-
 export default function PreviewPane({
   project,
   deploy,
@@ -326,11 +290,8 @@ export default function PreviewPane({
   focused,
   onToggleFocus,
   onPreviewModeChanged,
-  design,
-  designModel,
-  designSendBlocked = null,
-  onDesignSend,
-  onDesignSurface,
+  touchUp,
+  onPickSurface,
   onLoadingChange,
   local,
   view: requestedView,
@@ -347,7 +308,6 @@ export default function PreviewPane({
   team = false,
   localBackend,
   teamRun,
-  teamView,
   onOpenTeamMap,
   watching = false,
   onWatchChange,
@@ -355,12 +315,13 @@ export default function PreviewPane({
   onSettle,
   onPageLoad
 }: Props): JSX.Element {
+  const { t } = useTranslation('preview')
   const suppressed = usePreviewSuppressed()
   const running = deploy?.running ?? false
   const deployedUrl = project.lastDeploy?.url
-  // A personal app runs on this computer, on its local backend; once it's
-  // published, the published app is a switch away.
-  const localMode = Boolean(local) && !team
+  // An app runs on this computer, on its local backend (a team app too); once
+  // it's published, the published app is a switch away.
+  const localMode = Boolean(local)
   const view: PreviewView =
     !localMode || (deployedUrl && requestedView === 'published') ? 'published' : 'local'
   const localView = view === 'local'
@@ -386,8 +347,11 @@ export default function PreviewPane({
         : 'error'
       : project.lastDeploy?.status
   const error = deploy?.result ? deploy.result.error : project.lastDeploy?.error
-  // Team apps: the pipeline is publishing this app (its preview, or the published app).
-  const teamDeploying = Boolean(team && teamRun && teamRun.status !== 'completed')
+  // Team apps: the pipeline is publishing this app (its published version: your
+  // preview deploys while you publish, beside the app on this computer).
+  const teamDeploying = Boolean(
+    team && teamRun?.kind === 'production' && teamRun.status !== 'completed'
+  )
   const outcome = deploy?.result?.outcome ?? project.lastDeploy?.outcome
   // An app that has never been published has no Fabric workspace yet: a publish
   // that needed one asks where to publish it instead of failing. The Local view shows the app on this computer.
@@ -400,9 +364,8 @@ export default function PreviewPane({
   }, [running])
   useEffect(() => setFailureDismissed(false), [project.id])
 
-  // The local backend's output, under the preview.
-  const [outputOpen, setOutputOpen] = useState(false)
-  useEffect(() => setOutputOpen(false), [project.id])
+  // The app's output on this computer: the terminal panel's Output tab.
+  const outputShowing = useOutputShowing(project.id)
 
   // An app published before it ran here: its local data starts empty, so the
   // info button beside Local and Published stands out until it's opened, or the
@@ -574,9 +537,9 @@ export default function PreviewPane({
   // The app on this computer, once its backend runs: its own dev server.
   const localReady = localView && local?.state === 'running' ? local.ready : null
   const localAppUrl = localReady?.appUrl ?? null
-  // Team apps and the published-backend fallback: while a Vite dev server runs
-  // for the project, the surface shows its localhost URL instead of the
-  // published app. A publish on the full screen still wins (DeployStage); one
+  // An app on a Fabric backend (one its local backend can't run): while a Vite
+  // dev server runs for the project, the surface shows its localhost URL instead
+  // of the published app. A publish on the full screen still wins (DeployStage); one
   // running beside the app leaves it on screen.
   const devPreview = !localMode && Boolean(localPreviewUrl) && (!running || beside)
   /** The surface shows a page served on this computer. */
@@ -1018,12 +981,12 @@ export default function PreviewPane({
   const warmedRef = useRef(false)
   useEffect(() => {
     if (warmedRef.current || !showWebview) return
-    const t = window.setTimeout(() => {
+    const timer = window.setTimeout(() => {
       if (transitioningRef.current || suppressed) return // don't capture mid-load / while parked
       warmedRef.current = true
       void window.api.preview.still().catch(() => {})
     }, 600)
-    return () => window.clearTimeout(t)
+    return () => window.clearTimeout(timer)
   }, [showWebview, suppressed])
 
   // An overlay opening over the live preview waits on a still of it before the
@@ -1066,57 +1029,40 @@ export default function PreviewPane({
     if (shownUrl) void window.api.openExternal(shownUrl)
   }
 
-  // ── Design mode ("visual chat") ───────────────────────────────────────────
-  // The session (queue, polling, AI requests, capture) lives in the Workbench so
-  // the chat composer can show and send the queue; this pane reports the surface
-  // Design can run on — the app on this computer or the published one, direct
-  // or embedded in the Fabric portal shell — and renders the design toolbar +
-  // device width. See `useDesignSession` and the injected `design_agent.js`.
-  const designActive = Boolean(design?.active)
-  // Mid-turn, Copilot's edits change a local page under the session, so a turn
-  // starting ends it (the queue stays in the composer). The published-backend
-  // fallback's dev server runs between turns only while turns don't publish.
-  const localDesign = isLocal && !turnRunning && (localView || manualDeploy)
+  // ── Touch Up ─────────────────────────────────────────────────────────
+  // The picks live in the Workbench so the chat composer can show and send
+  // them; this pane reports the surface picking can run on (the app on this
+  // computer or the published one, direct or embedded in the Fabric portal
+  // shell) and renders its switch. See `useTouchUp` and `pick_agent.js`.
   // A publish reloads the published app when it ends; the app on this computer
   // carries on through it.
   const publishing = running && !localView
   const embedded = previewMode === 'fabric' && !isLocal && Boolean(fabricUrl)
-  const designAppUrl = localView ? localAppUrl : isLocal ? previewUrl : deployedUrl
-  const designSurface = useMemo<DesignSurface | null>(
+  const pickAppUrl = localView ? localAppUrl : isLocal ? previewUrl : deployedUrl
+  const pickSurface = useMemo<PickSurface | null>(
     () =>
-      showWebview &&
-      !publishing &&
-      !transitioning &&
-      (!isLocal || localDesign) &&
-      previewUrl &&
-      designAppUrl
-        ? { url: previewUrl, embedded, appUrl: designAppUrl }
+      showWebview && !publishing && !transitioning && previewUrl && pickAppUrl
+        ? { url: previewUrl, embedded, appUrl: pickAppUrl }
         : null,
-    [
-      showWebview,
-      publishing,
-      transitioning,
-      isLocal,
-      localDesign,
-      previewUrl,
-      designAppUrl,
-      embedded
-    ]
+    [showWebview, publishing, transitioning, previewUrl, pickAppUrl, embedded]
   )
   useEffect(() => {
-    onDesignSurface?.(designSurface)
-  }, [designSurface, onDesignSurface])
-  useEffect(() => () => onDesignSurface?.(null), [onDesignSurface])
-  const uiScale = useUiScale(designActive)
-  const device = designActive && design ? design.device : null
-  const hostWidth = device ? deviceHostWidth(device, uiScale) : null
-  const hostHeight = device ? deviceHostHeight(device, uiScale) : null
+    onPickSurface?.(pickSurface)
+  }, [pickSurface, onPickSurface])
+  useEffect(() => () => onPickSurface?.(null), [onPickSurface])
+  const pickReason = publishing
+    ? t('pane.pick.publishing', { feature: touchUpLabel() })
+    : t('pane.pick.waiting', { feature: touchUpLabel() })
+  // The preview width: the full pane, or a tablet's or phone's width to check
+  // how the app responds.
+  const [device, setDevice] = useState<DeviceId>('desktop')
+  const uiScale = useUiScale(device !== 'desktop')
+  const hostWidth = showWebview ? deviceHostWidth(device, uiScale) : null
+  const hostHeight = showWebview ? deviceHostHeight(device, uiScale) : null
   const hostStyle = hostWidth
     ? { width: `${hostWidth}px`, height: hostHeight ? `${hostHeight}px` : undefined }
     : undefined
-  const phone = device === 'phone'
-  const polishSeconds = useElapsed(designActive ? (design?.polishingSince ?? null) : null)
-  const designCount = design?.items.length ?? 0
+  const phone = Boolean(hostWidth) && device === 'phone'
   const dotClass =
     running || status === 'deploying' || teamDeploying
       ? 'busy'
@@ -1125,27 +1071,21 @@ export default function PreviewPane({
         : status === 'error'
           ? 'err'
           : 'idle'
-  const live = liveLabel(teamView)
   const statusText = teamDeploying
     ? status === 'success'
-      ? `${live} · updating`
-      : 'Publishing…'
-    : statusLabel(running, status, live)
-  const statusTitle =
-    teamView === 'production'
-      ? 'Showing the published app — what everyone sees. Switch in the team menu.'
-      : 'Showing your own preview of your changes. Switch to the published app in the team menu.'
+      ? t('pane.status.updating')
+      : t('pane.status.publishing')
+    : statusLabel(running, status)
+  const statusTitle = t('pane.status.title')
   // The Fabric portal shell around the published app (see `fabricOffered`).
   const fabricAvailable = Boolean(fabricUrl) && !isLocal
-  const fabricTitle = designActive
-    ? 'Finish designing (Done) to switch views'
-    : !fabricUrl
-      ? 'The Fabric portal view is unavailable for this published app'
-      : isLocal
-        ? 'The Fabric portal view shows your published app, not this preview on your computer'
-        : previewMode === 'fabric'
-          ? 'Viewing inside the Fabric portal shell — click to return to the direct app view'
-          : 'View the app inside the Fabric portal shell, where it works fully'
+  const fabricTitle = !fabricUrl
+    ? t('pane.fabric.unavailable')
+    : isLocal
+      ? t('pane.fabric.local')
+      : previewMode === 'fabric'
+        ? t('pane.fabric.exit')
+        : t('pane.fabric.enter')
   const switchView = (next: PreviewView): void => {
     if (next === view) return
     // Looking at the published app is what the reminder beside the switch is for.
@@ -1162,8 +1102,8 @@ export default function PreviewPane({
               className="seg-btn seg-btn--icon"
               onClick={goBack}
               disabled={!showWebview || !canBack || transitioning}
-              aria-label="Back"
-              title="Back"
+              aria-label={t('actions.back')}
+              title={t('actions.back')}
             >
               <ChevronLeftIcon />
             </button>
@@ -1171,8 +1111,8 @@ export default function PreviewPane({
               className="seg-btn seg-btn--icon"
               onClick={goForward}
               disabled={!showWebview || !canForward || transitioning}
-              aria-label="Forward"
-              title="Forward"
+              aria-label={t('pane.forward')}
+              title={t('pane.forward')}
             >
               <ChevronRightIcon />
             </button>
@@ -1180,79 +1120,67 @@ export default function PreviewPane({
               className="seg-btn seg-btn--icon"
               onClick={reload}
               disabled={!showWebview || transitioning}
-              aria-label="Reload"
-              title="Reload"
+              aria-label={t('pane.reload')}
+              title={t('pane.reload')}
             >
               <ReloadIcon />
             </button>
           </div>
           {localMode && deployedUrl && (
             <div className="preview-views">
-              <div className="seg seg--toolbar" role="group" aria-label="App to show">
+              <div className="seg seg--toolbar" role="group" aria-label={t('pane.views.label')}>
                 <button
                   type="button"
                   className={`seg-btn ${localView ? 'seg-btn--on' : ''}`}
                   aria-pressed={localView}
-                  disabled={designActive}
                   onClick={() => switchView('local')}
-                  title={
-                    designActive
-                      ? 'Finish designing (Done) to switch views'
-                      : 'Your app on this computer, with its local data'
-                  }
+                  title={t('pane.views.localTitle')}
                 >
                   <DesktopIcon />
-                  <span className="seg-btn-label">Local</span>
+                  <span className="seg-btn-label">{t('pane.views.local')}</span>
                 </button>
                 <button
                   type="button"
                   className={`seg-btn ${localView ? '' : 'seg-btn--on'}`}
                   aria-pressed={!localView}
-                  disabled={designActive}
                   onClick={() => switchView('published')}
-                  title={
-                    designActive
-                      ? 'Finish designing (Done) to switch views'
-                      : 'Your published app on Microsoft Fabric, with its data'
-                  }
+                  title={t('pane.views.publishedTitle')}
                 >
                   <CloudIcon />
-                  <span className="seg-btn-label">Published</span>
+                  <span className="seg-btn-label">{t('pane.views.published')}</span>
                 </button>
               </div>
               <LocalPublishedInfo
                 key={project.id}
                 name={project.name}
                 fresh={showLocalNotice}
+                team={team}
                 onOpen={dismissNotice}
               />
             </div>
           )}
           {localView && localRunning && !turnRunning && (
-            <PreviewAsMenu
-              key={project.id}
-              projectId={project.id}
-              disabled={transitioning || designActive}
-            />
+            <PreviewAsMenu key={project.id} projectId={project.id} disabled={transitioning} />
           )}
-          {team && (
+          {team && !localView && (
             <span className={`preview-status preview-status--${dotClass}`} title={statusTitle}>
               <span className="preview-dot" />
               <span className="preview-status-label">{statusText}</span>
             </span>
           )}
           {/* The address says when the preview is local (localhost); a team app's
-              local preview also says whose data it uses when that's not its own. */}
-          {isLocal && team && (localBackend === 'production' || localBackend === 'none') && (
+              live preview on a Fabric backend also says whose data it uses when
+              that's not its own. */}
+          {devPreview && team && (localBackend === 'production' || localBackend === 'none') && (
             <span
               className={`preview-local-badge${localBackend === 'production' ? ' preview-local-badge--warn' : ''}`}
               title={
                 localBackend === 'production'
-                  ? 'It uses the published app’s data until the team pipeline publishes your own preview, so changes you make in it are real.'
-                  : 'Nothing is published yet, so it runs without data.'
+                  ? t('pane.data.publishedTitle')
+                  : t('pane.data.noneTitle')
               }
             >
-              {localBackend === 'production' ? 'Published data' : 'No data yet'}
+              {localBackend === 'production' ? t('pane.data.published') : t('pane.data.none')}
             </span>
           )}
           {shownUrl && (
@@ -1260,19 +1188,20 @@ export default function PreviewPane({
               className="preview-url"
               title={
                 localView
-                  ? `Your app, running on this computer at ${localAppUrl}, with its own backend and local data: Copilot’s changes show here as it makes them. Click to open it in your browser.`
+                  ? t('pane.url.local', { url: localAppUrl ?? '' })
                   : isLocal
                     ? team
-                      ? `Your app, running on this computer at ${localPreviewUrl}: Copilot's changes show here as it makes them. ${
+                      ? t(
                           localBackend === 'production'
-                            ? 'It uses the published app’s data until the team pipeline publishes your own preview, so changes you make in it are real.'
+                            ? 'pane.url.teamPublishedData'
                             : localBackend === 'none'
-                              ? 'Nothing is published yet, so it runs without data.'
-                              : "It uses your preview's data."
-                        } It stays until the team pipeline has published your latest change. Click to open it in your browser.`
+                              ? 'pane.url.teamNoData'
+                              : 'pane.url.teamOwnData',
+                          { url: localPreviewUrl ?? '' }
+                        )
                       : manualDeploy
-                        ? `Your app, running on this computer at ${localPreviewUrl} with your published app’s backend. While chat turns don’t publish, it shows your latest changes whenever the app is open. Click to open it in your browser.`
-                        : `Your app, running on this computer at ${localPreviewUrl} with your published app’s backend while Copilot works, so its changes show as it makes them. Click to open it in your browser.`
+                        ? t('pane.url.manual', { url: localPreviewUrl ?? '' })
+                        : t('pane.url.published', { url: localPreviewUrl ?? '' })
                     : shownUrl
               }
               onClick={openExternal}
@@ -1282,7 +1211,41 @@ export default function PreviewPane({
           )}
         </div>
         <div className="preview-toolbar-right">
-          {loading && showWebview && <span className="preview-loading">Loading…</span>}
+          {loading && showWebview && <span className="preview-loading">{t('status.loading')}</span>}
+          <div className="seg seg--toolbar" role="group" aria-label={t('pane.device.label')}>
+            {DEVICES.map((d) => {
+              const Glyph = DEVICE_ICONS[d.id]
+              const chosen = device === d.id
+              const deviceName = t(d.label)
+              return (
+                <button
+                  key={d.id}
+                  type="button"
+                  className={`seg-btn seg-btn--icon ${chosen ? 'seg-btn--on' : ''}`}
+                  aria-pressed={chosen}
+                  aria-label={t('pane.device.width', { device: deviceName })}
+                  title={
+                    d.width
+                      ? t('pane.device.fixed', { device: deviceName, width: d.width })
+                      : t('pane.device.fill', { device: deviceName })
+                  }
+                  disabled={!showWebview}
+                  onClick={() => setDevice(d.id)}
+                >
+                  <Glyph className="btn-ico" />
+                </button>
+              )
+            })}
+          </div>
+          {touchUp && (
+            <TouchUpButton
+              on={touchUp.on}
+              count={touchUp.picks.length}
+              disabled={!touchUp.on && (!touchUp.available || !nativeShown)}
+              disabledReason={pickReason}
+              onToggle={touchUp.toggle}
+            />
+          )}
           <div className="seg seg--toolbar">
             {fabricOffered && (
               <button
@@ -1297,48 +1260,30 @@ export default function PreviewPane({
                     .setPreviewMode(project.id, next)
                     .then(() => onPreviewModeChanged?.())
                 }}
-                disabled={
-                  !showWebview || !fabricAvailable || transitioning || designActive || publishing
-                }
+                disabled={!showWebview || !fabricAvailable || transitioning || publishing}
                 title={fabricTitle}
               >
                 <FabricIcon />
                 <span className="seg-btn-label">Fabric</span>
               </button>
             )}
-            <button
-              className={`seg-btn ${designActive ? 'seg-btn--on' : ''}`}
-              onClick={design?.toggle}
-              aria-pressed={designActive}
-              disabled={!design || (!designActive && (!design.available || !nativeShown))}
-              title={
-                designActive
-                  ? 'Leave Design — your queued changes stay in the chat composer'
-                  : isLocal && !localView && !manualDeploy
-                    ? 'Design works on the published app — available once this turn finishes'
-                    : isLocal && turnRunning
-                      ? 'Copilot is working — Design is available once this turn finishes'
-                      : 'Design — click anything in your app to change it, preview the result live, then send it all to Copilot at once'
-              }
-            >
-              <DesignIcon />
-              <span className="seg-btn-label">{designCount ? `Design · ${designCount}` : 'Design'}</span>
-            </button>
             {localView && local && (
               <LocalOutputButton
                 status={local.status}
                 pending={!local.status || local.busy}
-                open={outputOpen}
-                onToggle={() => setOutputOpen((open) => !open)}
+                open={outputShowing}
+                onToggle={() =>
+                  outputShowing
+                    ? terminalStore.close(project.id)
+                    : terminalStore.showOutput(project.id)
+                }
               />
             )}
             <button
               className={`seg-btn seg-btn--icon ${focused ? 'seg-btn--on' : ''}`}
               onClick={onToggleFocus}
-              aria-label={focused ? 'Exit focus' : 'Focus'}
-              title={
-                focused ? 'Exit focus — show the chat again' : 'Focus the preview — hide the chat'
-              }
+              aria-label={focused ? t('pane.focus.exit') : t('pane.focus.enter')}
+              title={focused ? t('pane.focus.exitTitle') : t('pane.focus.enterTitle')}
             >
               {focused ? <CollapseIcon /> : <ExpandIcon />}
             </button>
@@ -1346,93 +1291,9 @@ export default function PreviewPane({
         </div>
       </div>
 
-      {designActive && design && (
-        <div className="design-bar" role="toolbar" aria-label="Design tools">
-          <span className="design-bar-status" aria-live="polite">
-            <span className="design-bar-dot" aria-hidden="true" />
-            {designCount
-              ? `${designCount} change${designCount === 1 ? '' : 's'} ready`
-              : 'Click anything in your app to change it'}
-          </span>
-          <div className="design-bar-actions">
-            {designModel && (
-              <ModelPicker
-                value={designModel.value}
-                disabled={false}
-                onChange={designModel.onChange}
-                placement="down"
-                onManageKeys={designModel.onManageKeys}
-                autoHint="Fabricator picks a fast model for Options and Polish."
-                label="Design model"
-              />
-            )}
-            <div className="seg seg--toolbar" role="group" aria-label="Preview width">
-              {DEVICES.map((d) => {
-                const Glyph = DEVICE_ICONS[d.id]
-                const on = design.device === d.id
-                return (
-                  <button
-                    key={d.id}
-                    type="button"
-                    className={`seg-btn seg-btn--icon ${on ? 'seg-btn--on' : ''}`}
-                    aria-pressed={on}
-                    aria-label={`${d.label} width`}
-                    title={d.width ? `${d.label} — ${d.width}px wide` : `${d.label} — fill the pane`}
-                    onClick={() => design.setDevice(d.id)}
-                  >
-                    <Glyph className="btn-ico" />
-                  </button>
-                )
-              })}
-            </div>
-            <div className="seg seg--toolbar">
-              <button
-                type="button"
-                className={`seg-btn ${design.panel === 'theme' ? 'seg-btn--on' : ''}`}
-                aria-pressed={design.panel === 'theme'}
-                onClick={design.toggleTheme}
-                title="Theme — try a new accent, neutrals, corners, density or font across the whole app"
-              >
-                <PaletteIcon />
-                <span className="seg-btn-label">Theme</span>
-              </button>
-              <button
-                type="button"
-                className={`seg-btn ${design.panel === 'polish' ? 'seg-btn--on' : ''}`}
-                onClick={design.polish}
-                disabled={design.polishingSince != null}
-                title="Polish — a quick design review of this page with fixes you can preview and add"
-              >
-                <SparkleIcon />
-                <span className="seg-btn-label">
-                  {design.polishingSince != null ? `Reviewing… ${polishSeconds}s` : 'Polish'}
-                </span>
-              </button>
-            </div>
-            <div className="seg seg--toolbar">
-              <button
-                type="button"
-                className="seg-btn seg-btn--primary"
-                onClick={onDesignSend}
-                disabled={!onDesignSend || !designCount || design.sending || Boolean(designSendBlocked)}
-                title={designSendBlocked ?? (designCount ? 'Send these changes to Copilot as one request' : 'Queue a change first')}
-              >
-                {design.sending ? 'Sending…' : designCount ? `Send ${designCount}` : 'Send'}
-              </button>
-              <button
-                type="button"
-                className="seg-btn"
-                onClick={design.stop}
-                title="Leave Design — your queued changes stay in the chat composer"
-              >
-                Done
-              </button>
-            </div>
-          </div>
-        </div>
+      {teamDeploying && teamRun && showWebview && !localView && (
+        <TeamRunStrip run={teamRun} onOpenMap={onOpenTeamMap} />
       )}
-
-      {teamDeploying && teamRun && showWebview && <TeamRunStrip run={teamRun} onOpenMap={onOpenTeamMap} />}
 
       {beside && (
         <DeployStrip
@@ -1444,13 +1305,13 @@ export default function PreviewPane({
         />
       )}
 
-      {fallbackReason && !localMode && !team && <FallbackNote reason={fallbackReason} />}
+      {fallbackReason && !localMode && <FallbackNote reason={fallbackReason} />}
       {localView && sdkWarning && <SdkWarningNote warning={sdkWarning} />}
       {localView &&
         local?.state === 'running' &&
         refusedSchemaLosses(local.status) &&
         onReviewSchema && <SchemaWaitingNote onReview={onReviewSchema} />}
-      {localView && local?.state === 'running' && !team && (
+      {localView && local?.state === 'running' && (
         <SeedOffer
           projectId={project.id}
           stamp={`${backendStamp(local.status)}|${turnRunning}`}
@@ -1466,7 +1327,7 @@ export default function PreviewPane({
           key={project.id}
           outcome={outcome}
           log={deploy?.log}
-          error={error || 'Publishing didn’t finish.'}
+          error={error || t('pane.publishUnfinished')}
           onDiagnose={onDiagnoseDeploy}
           onRefreshAuth={onRefreshAuth}
           authBusy={authBusy}
@@ -1512,7 +1373,7 @@ export default function PreviewPane({
           <LocalStatePanel
             name={project.name}
             local={local}
-            onViewOutput={() => setOutputOpen(true)}
+            onViewOutput={() => terminalStore.showOutput(project.id)}
             onDiagnose={onDiagnoseLocal}
             onOpenSetup={onOpenSetup}
             onReviewSchema={onReviewSchema}
@@ -1520,11 +1381,14 @@ export default function PreviewPane({
         ) : needsWorkspace ? (
           <div className="preview-placeholder">
             <div className="ws-prompt">
-              <h3 className="ws-prompt-title">Choose where to publish</h3>
+              <h3 className="ws-prompt-title">{t('pane.workspace.title')}</h3>
               <p className="ws-prompt-sub">
-                <strong>{project.name}</strong> hasn’t been published yet. Select{' '}
-                <strong>Publish</strong> in the header above to name it and pick the Fabric
-                workspace to publish it to.
+                <Trans
+                  t={t}
+                  i18nKey="pane.workspace.text"
+                  values={{ name: project.name }}
+                  components={{ b: <strong /> }}
+                />
               </p>
               {error && <div className="alert alert--error ws-prompt-err">{error}</div>}
             </div>
@@ -1536,35 +1400,27 @@ export default function PreviewPane({
         ) : (
           <div className="preview-placeholder">
             {status === 'error' && team ? (
-              <p>
-                The team pipeline couldn&apos;t publish this version. Open the team menu in the
-                header to see what happened.
-              </p>
+              <p>{t('pane.empty.teamFailed')}</p>
             ) : status === 'error' && outcome === 'workspace-unsupported' ? (
-              <p>Choose a workspace on a capacity in another region, then publish again.</p>
+              <p>{t('pane.empty.region')}</p>
             ) : status === 'error' ? (
-              <p>Review the error and logs above, then publish again to retry.</p>
+              <p>{t('pane.empty.failed')}</p>
             ) : team ? (
-              <p>
-                Your preview appears here after Copilot makes a change: Fabricator saves it to
-                GitHub and the team pipeline publishes your own preview. The first one takes a few
-                minutes.
-              </p>
+              <p>{t('pane.empty.team')}</p>
             ) : localMode ? (
-              <p>Your published app shows here once you publish it.</p>
+              <p>{t('pane.empty.local')}</p>
             ) : (
               <p>
-                Your published app will render here after a full <code>rayfin up</code>. Ask Copilot
-                to build something, or select <strong>Publish</strong>.
+                <Trans
+                  t={t}
+                  i18nKey="pane.empty.default"
+                  components={{ code: <code />, b: <strong /> }}
+                />
               </p>
             )}
           </div>
         )}
       </div>
-
-      {outputOpen && localView && local && (
-        <LocalOutput projectId={project.id} local={local} onClose={() => setOutputOpen(false)} />
-      )}
     </div>
   )
 }

@@ -1,13 +1,13 @@
 ---
 title: "Settings"
-description: "Every option in Fabricator's Settings: accounts, API keys, MCP servers, chat defaults, setup, workspace folder, theme, text size, diagnostics, experiments, and About."
+description: "Every option in Fabricator's Settings: accounts, API keys, MCP servers, chat defaults, custom instructions, setup, workspace folder, theme, language, text size, diagnostics, experiments, and About."
 ---
 
-Open **Settings** to manage your accounts, choose what a new project's chat starts with, change how Fabricator looks, where new projects are created, how diagnostics are captured, and which experiments are on.
+Open **Settings** to manage your accounts, choose what a new project's chat starts with, tell Copilot what you want in every app, change how Fabricator looks, the language it's in, where new projects are created, how diagnostics are captured, and which experiments are on.
 
 Settings groups its options into **General**, **Appearance**, **Diagnostics**, **Experiments**, and **About**. Each option shows its name and what it does, with its control on the right.
 
-![The Settings dialog: Accounts, API keys, Chat defaults, Setup and Workspace folder under General, then Theme and Text size under Appearance, and the start of Diagnostics.](/screenshots/settings.webp)
+![The Settings dialog: Accounts, API keys, MCP servers, Chat defaults, Custom instructions, Setup and Workspace folder under General, with Appearance below.](/screenshots/settings.webp)
 
 ## Accounts
 
@@ -15,11 +15,11 @@ Settings groups its options into **General**, **Appearance**, **Diagnostics**, *
 
 ## API keys
 
-**API keys** adds models from Anthropic, OpenAI, xAI and Google, on your own API keys, to the model pickers in Build chat, the Advisor and Design. The provider bills you for them, and you still sign in to GitHub Copilot, which runs the conversation. Select **Manage API keys** to add your keys and choose their models in **Accounts → Model providers**. See [Use your own API keys](/docs/build/your-own-api-keys).
+**API keys** adds models from Anthropic, OpenAI, xAI and Google, on your own API keys, to the model pickers in Build chat and the Advisor. The provider bills you for them, and you still sign in to GitHub Copilot, which runs the conversation. Select **Manage API keys** to add your keys and choose their models in **Accounts → Model providers**. See [Use your own API keys](/docs/build/your-own-api-keys).
 
 ## MCP servers
 
-**MCP servers** shows under **General** while the **MCP servers** experiment is on. Select **Manage MCP servers** to add, check, change or remove the MCP servers that chat can turn on in its **Plugins**. See [Connect MCP servers](/docs/build/mcp-servers).
+Select **Manage MCP servers** to add, check, change or remove the MCP servers that chat can turn on in its **Plugins**, each a command that runs on this computer or a server's URL. A server runs with your access, so add only servers you trust. See [Connect MCP servers](/docs/build/mcp-servers).
 
 ## Chat defaults
 
@@ -27,11 +27,28 @@ Settings groups its options into **General**, **Appearance**, **Diagnostics**, *
 
 - **Model**: **Auto** (**Copilot Fusion** on accounts that have it), or a model with its effort and context window, chosen as in the chat's model picker. See [Choose a model and reasoning effort](/docs/build/chat#choose-a-model-and-reasoning-effort).
 - **Plugins**: **Fabric IQ**, and **Work IQ** while its experiment is on.
-- **MCP servers**: the MCP servers you added, while the **MCP servers** experiment is on.
+- **MCP servers**: the MCP servers you added.
 
 ![Chat defaults: under Model, Claude Opus 5.5 at High; under Plugins, Fabric IQ on and Work IQ off; under MCP servers, Charts on and Microsoft Learn and Issue tracker off, each with its address or command.](/screenshots/chat-defaults.webp)
 
-Fabricator saves each choice as you make it. Projects you create, open, clone or import from then on start with them, and each project's chat keeps its own choice after that: changing your chat defaults doesn't change the projects you already have. A new project gets Work IQ and MCP servers only while their experiments are on. Without chat defaults, a new project's chat starts on **Auto** with every plugin off.
+Fabricator saves each choice as you make it. Projects you create, open, clone or import from then on start with them, and each project's chat keeps its own choice after that: changing your chat defaults doesn't change the projects you already have. A new project gets Work IQ only while its experiment is on. Without chat defaults, a new project's chat starts on **Auto** with every plugin off.
+
+## Custom instructions
+
+**Custom instructions** tell Copilot what you want in every app you build, such as "Use the system theme by default." Select **Edit instructions** to open **Custom instructions**, write your instructions in **Instructions**, then select **Save**.
+
+![Custom instructions: four instructions in the Instructions box, about the theme, wording, dates and where each page's main action goes, with the count of characters used out of 8,000.](/screenshots/custom-instructions.webp)
+
+- Each app's chat follows them from its next message, in the apps you already have and in new ones. Copilot treats them as part of every request: when it builds a new app, it sets the app up your way, even where the starter template does it differently.
+- When one of your instructions shapes a turn's work, a line under the answer says so, such as `Followed your instruction “Use system theme by default”`. Hover over the instruction to see what Copilot did to follow it.
+- What you ask in the chat comes first, and so do Fabricator's own rules: Copilot doesn't start or publish your app, even if your instructions say to.
+- They're saved in Fabricator's settings on this computer, not in your apps, so other people who work on an app don't get them.
+- They can be up to 8,000 characters. Keep them short: Copilot reads them with every message.
+
+To stop using them, delete the text and select **Save**.
+
+> [!TIP]
+> Custom instructions suit short rules that fit every app. For longer guidance that only some requests need, such as your brand guidelines, add a [custom skill](/docs/build/skills#add-a-custom-skill): Copilot reads a skill when a request calls for it.
 
 ## Theme
 
@@ -43,6 +60,24 @@ Fabricator saves each choice as you make it. Projects you create, open, clone or
 | **Dark** | Uses Fabricator's dark theme. |
 | **Light** | Uses Fabricator's light theme. |
 
+## Language
+
+**Language** sets the language of Fabricator's interface. Fabricator comes in English, Spanish, German, and Japanese.
+
+| Option | What it does |
+| --- | --- |
+| **System** | Uses your computer's language when Fabricator comes in it, and English otherwise. This is the default. The option names the language it picked, such as **System (Deutsch)**. |
+| **English**, **Español**, **Deutsch**, **日本語** | Uses that language, whatever your computer's is set to. |
+
+Fabricator switches as soon as you choose, in every window it has open, and starts in that language next time.
+
+The setting changes Fabricator's own text. Some text stays as it is:
+
+- What Copilot writes, such as its replies in chat and the issues a deep review finds.
+- Output from other tools, such as git, the Rayfin CLI, and the Azure CLI.
+- What Fabricator writes for other people to read, which stays in English: the version info you copy, bug reports, diagnostics, commit messages, and the files it adds to your projects and repositories.
+- This documentation, which is in English.
+
 ## Text size
 
 **Text size** scales the whole interface. The choices are 100%, 110%, 125%, and 150%. The default is 100%.
@@ -51,7 +86,7 @@ Use this when Fabricator is hard to read on a large or high-DPI monitor. The set
 
 ## Interface zoom in the status bar
 
-The status bar has an **Interface zoom** menu with the same values as **Text size**. Changing it updates the same setting and also scales the design tools.
+The status bar has an **Interface zoom** menu with the same values as **Text size**. Changing it updates the same setting and also scales Point & Edit's outlines and hint in the preview.
 
 ## Workspace folder
 
@@ -91,7 +126,7 @@ When **Full diagnostics** is on, Fabricator also captures prompts, responses, an
 
 ## Experiments
 
-**Experiments** is collapsed by default. It says "These features are experimental and off by default. They may be unstable, change, or be removed in a future update." It has six experiments: **Team workspaces**, **Migrate Power BI reports**, **Work IQ**, **MCP servers**, **Export as an app** and **Goals**.
+**Experiments** is collapsed by default. It says "These features are experimental and off by default. They may be unstable, change, or be removed in a future update." It has three experiments: **Team workspaces**, **Migrate Power BI reports** and **Work IQ**.
 
 ### Team workspaces
 
@@ -114,27 +149,6 @@ When **Full diagnostics** is on, Fabricator also captures prompts, responses, an
 > [!WARNING]
 > Work IQ is an experiment. Turn it on in **Settings → Experiments**. It may change or be removed in a future update.
 
-### MCP servers
-
-**MCP servers** adds an **MCP servers** section to the chat composer's **Plugins**, and **MCP servers** under **General**. Add MCP servers there, each a command that runs on this computer or a server's URL. Turned on in an app's chat, a server gives chat its tools while it builds, such as searching documentation, drawing charts or reading your issue tracker. A server runs with your access, so add only servers you trust. Turning the experiment off takes the servers out of every chat, but keeps them for when you turn it on again. See [Connect MCP servers](/docs/build/mcp-servers).
-
-> [!WARNING]
-> MCP servers are an experiment. Turn them on in **Settings → Experiments**. They may change or be removed in a future update.
-
-### Export as an app
-
-**Export as an app** adds **App** to **Export project**: Fabricator saves the project as a `.rayfin` file that someone opens to install your app and use it in a window of its own, with its data on their computer. Anyone with Fabricator can open `.rayfin` files, whether the experiment is on or off. See [Share an app as a file](/docs/ship/app-files).
-
-> [!WARNING]
-> Exporting apps is an experiment. Turn it on in **Settings → Experiments**. It may change or be removed in a future update.
-
-### Goals
-
-**Goals** adds a **Goals** tab to each personal app. Say there, in plain words, what the app is for and the checks it must keep passing, and Fabricator saves them in the app as `GOALS.md`. When you run the checks, Copilot proves each one on a fresh copy of the app, calling it as each kind of user, and Fabricator asks before you publish an app whose checks didn't all pass. In chat, Copilot tells you when a change would stop a check passing. Turning the experiment off hides the tab and stops both, but keeps `GOALS.md` and the last results. See [Check your app against its goals](/docs/ship/goals).
-
-> [!WARNING]
-> Goals are an experiment. Turn them on in **Settings → Experiments**. They may change or be removed in a future update.
-
 ## Publish after each chat turn
 
 **Publish after each chat turn** isn't in Settings: it's in the publish control's panel in the app bar, next to the published app's details. When it's on, a chat turn that changes your app publishes it as the turn finishes. When it's off, your changes wait until you publish them.
@@ -143,7 +157,7 @@ It's off until you turn it on, and your choice applies to every project on this 
 
 ## About
 
-**About** is the last section in Settings. It shows the installed Fabricator version and the Tauri, WebView2, and Copilot CLI versions it runs with. When the Copilot CLI has updated itself past the version that came with Fabricator, both are shown, for example `1.0.98 (bundled 1.0.96)`.
+**About** is the last section in Settings. It shows the installed Fabricator version and the Tauri, WebView2, Copilot CLI and rayfin-local versions it runs with. rayfin-local is the local backend that runs your apps on this computer. When the Copilot CLI has updated itself past the version that came with Fabricator, both are shown, for example `1.0.98 (bundled 1.0.96)`.
 
 Select **Copy** to copy the versions for a bug report, one per line:
 
@@ -152,9 +166,10 @@ Fabricator <version>
 Tauri <version>
 WebView2 <version>
 Copilot CLI <version>
+rayfin-local <version>
 ```
 
-The exact Tauri, WebView2, and Copilot CLI values depend on the build and your computer.
+The exact Tauri, WebView2, Copilot CLI and rayfin-local values depend on the build and your computer.
 
 **Help** has **Documentation** and **Troubleshooting**, which open these docs in your browser.
 

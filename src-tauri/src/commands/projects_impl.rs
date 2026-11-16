@@ -1,7 +1,7 @@
 //! Project scaffolding/registration (ported from `src/main/services/projects.ts`).
 //! Handles listing templates, creating a project via `npm create
 //! @microsoft/rayfin` (the official scaffolder, streaming live output on the
-//! `create:project` proc channel) on the Rayfin release the local backend runs,
+//! `create:project` proc channel) on the Rayfin release new projects start on,
 //! opening an existing project, renaming, and removing.
 
 use std::collections::HashMap;
@@ -89,7 +89,7 @@ pub async fn list_community_templates(repo_url: Option<String>) -> CommunityGall
   let Some((owner, repo)) = parse_github_repo(&url) else {
     return CommunityGalleryResult {
       ok: false,
-      error: Some("Enter a GitHub repo URL, e.g. https://github.com/microsoft/awesome-rayfin".into()),
+      error: Some(t!("commands.projects.enterRepoUrl")),
       gallery: None,
     };
   };
@@ -108,9 +108,7 @@ pub async fn list_community_templates(repo_url: Option<String>) -> CommunityGall
   let Some(raw) = raw else {
     return CommunityGalleryResult {
       ok: false,
-      error: Some(format!(
-        "Couldn't reach {owner}/{repo}. Check you're online and the repo has a rayfin-template.yml at its root."
-      )),
+      error: Some(t!("commands.projects.cantReachGallery", owner = owner, repo = repo)),
       gallery: None,
     };
   };
@@ -118,7 +116,7 @@ pub async fn list_community_templates(repo_url: Option<String>) -> CommunityGall
   let Ok(doc) = serde_yaml::from_str::<serde_yaml::Value>(&raw) else {
     return CommunityGalleryResult {
       ok: false,
-      error: Some("This gallery\u{2019}s rayfin-template.yml could not be parsed.".into()),
+      error: Some(t!("commands.projects.galleryUnreadable")),
       gallery: None,
     };
   };
@@ -143,7 +141,7 @@ pub async fn list_community_templates(repo_url: Option<String>) -> CommunityGall
   if templates.is_empty() {
     return CommunityGalleryResult {
       ok: false,
-      error: Some("No templates were found in this gallery.".into()),
+      error: Some(t!("commands.projects.noTemplates")),
       gallery: None,
     };
   }
@@ -228,6 +226,7 @@ pub(crate) fn register_project(dir: &Path, display_name: Option<&str>) -> Studio
     fabric_preview_defaulted: None,
     needs_fabric_portal: None,
     team: None,
+    github_account: None,
     missing: None,
     rayfin_version: None,
     last_opened_at: None,
@@ -315,13 +314,13 @@ impl ScaffoldRequest {
 /// Why `name` can't name a project, as the Rayfin CLI's `isValidProjectName`
 /// would refuse it when the project is created: only letters, digits, spaces,
 /// hyphens and underscores, with at least one letter or digit.
-pub(crate) fn project_name_problem(name: &str) -> Option<&'static str> {
+pub(crate) fn project_name_problem(name: &str) -> Option<String> {
   let name = name.trim();
   if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c.is_whitespace()) {
-    return Some("Use only letters, numbers, spaces, hyphens and underscores.");
+    return Some(t!("commands.projects.nameCharacters"));
   }
   if !name.chars().any(|c| c.is_ascii_alphanumeric()) {
-    return Some("Include at least one letter or number.");
+    return Some(t!("commands.projects.nameLetterOrNumber"));
   }
   None
 }
@@ -334,12 +333,12 @@ pub(crate) fn check_local_name_in(root: &Path, name: &str, place: &str) -> Proje
   }
   let slug = crate::commands::util::slugify(name);
   if slug.is_empty() {
-    return ProjectNameCheck { ok: false, message: Some("Use letters or numbers in the name.".into()) };
+    return ProjectNameCheck { ok: false, message: Some(t!("commands.projects.nameNeedsLetters")) };
   }
   if root.join(&slug).exists() {
     return ProjectNameCheck {
       ok: false,
-      message: Some(format!("A folder named “{slug}” is already in {place}. Choose another name.")),
+      message: Some(t!("commands.projects.nameTaken", slug = slug, place = place)),
     };
   }
   ProjectNameCheck { ok: true, message: None }
@@ -349,8 +348,8 @@ pub(crate) fn check_local_name_in(root: &Path, name: &str, place: &str) -> Proje
 /// user chose, or the projects folder.
 pub fn check_local_name(name: &str, location: Option<&str>) -> ProjectNameCheck {
   match chosen_location(location) {
-    Some(folder) => check_local_name_in(&folder, name, "that folder"),
-    None => check_local_name_in(Path::new(&store::get_state().workspace_root), name, "your projects folder"),
+    Some(folder) => check_local_name_in(&folder, name, &t!("commands.projects.place.thatFolder")),
+    None => check_local_name_in(Path::new(&store::get_state().workspace_root), name, &t!("commands.projects.place.projectsFolder")),
   }
 }
 
@@ -374,15 +373,15 @@ pub fn check_location(path: &str) -> ProjectLocationCheck {
   }
   let folder = Path::new(path);
   if !folder.is_absolute() {
-    return problem("Enter the folder’s full path, or choose it with Browse.");
+    return problem(&t!("commands.projects.enterFullPath"));
   }
   if folder.is_dir() {
     return ProjectLocationCheck { ok: true, ..Default::default() };
   }
   if folder.exists() {
-    return problem("That’s a file, not a folder.");
+    return problem(&t!("commands.projects.notAFolder"));
   }
-  ProjectLocationCheck { ok: false, missing: true, message: Some("This folder doesn’t exist yet.".into()) }
+  ProjectLocationCheck { ok: false, missing: true, message: Some(t!("commands.projects.folderMissing")) }
 }
 
 /// Create a missing folder for a new project to go in.
@@ -393,7 +392,7 @@ pub fn create_location(path: &str) -> ProjectLocationCheck {
   }
   match std::fs::create_dir_all(path.trim()) {
     Ok(()) => check_location(path),
-    Err(e) => ProjectLocationCheck { message: Some(format!("Couldn’t create the folder: {e}")), ..check },
+    Err(e) => ProjectLocationCheck { message: Some(t!("commands.projects.cantCreateFolder", error = e)), ..check },
   }
 }
 
@@ -401,7 +400,7 @@ pub fn create_location(path: &str) -> ProjectLocationCheck {
 pub(crate) fn scaffold_request(input: &CreateProjectInput) -> Result<ScaffoldRequest, String> {
   let name = input.name.trim().to_string();
   if name.is_empty() {
-    return Err("Please enter a project name.".into());
+    return Err(t!("commands.projects.enterName"));
   }
   if let Some(problem) = project_name_problem(&name) {
     return Err(problem.into());
@@ -422,7 +421,7 @@ pub(crate) fn scaffold_request(input: &CreateProjectInput) -> Result<ScaffoldReq
   };
   let slug = crate::commands::util::slugify(&name);
   if slug.is_empty() {
-    return Err("Project name must contain letters or numbers.".into());
+    return Err(t!("commands.projects.nameNeedsLettersOrNumbers"));
   }
   Ok(ScaffoldRequest { name, slug, template, template_name, is_url })
 }
@@ -496,21 +495,21 @@ async fn run_scaffolder(
 /// Why the scaffolder didn't create a Rayfin project in `dir`, if it didn't.
 fn scaffold_failure(init: &RunResult, dir: &Path, request: &ScaffoldRequest) -> Option<String> {
   if init.not_found {
-    return Some("npm was not found on PATH. Install Node.js (which includes npm) to create projects.".into());
+    return Some(t!("commands.projects.npmMissingCreate"));
   }
   if init.ok && is_rayfin_project(&dir.to_string_lossy()) {
     return None;
   }
-  let code = init.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "unknown".into());
+  let code = init.exit_code.map(|c| c.to_string()).unwrap_or_else(|| t!("commands.shared.unknown"));
   Some(if request.is_url {
-    format!("Creating the project from the template URL failed (exit code {code}). Check the URL is a valid Rayfin template.")
+    t!("commands.projects.createFromUrlFailed", code = code)
   } else {
-    format!("Project creation failed (exit code {code}).")
+    t!("commands.projects.createFailed", code = code)
   })
 }
 
-/// Run the Rayfin scaffolder into `<root>/<folder>` on the release the local
-/// backend runs, pin the project's Rayfin packages to it, install them, and add
+/// Run the Rayfin scaffolder into `<root>/<folder>` on the release new projects
+/// start on, pin the project's Rayfin packages to its line, install them, and add
 /// Fabricator's agent instructions. Doesn't touch git. Returns the project dir.
 /// Every new project gets this, personal or team.
 pub(crate) async fn scaffold_project(
@@ -522,12 +521,17 @@ pub(crate) async fn scaffold_project(
   let dir = root.join(folder);
   let sdk = rayfin_sdk::new_project_sdk(root).await;
   let release = sdk.version.to_string();
-  say(on, &format!("Creating \"{folder}\" from the {} with Rayfin {release}…\n", request.label()));
+  let creating = if request.is_url {
+    t!("commands.projects.creatingFromCommunity", folder = folder, release = release)
+  } else {
+    t!("commands.projects.creatingFrom", folder = folder, template = request.template, release = release)
+  };
+  say(on, &format!("{creating}\n"));
 
   let mut skipped_install = true;
   let mut init = run_scaffolder(root, folder, request, &release, true, on).await;
   if rejects_skip_install(&init) {
-    say(on, "\nThis Rayfin release doesn't take --skip-install, so it installs the packages itself.\n");
+    say(on, &format!("\n{}\n", t!("commands.projects.noSkipInstall")));
     if dir.exists() {
       let _ = std::fs::remove_dir_all(&dir);
     }
@@ -538,12 +542,12 @@ pub(crate) async fn scaffold_project(
     return Err(error);
   }
 
-  // A community template that asks for Rayfin releases the local backend can't
-  // run keeps them; the built-in templates always take the pin.
+  // A community template that asks for Rayfin releases outside the line new
+  // projects start on keeps them; the built-in templates always take the pin.
   let pinned = match rayfin_sdk::pin_project(&dir, &sdk, request.is_url) {
     Ok(Pinning::Pinned { range, files }) => {
       if files > 0 {
-        say(on, &format!("\nPinned the Rayfin packages to {range}.\n"));
+        say(on, &format!("\n{}\n", t!("commands.projects.pinned", range = range)));
       }
       files > 0
     }
@@ -551,8 +555,15 @@ pub(crate) async fn scaffold_project(
       say(
         on,
         &format!(
-          "\nThe template asks for {name} {spec}, outside the Rayfin releases Fabricator runs locally ({}), so it keeps its versions.\n",
-          rayfin_sdk::supported_range()
+          "\n{}\n",
+          t!(
+            "commands.projects.keptVersions",
+            name = name,
+            spec = spec,
+            major = sdk.version.major,
+            minor = sdk.version.minor,
+            supported = rayfin_sdk::supported_range()
+          )
         ),
       );
       false
@@ -589,7 +600,7 @@ async fn npm_install(dir: &Path, on: Option<OnData>) -> RunResult {
 /// Why an `npm install` in `folder` failed, in npm's own words.
 fn install_failure(folder: &str, result: &RunResult) -> String {
   if result.not_found {
-    return "npm was not found on PATH. Install Node.js (which includes npm), then retry.".into();
+    return t!("commands.projects.npmMissingRetry");
   }
   crate::services::exec::npm_install_failure(result, Some(folder))
 }
@@ -606,10 +617,10 @@ async fn install_new_project(dir: &Path, release: &str, built_in: bool, on: &OnD
   let outcome = if result.ok {
     ensure_functions_dependencies(dir, Some(on.clone())).await
   } else {
-    Err(install_failure("the project", &result))
+    Err(install_failure(&t!("commands.projects.theProject"), &result))
   };
   if let Err(e) = outcome {
-    say(on, &format!("\n⚠️ {e}\nFabricator tries again when the app opens.\n"));
+    say(on, &format!("\n⚠️ {e}\n{}\n", t!("commands.shared.retryOnOpen")));
   }
 }
 
@@ -660,7 +671,7 @@ pub async fn create_project(app: &AppHandle, input: CreateProjectInput) -> Proje
     Some(folder) => {
       let check = check_location(&folder.to_string_lossy());
       if !check.ok {
-        return err(check.message.unwrap_or_else(|| "Choose another folder for the project.".into()));
+        return err(check.message.unwrap_or_else(|| t!("commands.projects.chooseAnotherFolder")));
       }
       folder.clone()
     }
@@ -668,7 +679,7 @@ pub async fn create_project(app: &AppHandle, input: CreateProjectInput) -> Proje
       let root = PathBuf::from(store::get_state().workspace_root);
       if !root.exists() {
         if let Err(e) = std::fs::create_dir_all(&root) {
-          return err(format!("Could not create workspace folder: {e}"));
+          return err(t!("commands.projects.cantCreateWorkspaceFolder", error = e));
         }
       }
       root
@@ -676,8 +687,8 @@ pub async fn create_project(app: &AppHandle, input: CreateProjectInput) -> Proje
   };
   let dir = root.join(&request.slug);
   if dir.exists() {
-    let place = if chosen.is_some() { "that folder" } else { "your workspace" };
-    return err(format!("A folder named \"{}\" already exists in {place}.", request.slug));
+    let place = if chosen.is_some() { t!("commands.projects.place.thatFolder") } else { t!("commands.projects.place.workspace") };
+    return err(t!("commands.projects.folderExists", slug = request.slug, place = place));
   }
 
   let on = emit::proc_streamer(app, CREATE_CHANNEL);
@@ -706,7 +717,7 @@ pub async fn create_project(app: &AppHandle, input: CreateProjectInput) -> Proje
   // is switched to the embedded Fabric view on its next publish.
   let project = register_project(&dir, Some(&request.name));
   store::set_active(Some(project.id.clone()));
-  say(&on, "\n✅ Project ready.\n");
+  say(&on, &format!("\n✅ {}\n", t!("commands.projects.ready")));
   ProjectActionResult {
     ok: true,
     error: None,
@@ -719,10 +730,10 @@ pub async fn open_project(path: String) -> ProjectActionResult {
   let abs = normalize(Path::new(&path));
   let abs_str = abs.to_string_lossy().to_string();
   if !abs.exists() {
-    return err("That folder no longer exists.");
+    return err(t!("commands.projects.folderGone"));
   }
   if !is_rayfin_project(&abs_str) {
-    return err("That folder is not a Rayfin project (no rayfin/rayfin.yml).");
+    return err(t!("commands.projects.notRayfinProject"));
   }
   crate::commands::skills::ensure_project_skills(&abs_str);
   let known = store::get_state().projects.iter().any(|p| same_path(&p.path, &abs_str));
@@ -745,11 +756,11 @@ pub async fn open_project(path: String) -> ProjectActionResult {
 /// cover.
 pub async fn prepare_project_dependencies(id: String) -> ProjectActionResult {
   let Some(project) = store::find_project(&id) else {
-    return err("Project not found.");
+    return err(t!("commands.shared.projectNotFound"));
   };
   let dir = Path::new(&project.path);
   if !is_rayfin_project(&project.path) {
-    return err("That folder is no longer a Rayfin project (no rayfin/rayfin.yml).");
+    return err(t!("commands.projects.noLongerRayfinProject"));
   }
   if let Err(error) = crate::services::exec::ensure_project_dependencies(dir, None).await {
     return err(error);
@@ -771,11 +782,11 @@ pub async fn prepare_project_dependencies(id: String) -> ProjectActionResult {
 /// Rename a project's display name (and rayfin/rayfin.yml `name`).
 pub async fn rename_project(id: String, name: String) -> ProjectActionResult {
   let Some(project) = store::find_project(&id) else {
-    return err("Project not found.");
+    return err(t!("commands.shared.projectNotFound"));
   };
   let trimmed = name.trim().to_string();
   if trimmed.is_empty() {
-    return err("Please enter a project name.");
+    return err(t!("commands.projects.enterName"));
   }
   write_project_name(&project.path, &trimmed);
   store::mutate_project(&id, |p| p.name = trimmed.clone());
@@ -813,7 +824,7 @@ pub async fn remove_project(
         let id = id.clone();
         tokio::task::spawn_blocking(move || count_and_trash(&app, &id, Path::new(&path)))
           .await
-          .map_err(|error| format!("Couldn't move the folder to trash: {error}"))??;
+          .map_err(|error| t!("commands.projects.cantTrash", error = error))??;
       }
     }
   }
@@ -830,11 +841,11 @@ fn trash_failure(error: &trash::Error) -> String {
     }
     _ => "",
   };
-  let hint = "Close any program using its files, such as an editor, a terminal or a dev server, and try again.";
+  let hint = t!("commands.projects.trashHint");
   if reason.is_empty() {
-    format!("Couldn't move the folder to trash. {hint}")
+    t!("commands.projects.cantTrashHint", hint = hint)
   } else {
-    format!("Couldn't move the folder to trash: {reason}. {hint}")
+    t!("commands.projects.cantTrashReason", reason = reason, hint = hint)
   }
 }
 
@@ -1039,11 +1050,11 @@ entries:
   fn names_the_rayfin_cli_would_refuse_are_caught_before_creating() {
     assert_eq!(project_name_problem("Q4 results - v2_final"), None);
     assert_eq!(
-      project_name_problem("SalesBenchmark (migrated)"),
+      project_name_problem("SalesBenchmark (migrated)").as_deref(),
       Some("Use only letters, numbers, spaces, hyphens and underscores.")
     );
-    assert_eq!(project_name_problem("Café"), Some("Use only letters, numbers, spaces, hyphens and underscores."));
-    assert_eq!(project_name_problem(" - _ "), Some("Include at least one letter or number."));
+    assert_eq!(project_name_problem("Café").as_deref(), Some("Use only letters, numbers, spaces, hyphens and underscores."));
+    assert_eq!(project_name_problem(" - _ ").as_deref(), Some("Include at least one letter or number."));
     let input = CreateProjectInput {
       name: "SalesBenchmark (migrated)".into(),
       template: String::new(),

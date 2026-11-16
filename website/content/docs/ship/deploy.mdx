@@ -9,7 +9,7 @@ Rayfin apps are published as Fabric apps in a Fabric workspace. For Rayfin's pla
 
 Your app runs on this computer while you build it, so you don't need to publish it to try it: publish it when you want other people to use it. Until you turn on **Publish after each chat turn**, your changes stay on this computer until you publish them. See [Develop on this computer](/docs/build/local-development).
 
-![The Published apps panel for the Development published app: published 2 hours ago, with a green dot for live, its app address, its workspace with region and capacity, the Fabric account that publishes, Publish after each chat turn turned off, and Publish to another workspace.](/screenshots/deployments.webp)
+![The Published apps panel for the Development published app: published 2 hours ago, with a green dot for live, its app address, its item ID, its workspace with region and capacity, the Fabric account that publishes, Publish after each chat turn turned off, and Publish to another workspace.](/screenshots/deployments.webp)
 
 ## Sign in to Fabric
 
@@ -61,7 +61,7 @@ When you choose an app, you see "Publishing replaces the app “Budget” in Ope
 
 ## What happens while your app publishes
 
-Your app stays in the preview while it publishes, so you can keep looking at it: your app on this computer, or your published app. A strip above the preview shows where it's publishing to, such as "Publishing to Production", the step in progress, a progress bar and how long it has taken. Select **Watch** to follow it on the publish screen, and **Back to your app** to return. Select **Logs** to see the publish log. When the published app is in the preview, **Design** and the **Fabric** view wait until publishing ends, and the preview reloads when the new version is live.
+Your app stays in the preview while it publishes, so you can keep looking at it: your app on this computer, or your published app. A strip above the preview shows where it's publishing to, such as "Publishing to Production", the step in progress, a progress bar and how long it has taken. Select **Watch** to follow it on the publish screen, and **Back to your app** to return. Select **Logs** to see the publish log. When the published app is in the preview, **Point & Edit** and the **Fabric** view wait until publishing ends, and the preview reloads when the new version is live.
 
 On the publish screen, Ray talks you through it, and below him a list shows the steps publishing has been through, the one in progress, and the steps still to come.
 
@@ -133,10 +133,10 @@ A published app that this computer can't run previews against its published back
 
 - The local preview uses your published app's backend. Frontend changes show as Copilot makes them, but changes to data, permissions or functions work only after you publish them. Fabricator asks Copilot to tell you when a change needs a publish.
 - When a turn that changed your app ends, the preview reloads once, so it shows the finished app from a fresh start, not only the live updates made while Copilot worked. A turn that changed nothing, such as a question, leaves the page as it is.
-- **Design** works on the local preview between turns, so you can queue visual changes and send them to Copilot without publishing first. It turns off when a turn starts, because Copilot's changes show in the preview as it makes them. The **Fabric** view, for an app that has one, works on the published app, so it's unavailable.
+- **Point & Edit** works on the local preview, so you can pick what to change and send it to Copilot without publishing first. The **Fabric** view, for an app that has one, works on the published app, so it's unavailable.
 - The local preview stops when you switch to another app or close Fabricator, and the app you open next gets its own. If you switch your app to another published app, its local preview starts again with that one's settings.
 - If the project has no local Vite installation, there's no local preview. The preview keeps showing the published app, without your latest changes, until you publish them.
-- Team apps aren't affected. They still save to GitHub after each turn, and the team pipeline deploys your preview.
+- Team apps aren't affected. They still save to GitHub after each turn, and your preview deploys when you publish.
 
 Turning **Publish after each chat turn** on closes that local preview and doesn't publish anything. Your changes are still on this computer: the next successful chat turn publishes them, or you can publish them from the app bar.
 
@@ -147,6 +147,7 @@ In the app bar, select the publish control, which shows the published app's name
 - the published app's name and state, as a dot and words, for example "Published 2 h ago". Select the pencil, **Rename this published app**, to rename it, or the trash can, **Delete this published app**, to delete it.
 - what's waiting to publish, with **See what changed**, which opens **History** in the Code tab,
 - **App**, the app's address. Select **Copy link** to copy it, or **Open in your browser**.
+- **Item**, the ID of the published app's item in its Fabric workspace. Select **Copy item ID** to copy it, or **Open in Fabric** to open the item in the Fabric portal.
 - **Workspace**, the Fabric workspace, with its region and capacity. Select **Open the workspace in Fabric** to open it in the Fabric portal. The region and capacity show once you're signed in to Fabric.
 - **Account**, the Fabric account that publishes. Select **Change** to use another, or **Sign in** when you're signed out.
 - **Other published apps**, the project's other published apps. Select **Switch** on one to make it the active published app: the preview shows it, and publishing goes to it. Point at one to rename or delete it.
@@ -179,4 +180,4 @@ See [setup and sign-in troubleshooting](/docs/troubleshooting/setup-and-sign-in)
 
 ## Redirect URIs for live preview
 
-A local preview of a published app runs against the published backend: for team apps, and for a published app this computer can't run. Fabricator runs the project's own Vite dev server on an allowed `localhost` port. If the normal sign-in-compatible ports are busy and you choose another port, Fabricator can add that origin to `services.auth.allowedRedirectUris` in `rayfin/rayfin.yml` and push the runtime settings to Fabric without uploading the app. This keeps Fabric sign-in working in the live preview. The next publish includes the app code. See [When every preview port is busy](/docs/build/preview#when-every-preview-port-is-busy).
+The live preview of an app that this computer can't run uses the app's backend in Fabric: the published app's, or for a team app, the team's deployment of it. Fabricator runs the project's own Vite dev server on an allowed `localhost` port. If the normal sign-in-compatible ports are busy and you choose another port, Fabricator can add that origin to `services.auth.allowedRedirectUris` in `rayfin/rayfin.yml` and push the runtime settings to Fabric without uploading the app. This keeps Fabric sign-in working in the live preview. The next publish includes the app code. See [When every preview port is busy](/docs/build/preview#when-every-preview-port-is-busy).

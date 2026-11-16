@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useRef, useState, type JSX } from 'react'
 import type { GitBranch, GitRemoteStatus, GitStatus, GitSyncResult } from '../../../shared/ipc'
+import { useTranslation } from '../i18n'
 import { useSuppressPreview } from '../overlay'
+import { useToast } from '../toast'
 import { Codicon } from './icons'
+import GithubRepoFields, {
+  NEW_GITHUB_REPO,
+  githubRepoName,
+  type GithubRepoChoice
+} from './github/GithubRepoFields'
 
 interface Props {
   projectId: string
@@ -17,6 +24,10 @@ interface Props {
   onSynced?: (packagesChanged?: boolean) => void
   /** Send Copilot a request in the app's chat (`display` is what the chat shows). */
   onSendToChat?: (display: string, prompt: string) => void
+  /** The project's folder name: a new GitHub repository is named after it. */
+  folderName?: string
+  /** Open setup, to install the GitHub CLI. */
+  onReviewSetup?: () => void
 }
 
 /** How often we re-fetch the remote to keep ahead/behind fresh (ms). */
@@ -26,16 +37,14 @@ const SHOWN_CONFLICTS = 4
 
 type Syncing = 'pull' | 'push' | 'merge' | 'finish' | 'abort' | 'switch'
 
-const FAILED: Record<Syncing, string> = {
-  pull: 'Could not get the latest changes.',
-  push: 'Could not push your changes.',
-  merge: 'Couldn’t combine the latest changes.',
-  finish: 'Couldn’t finish the merge.',
-  abort: 'Couldn’t cancel the merge.',
-  switch: 'Couldn’t switch branches.'
-}
-
-const plural = (n: number, one: string, many = `${one}s`): string => `${n} ${n === 1 ? one : many}`
+const FAILED = {
+  pull: 'control.failed.pull',
+  push: 'control.failed.push',
+  merge: 'control.failed.merge',
+  finish: 'control.failed.finish',
+  abort: 'control.failed.abort',
+  switch: 'control.failed.switch'
+} as const satisfies Record<Syncing, string>
 
 /** What Copilot is asked to do with a merge's conflicts (files relative to the project). */
 export function conflictsPrompt(files: string[], branch?: string): string {
@@ -56,18 +65,27 @@ export function conflictsPrompt(files: string[], branch?: string): string {
  * (ahead). The popover switches branches, gets the latest changes, pushes and
  * commits. When your changes and the latest ones overlap, it merges them and
  * asks Copilot to resolve the conflicts, then finishes (or cancels) the merge.
+ * A project with no remote yet can get a GitHub repository from it.
  */
 export default function GitControl({
   projectId,
   refreshKey,
   busy: chatBusy = false,
   onSynced,
-  onSendToChat
+  onSendToChat,
+  folderName,
+  onReviewSetup
 }: Props): JSX.Element | null {
+  const { t } = useTranslation('git')
+  const toast = useToast()
   const [status, setStatus] = useState<GitStatus | null>(null)
   const [remote, setRemote] = useState<GitRemoteStatus | null>(null)
   const [open, setOpen] = useState(false)
-  const [view, setView] = useState<'main' | 'branches'>('main')
+  const [view, setView] = useState<'main' | 'branches' | 'github'>('main')
+  const [repoName, setRepoName] = useState('')
+  const [repoChoice, setRepoChoice] = useState<GithubRepoChoice>(NEW_GITHUB_REPO)
+  const [repoReady, setRepoReady] = useState(false)
+  const [creatingRepo, setCreatingRepo] = useState(false)
   const [message, setMessage] = useState('')
   const [busy, setBusy] = useState(false)
   /** Copilot is writing the commit message. */
@@ -136,6 +154,7 @@ export default function GitControl({
     setQuery('')
     setError(null)
     setOverlap(false)
+    setRepoName('')
   }, [open])
 
   // The popover is HTML; the live preview is a native webview that paints above
@@ -150,9 +169,11 @@ export default function GitControl({
   const ahead = remote?.ahead ?? 0
   const canPush = ahead > 0 && Boolean(remote?.hasUpstream)
   const merging = Boolean(status.merging)
+  /** No remote yet: it can get a GitHub repository. */
+  const canCreateRepo = Boolean(remote?.isRepo && !remote.hasRemote) && !status.noCommits
   const conflicts = status.conflicts ?? []
   const locked = chatBusy || syncing !== null || busy
-  const waitTitle = chatBusy ? 'Wait for Copilot to finish this turn' : undefined
+  const waitTitle = chatBusy ? t('control.waitForCopilot') : undefined
 
   async function commit(): Promise<void> {
     const msg = message.trim()
@@ -163,7 +184,7 @@ export default function GitControl({
       const res = await window.api.projects.git.commit(projectId, msg)
       setStatus(res.status)
       if (!res.ok) {
-        setError(res.error ?? 'Commit failed.')
+        setError(res.error ?? t('control.commitFailed'))
         return
       }
       setMessage('')
@@ -187,11 +208,11 @@ export default function GitControl({
         setMessage(res.message)
         wrote = true
       } else {
-        setError(res.error ?? 'Couldn’t write a commit message.')
+        setError(res.error ?? t('control.messageFailed'))
       }
     } catch (reason) {
       if (projectRef.current === asked) {
-        setError(reason instanceof Error ? reason.message : 'Couldn’t write a commit message.')
+        setError(reason instanceof Error ? reason.message : t('control.messageFailed'))
       }
     } finally {
       setWriting(false)
@@ -212,10 +233,10 @@ export default function GitControl({
       setStatus(res.status)
       setRemote(res.remote)
       if (res.ok) onSynced?.(res.packagesChanged)
-      else setError(res.error ?? FAILED[kind])
+      else setError(res.error ?? t(FAILED[kind]))
       return res
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : FAILED[kind])
+      setError(reason instanceof Error ? reason.message : t(FAILED[kind]))
       return null
     } finally {
       setSyncing(null)
@@ -249,8 +270,8 @@ export default function GitControl({
     if (!onSendToChat || files.length === 0) return
     onSendToChat(
       files.length === 1
-        ? `Resolve the merge conflict in ${files[0]}`
-        : `Resolve the merge conflicts in ${files.length} files`,
+        ? t('control.resolveConflict', { file: files[0] })
+        : t('control.resolveConflicts', { count: files.length }),
       conflictsPrompt(files, status?.branch)
     )
     setOpen(false)
@@ -301,13 +322,55 @@ export default function GitControl({
     if (res?.ok) setOpen(false)
   }
 
+  /** Ask for a GitHub repository, named after the app's folder until the name's changed. */
+  function showGithub(): void {
+    setView('github')
+    setError(null)
+    setRepoName((current) => current || githubRepoName(folderName ?? ''))
+  }
+
+  async function createRepo(): Promise<void> {
+    const asked = projectId
+    setCreatingRepo(true)
+    setError(null)
+    try {
+      const res = await window.api.github.createRepo(asked, {
+        ...repoChoice,
+        name: repoName.trim()
+      })
+      if (projectRef.current !== asked) return
+      if (!res.ok) {
+        setError(res.error ?? t('control.createRepoFailed'))
+        return
+      }
+      const where = res.url?.replace(/^https:\/\//, '')
+      toast.success(
+        where === undefined ? t('control.createdNoUrl') : t('control.created', { where }),
+        { title: t('control.onGithub') }
+      )
+      setOpen(false)
+      void refresh()
+      void loadRemote()
+    } catch (reason) {
+      if (projectRef.current === asked) {
+        setError(reason instanceof Error ? reason.message : t('control.createRepoFailed'))
+      }
+    } finally {
+      setCreatingRepo(false)
+    }
+  }
+
   const chipLabel = merging
     ? conflicts.length
-      ? plural(conflicts.length, 'conflict')
-      : 'merging'
+      ? t('control.conflicts', { count: conflicts.length })
+      : t('control.merging')
     : dirty
-      ? `${status.changedCount} uncommitted`
-      : 'clean'
+      ? t('control.uncommitted', { count: status.changedCount })
+      : t('control.clean')
+  const pushes =
+    status.branch === undefined
+      ? t('control.pushesThisBranch')
+      : t('control.pushesBranch', { branch: status.branch })
   const q = query.trim().toLowerCase()
   const shown = (branches ?? []).filter((b) => b.name.toLowerCase().includes(q))
   const localShown = shown.filter((b) => !b.remote)
@@ -330,7 +393,9 @@ export default function GitControl({
           className="git-branch-ico"
         />
         <span className="git-branch-name">{b.name}</span>
-        {switchingTo === b.name && <span className="git-branch-note">Switching…</span>}
+        {switchingTo === b.name && (
+          <span className="git-branch-note">{t('control.switching')}</span>
+        )}
       </button>
     )
   }
@@ -339,7 +404,7 @@ export default function GitControl({
     <div className="git-control" onClick={(e) => e.stopPropagation()}>
       <button
         className={`chip git-chip git-chip--actionable${merging ? ' git-chip--conflict' : dirty ? ' git-chip--dirty' : ' git-chip--clean'}`}
-        title={status.branch ? `Branch: ${status.branch}` : 'git'}
+        title={status.branch ? t('control.branchTitle', { branch: status.branch }) : 'git'}
         aria-haspopup="dialog"
         aria-expanded={open}
         onClick={() => {
@@ -359,7 +424,7 @@ export default function GitControl({
             {behind > 0 && (
               <span
                 className="git-badge git-badge--behind"
-                title={`${plural(behind, 'change')} to get from the remote`}
+                title={t('control.behind', { count: behind })}
               >
                 ↓{behind}
               </span>
@@ -367,7 +432,7 @@ export default function GitControl({
             {ahead > 0 && (
               <span
                 className="git-badge git-badge--ahead"
-                title={`${plural(ahead, 'change')} to push`}
+                title={t('control.ahead', { count: ahead })}
               >
                 ↑{ahead}
               </span>
@@ -384,54 +449,117 @@ export default function GitControl({
           onKeyDown={(e) => {
             if (e.key !== 'Escape') return
             e.preventDefault()
-            if (view === 'branches') setView('main')
+            if (view !== 'main') setView('main')
             else setOpen(false)
           }}
         >
-          {view === 'branches' ? (
+          {view === 'github' ? (
             <>
               <div className="git-branches-head">
                 <button
                   type="button"
                   className="git-back"
-                  aria-label="Back"
+                  aria-label={t('actions.back')}
+                  disabled={creatingRepo}
                   onClick={() => setView('main')}
                 >
                   <Codicon name="arrow-left" />
                 </button>
-                <span className="git-sync-title">Switch branch</span>
+                <span className="git-sync-title">{t('control.createRepo')}</span>
+              </div>
+              <GithubRepoFields
+                compact
+                name={repoName}
+                onNameChange={setRepoName}
+                value={repoChoice}
+                onChange={setRepoChoice}
+                onReady={setRepoReady}
+                disabled={creatingRepo}
+                onReviewSetup={
+                  onReviewSetup &&
+                  (() => {
+                    setOpen(false)
+                    onReviewSetup()
+                  })
+                }
+              />
+              <div className="git-sync-sub">
+                {dirty
+                  ? t('sentences', {
+                      first: pushes,
+                      second: t('control.staysHere', { count: status.changedCount })
+                    })
+                  : pushes}
+              </div>
+              {error && <div className="git-error">{error}</div>}
+              <div className="git-popover-actions">
+                <button
+                  className="btn btn--xs btn--ghost"
+                  disabled={creatingRepo}
+                  onClick={() => setView('main')}
+                >
+                  {t('actions.cancel')}
+                </button>
+                <button
+                  className="btn btn--xs btn--primary"
+                  disabled={!repoReady || creatingRepo || syncing !== null || busy}
+                  onClick={() => void createRepo()}
+                >
+                  {creatingRepo ? t('control.creating') : t('control.createRepository')}
+                </button>
+              </div>
+            </>
+          ) : view === 'branches' ? (
+            <>
+              <div className="git-branches-head">
+                <button
+                  type="button"
+                  className="git-back"
+                  aria-label={t('actions.back')}
+                  onClick={() => setView('main')}
+                >
+                  <Codicon name="arrow-left" />
+                </button>
+                <span className="git-sync-title">{t('control.switchBranch')}</span>
               </div>
               <input
                 className="git-msg-input"
-                placeholder="Filter branches"
-                aria-label="Filter branches"
+                placeholder={t('control.filterBranches')}
+                aria-label={t('control.filterBranches')}
                 value={query}
                 autoFocus
                 spellCheck={false}
                 onChange={(e) => setQuery(e.target.value)}
               />
-              <div className="git-branch-list" role="group" aria-label="Branches">
+              <div className="git-branch-list" role="group" aria-label={t('control.branches')}>
                 {localShown.map(branchItem)}
                 {remoteShown.length > 0 && (
                   <div className="git-branch-heading" aria-hidden="true">
-                    On the remote
+                    {t('control.onRemote')}
                   </div>
                 )}
                 {remoteShown.map(branchItem)}
                 {branches === null && (
-                  <div className="git-branch-empty shimmer-text">Loading branches…</div>
+                  <div className="git-branch-empty shimmer-text">
+                    {t('control.loadingBranches')}
+                  </div>
                 )}
                 {branches !== null && shown.length === 0 && (
                   <div className="git-branch-empty">
-                    {q ? `No branches match “${query.trim()}”` : 'No other branches yet.'}
+                    {q
+                      ? t('control.noBranchesMatch', { query: query.trim() })
+                      : t('control.noOtherBranches')}
                   </div>
                 )}
               </div>
               {dirty && (
                 <div className="git-sync-sub">
-                  Your {plural(status.changedCount, 'uncommitted change')}{' '}
-                  {status.changedCount === 1 ? 'is' : 'are'} saved on{' '}
-                  {status.branch ?? 'this branch'} first.
+                  {status.branch === undefined
+                    ? t('control.savedOnThisBranch', { count: status.changedCount })
+                    : t('control.savedOnBranch', {
+                        count: status.changedCount,
+                        branch: status.branch
+                      })}
                 </div>
               )}
               {error && <div className="git-error">{error}</div>}
@@ -442,13 +570,11 @@ export default function GitControl({
                 <div className="git-merge">
                   <div className="git-sync-title">
                     {conflicts.length
-                      ? `${plural(conflicts.length, 'file')} ${conflicts.length === 1 ? 'has' : 'have'} conflicts`
-                      : 'The conflicts are resolved'}
+                      ? t('control.filesConflict', { count: conflicts.length })
+                      : t('control.resolved')}
                   </div>
                   <div className="git-sync-sub">
-                    {conflicts.length
-                      ? 'Getting the latest changes stopped where your changes and the latest ones overlap.'
-                      : 'Finish the merge to save it.'}
+                    {conflicts.length ? t('control.stoppedAtConflicts') : t('control.finishToSave')}
                   </div>
                   {conflicts.length > 0 && (
                     <ul className="git-conflicts">
@@ -457,7 +583,7 @@ export default function GitControl({
                       ))}
                       {conflicts.length > SHOWN_CONFLICTS && (
                         <li className="git-conflicts-more">
-                          and {conflicts.length - SHOWN_CONFLICTS} more
+                          {t('control.andMore', { count: conflicts.length - SHOWN_CONFLICTS })}
                         </li>
                       )}
                     </ul>
@@ -469,7 +595,7 @@ export default function GitControl({
                       title={waitTitle}
                       onClick={() => void abortMerge()}
                     >
-                      {syncing === 'abort' ? 'Cancelling…' : 'Cancel merge'}
+                      {syncing === 'abort' ? t('control.cancelling') : t('control.cancelMerge')}
                     </button>
                     {conflicts.length > 0 ? (
                       onSendToChat && (
@@ -479,7 +605,7 @@ export default function GitControl({
                           title={waitTitle}
                           onClick={() => askCopilot(conflicts)}
                         >
-                          <Codicon name="sparkle" /> Ask Copilot to resolve
+                          <Codicon name="sparkle" /> {t('control.askCopilot')}
                         </button>
                       )
                     ) : (
@@ -489,7 +615,7 @@ export default function GitControl({
                         title={waitTitle}
                         onClick={() => void finishMerge()}
                       >
-                        {syncing === 'finish' ? 'Finishing…' : 'Finish merge'}
+                        {syncing === 'finish' ? t('control.finishing') : t('control.finishMerge')}
                       </button>
                     )}
                   </div>
@@ -499,9 +625,11 @@ export default function GitControl({
                   <div className="git-sync-text">
                     <div className="git-sync-title git-current">
                       <Codicon name="git-branch" />
-                      <span className="git-branch-name">{status.branch ?? 'No branch'}</span>
+                      <span className="git-branch-name">
+                        {status.branch ?? t('control.noBranch')}
+                      </span>
                     </div>
-                    <div className="git-sync-sub">Current branch</div>
+                    <div className="git-sync-sub">{t('control.currentBranch')}</div>
                   </div>
                   <button
                     className="btn btn--xs btn--ghost"
@@ -509,7 +637,24 @@ export default function GitControl({
                     title={waitTitle}
                     onClick={showBranches}
                   >
-                    Switch…
+                    {t('control.switch')}
+                  </button>
+                </div>
+              )}
+
+              {!merging && canCreateRepo && (
+                <div className="git-sync-row">
+                  <div className="git-sync-text">
+                    <div className="git-sync-title">{t('control.notOnGithub')}</div>
+                    <div className="git-sync-sub">{t('control.keepVersions')}</div>
+                  </div>
+                  <button
+                    className="btn btn--xs btn--ghost"
+                    aria-label={t('control.createRepo')}
+                    disabled={syncing !== null || busy}
+                    onClick={showGithub}
+                  >
+                    {t('control.create')}
                   </button>
                 </div>
               )}
@@ -517,10 +662,8 @@ export default function GitControl({
               {!merging && behind > 0 && (
                 <div className="git-sync-row">
                   <div className="git-sync-text">
-                    <div className="git-sync-title">Get latest changes</div>
-                    <div className="git-sync-sub">
-                      {plural(behind, 'change')} waiting on the remote
-                    </div>
+                    <div className="git-sync-title">{t('control.getLatestChanges')}</div>
+                    <div className="git-sync-sub">{t('control.waiting', { count: behind })}</div>
                   </div>
                   <button
                     className="btn btn--xs btn--primary"
@@ -528,7 +671,7 @@ export default function GitControl({
                     title={waitTitle}
                     onClick={() => void pull()}
                   >
-                    {syncing === 'pull' ? 'Getting…' : 'Get latest'}
+                    {syncing === 'pull' ? t('control.getting') : t('control.getLatest')}
                   </button>
                 </div>
               )}
@@ -545,10 +688,10 @@ export default function GitControl({
                         onClick={() => void mergeLatest()}
                       >
                         {syncing === 'merge' ? (
-                          'Combining…'
+                          t('control.combining')
                         ) : (
                           <>
-                            <Codicon name="sparkle" /> Ask Copilot to resolve
+                            <Codicon name="sparkle" /> {t('control.askCopilot')}
                           </>
                         )}
                       </button>
@@ -560,15 +703,15 @@ export default function GitControl({
               {!merging && canPush && (
                 <div className="git-sync-row">
                   <div className="git-sync-text">
-                    <div className="git-sync-title">Push your changes</div>
-                    <div className="git-sync-sub">{plural(ahead, 'change')} ready to push</div>
+                    <div className="git-sync-title">{t('control.pushChanges')}</div>
+                    <div className="git-sync-sub">{t('control.readyToPush', { count: ahead })}</div>
                   </div>
                   <button
                     className="btn btn--xs btn--ghost"
                     disabled={syncing !== null || busy}
                     onClick={() => void push()}
                   >
-                    {syncing === 'push' ? 'Pushing…' : 'Push'}
+                    {syncing === 'push' ? t('control.pushing') : t('control.push')}
                   </button>
                 </div>
               )}
@@ -578,15 +721,21 @@ export default function GitControl({
               {!merging && dirty && (
                 <>
                   <div className="git-popover-title">
-                    Commit {plural(status.changedCount, 'change')}
-                    {status.branch ? ` on ${status.branch}` : ''}
+                    {status.branch
+                      ? t('control.commitChangesOn', {
+                          count: status.changedCount,
+                          branch: status.branch
+                        })
+                      : t('control.commitChanges', { count: status.changedCount })}
                   </div>
                   <div className="git-msg-field">
                     <input
                       ref={inputRef}
                       className="git-msg-input"
-                      placeholder={writing ? 'Writing a message…' : 'Commit message'}
-                      aria-label="Commit message"
+                      placeholder={
+                        writing ? t('control.writingMessage') : t('control.commitMessage')
+                      }
+                      aria-label={t('control.commitMessage')}
                       value={message}
                       autoFocus
                       spellCheck={false}
@@ -599,8 +748,8 @@ export default function GitControl({
                     <button
                       type="button"
                       className="git-msg-write"
-                      aria-label="Write a message with Copilot"
-                      title="Write a message with Copilot (Auto)"
+                      aria-label={t('control.writeMessage')}
+                      title={t('control.writeMessageAuto')}
                       disabled={busy || writing || syncing !== null}
                       onClick={() => void writeMessage()}
                     >
@@ -622,14 +771,14 @@ export default function GitControl({
                     disabled={busy}
                     onClick={() => setOpen(false)}
                   >
-                    Cancel
+                    {t('actions.cancel')}
                   </button>
                   <button
                     className="btn btn--xs btn--primary"
                     disabled={busy || writing || syncing !== null || !message.trim()}
                     onClick={() => void commit()}
                   >
-                    {busy ? 'Committing…' : 'Commit all'}
+                    {busy ? t('control.committing') : t('control.commitAll')}
                   </button>
                 </div>
               )}

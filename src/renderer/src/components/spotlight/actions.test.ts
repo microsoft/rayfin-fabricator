@@ -1,5 +1,6 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { StudioProject } from '@shared/ipc'
+import { setLanguage } from '../../i18n'
 import { buildActions, type ActionContext, type ActionHandlers } from './actions'
 import { prepare, rank } from './rank'
 
@@ -27,12 +28,11 @@ function context(overrides: Partial<ActionContext> = {}): ActionContext {
     chatBusy: false,
     autoDeploy: true,
     migrationEnabled: false,
-    mcpServersEnabled: false,
-    goalsEnabled: false,
     inGallery: false,
     theme: 'dark',
     uiScale: 1,
     fabricSignedIn: true,
+    canSignInToFabric: true,
     modKey: 'Ctrl',
     do: handlers,
     ...overrides
@@ -73,6 +73,24 @@ describe('Search actions', () => {
     expect(ids(context({ deploying: true }))).not.toContain('action:deploy')
   })
 
+  it('shows the terminal or puts it away, even before the project’s packages are ready', () => {
+    const closed = context({ toolsReady: false })
+    const show = buildActions(closed).find((a) => a.id === 'action:terminal')!
+    expect(show.title).toBe('Terminal')
+    show.run()
+    expect(closed.do.showTerminal).toHaveBeenCalledWith(true)
+
+    const open = context({ terminalOpen: true })
+    const hide = buildActions(open).find((a) => a.id === 'action:terminal')!
+    expect(hide.title).toBe('Hide terminal')
+    hide.run()
+    expect(open.do.showTerminal).toHaveBeenCalledWith(false)
+
+    const none = context({ project: null, onProjectScreen: false, onHome: true })
+    expect(ids(none)).not.toEqual(expect.arrayContaining(['action:terminal']))
+    expect(ids(none)).not.toEqual(expect.arrayContaining(['action:new-terminal']))
+  })
+
   it('offers a team app its overview, not Publish or Share', () => {
     const team = {
       ...project,
@@ -107,22 +125,18 @@ describe('Search actions', () => {
     expect(ids(context({ inGallery: true }))).not.toContain('action:gallery')
   })
 
-  it('offers managing MCP servers only with their experiment', () => {
-    expect(ids(context())).not.toContain('action:mcp-servers')
-    const ctx = context({ mcpServersEnabled: true })
+  it('offers managing MCP servers', () => {
+    const ctx = context()
     const manage = buildActions(ctx).find((a) => a.id === 'action:mcp-servers')!
     manage.run()
     expect(ctx.do.openMcpServers).toHaveBeenCalled()
     expect(rank(prepare(buildActions(ctx)), 'mcp')[0]?.item.id).toBe('action:mcp-servers')
   })
 
-  it('offers the Goals view only when the open app has it', () => {
-    expect(ids(context())).not.toContain('action:view-goals')
-    const ctx = context({ goalsEnabled: true })
-    const goals = buildActions(ctx).find((a) => a.id === 'action:view-goals')!
-    goals.run()
-    expect(ctx.do.showView).toHaveBeenCalledWith('goals')
-    expect(rank(prepare(buildActions(ctx)), 'evals')[0]?.item.id).toBe('action:view-goals')
+  it('offers Fabric sign-in only once there’s a project to sign in with', () => {
+    const signedOut = context({ fabricSignedIn: false })
+    expect(ids(signedOut)).toContain('action:fabric-sign-in')
+    expect(ids({ ...signedOut, canSignInToFabric: false })).not.toContain('action:fabric-sign-in')
   })
 
   it('exports the open app, and imports one from anywhere', () => {
@@ -145,5 +159,24 @@ describe('Search actions', () => {
       team: { workspaceId: 'w1', folder: 'apps/contoso' }
     } as StudioProject
     expect(ids(context({ project: team }))).not.toContain('action:export-project')
+  })
+})
+
+describe('Search actions in another language', () => {
+  afterEach(async () => {
+    await setLanguage('en')
+    localStorage.clear()
+  })
+
+  it('finds an action by its translated title, and still by its English one', async () => {
+    await setLanguage('de')
+    const actions = buildActions(context())
+    expect(actions.find((a) => a.id === 'action:settings')?.title).toBe('Einstellungen')
+    const prepared = prepare(actions)
+    const top = (query: string): string | undefined => rank(prepared, query)[0]?.item.id
+    expect(top('einstellungen')).toBe('action:settings')
+    // "Settings" isn't one of its keywords; the English title is.
+    expect(top('settings')).toBe('action:settings')
+    expect(top('deploy')).toBe('action:deploy')
   })
 })

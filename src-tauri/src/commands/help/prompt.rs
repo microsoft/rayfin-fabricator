@@ -19,7 +19,7 @@ Documentation, release notes, journal records and earlier answers may describe h
 before: when every app had to be deployed to Fabric before it could be tried, or when running \
 apps on this computer was an experiment (**Local development**, in **Settings → Experiments**), \
 which it no longer is. Answer for how it works now:\n\n\
-- **Every personal app runs on this computer, on its own local backend.** When an app is open, \
+- **Every app runs on this computer, on its own local backend, team apps included.** When an app is open, \
 Fabricator starts its local backend (rayfin-local, which comes with Fabricator): the app's data, \
 sign-in, functions, connectors and file storage, plus the app's own dev server (Vite), which is \
 what the preview shows. It keeps running between chat turns. Code changes show up in the preview \
@@ -37,18 +37,25 @@ Microsoft Fabric workspace so other people can use it. It runs when the user ask
 each chat turn** is off unless they turned it on. Publishing never touches the local data. \
 Fabricator's internal names didn't change, so `deploy.*` journal records are about publishing.\n\
 - **What the user sees.** The preview shows the app running on this computer. The **Output** \
-button in its toolbar opens the local backend's output, and marks the app's state when it needs \
-a look: a blinking dot while it starts, a red one when it couldn't start, and the number of \
-problems when it runs but its latest change didn't apply. Once the app is published, a **Local** and \
-**Published** switch chooses between this copy and the published one, each with its own data; an \
+button in its toolbar opens the local backend's output, in the **Output** tab of the terminal \
+panel below the project, and marks the app's state when it needs a look: a blinking dot while it \
+starts, a red one when it couldn't start, and the number of problems when it runs but its latest \
+change didn't apply. The status bar's **Terminal** opens shells in the project's folder in the \
+same panel, where the user can run commands such as `rayfin`, `npm` and `git` themselves. Once \
+the app is published, a **Local** and **Published** switch chooses between this copy and the \
+published one, each with its own data; an \
 app that was published before it ran on this computer starts with empty local data. Blueprint's \
 **Data explorer** shows the local data and stored files, and can delete them.\n\
 - **The fallback.** When the local backend can't run an app, because its Rayfin packages are \
 outside the versions the local backend supports or it uses a connector that runs only on Fabric \
 (such as Kusto), and the app has been published, the preview uses the published app's backend \
 instead, and says why. An app that was never published has nothing to fall back to.\n\
-- **Team apps don't use the local backend.** Their preview and publishing go through the team's \
-pipeline, as before.\n\n";
+- **Team apps run on the local backend too.** While the user works on a team app, it runs on this \
+computer like any app, with its own local data. Its publishing goes through the team's pipeline: \
+**Publish** marks the user's draft pull request ready, which deploys their personal preview in \
+Fabric as a check, then merges it, and the pipeline deploys the published app. Draft pull requests \
+deploy nothing. A team app the local backend can't run all of falls back to the team's deployment \
+of it: the user's preview, or the published app.\n\n";
 
 /// What each local backend problem code means and what fixes it, in terms of
 /// the controls the preview offers for it (`components/local` in the renderer;
@@ -356,7 +363,7 @@ mod tests {
   fn the_frame_says_how_fabricator_works_now() {
     let frame = system_frame(&ctx());
     assert!(frame.contains("running apps on this computer was an experiment"));
-    assert!(frame.contains("**Every personal app runs on this computer, on its own local backend.**"));
+    assert!(frame.contains("**Every app runs on this computer, on its own local backend, team apps included.**"));
     assert!(frame.contains("**There is no first deploy any more.**"));
     assert!(frame.contains("**Signing in to Azure and Microsoft Fabric is optional.**"));
     assert!(frame.contains("**Publishing is optional.**"));
@@ -364,7 +371,7 @@ mod tests {
     assert!(frame.contains("The **Output** button in its toolbar"));
     assert!(frame.contains("a **Local** and **Published** switch"));
     assert!(frame.contains("the preview uses the published app's backend instead"));
-    assert!(frame.contains("**Team apps don't use the local backend.**"));
+    assert!(frame.contains("**Team apps run on the local backend too.**"));
     assert!(frame.contains("help_local_output") && frame.contains("## When the local backend has a problem"));
     assert!(!frame.contains("**Redeploy**"), "the examples use today's labels");
     assert!(!frame.contains("**A new app is published first.**"));
@@ -408,11 +415,41 @@ mod tests {
     assert!(!frame.contains("`local.fallback`"), "only records something writes are described");
   }
 
-  /// Whether `source` shows `label`: as a string literal, or as the whole text
-  /// of a JSX element or line.
-  fn shows(source: &str, label: &str) -> bool {
+  /// Every text of the renderer's English catalogs, as (namespace, key, text).
+  fn english_texts(renderer: &std::path::Path) -> Vec<(String, String, String)> {
+    fn walk(ns: &str, key: &str, value: &serde_json::Value, out: &mut Vec<(String, String, String)>) {
+      match value {
+        serde_json::Value::String(text) => out.push((ns.to_string(), key.to_string(), text.clone())),
+        serde_json::Value::Object(map) => {
+          for (k, v) in map {
+            walk(ns, &if key.is_empty() { k.clone() } else { format!("{key}.{k}") }, v, out);
+          }
+        }
+        _ => {}
+      }
+    }
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(renderer.join("i18n").join("locales").join("en")).into_iter().flatten().flatten() {
+      let path = entry.path();
+      let Some(ns) = path.file_stem().and_then(|s| s.to_str()).filter(|_| path.extension().is_some_and(|e| e == "json")) else {
+        continue;
+      };
+      let Some(value) = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()) else {
+        continue;
+      };
+      walk(ns, "", &value, &mut out);
+    }
+    out
+  }
+
+  /// Whether `source` shows `label`: as a string literal, as the whole text of
+  /// a JSX element or line, or through a key of the English catalogs that holds it.
+  fn shows(source: &str, label: &str, english: &[(String, String, String)]) -> bool {
     [format!("'{label}'"), format!("\"{label}\""), format!(">{label}<")].iter().any(|form| source.contains(form.as_str()))
       || source.lines().any(|line| line.trim() == label)
+      || english.iter().filter(|(_, _, text)| text == label).any(|(ns, key, _)| {
+        [format!("'{key}'"), format!("\"{key}\""), format!("{ns}:{key}")].iter().any(|form| source.contains(form.as_str()))
+      })
   }
 
   /// The controls the instructions name in bold are the app's own labels, so a
@@ -421,13 +458,15 @@ mod tests {
   fn the_controls_it_names_are_the_apps_own_labels() {
     let renderer = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("src").join("renderer").join("src");
     let frame = system_frame(&ctx());
+    let english = english_texts(&renderer);
     for (label, file) in [
       ("Publish", "components/DeploymentsControl.tsx"),
       ("Publish after each chat turn", "components/DeploymentsControl.tsx"),
       ("Local", "components/PreviewPane.tsx"),
       ("Published", "components/PreviewPane.tsx"),
       ("Data explorer", "components/blueprint/BlueprintTab.tsx"),
-      ("Output", "components/local/LocalOutput.tsx"),
+      ("Output", "components/terminal/TerminalPanel.tsx"),
+      ("Terminal", "screens/Workbench.tsx"),
       ("Try again", "components/local/LocalStatePanel.tsx"),
       ("View output", "components/local/LocalStatePanel.tsx"),
       ("Find out why", "components/local/LocalStatePanel.tsx"),
@@ -443,7 +482,7 @@ mod tests {
       assert!(frame.contains(&format!("**{label}**")), "Help's instructions don't name **{label}**");
       let source = std::fs::read_to_string(renderer.join(file)).unwrap_or_default();
       assert!(
-        shows(&source, label),
+        shows(&source, label, &english),
         "Help's instructions (commands/help/prompt.rs) send people to **{label}**, but {file} doesn't show it any more: \
 update the instructions to the new label"
       );

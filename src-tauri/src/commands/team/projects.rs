@@ -35,7 +35,6 @@ fn register(ws: &TeamWorkspace, folder: &str, branch: &str, pr: Option<&TeamPull
     branch: Some(branch.to_string()),
     pr_number: pr.map(|p| p.number),
     pr_url: pr.map(|p| p.url.clone()),
-    view: Some(if pr.is_some() { "preview".into() } else { "production".into() }),
     ..Default::default()
   };
   store::mutate_project(&project.id, |p| p.team = Some(binding));
@@ -55,20 +54,20 @@ async fn my_open_session(ws: &TeamWorkspace, login: &str, folder: &str) -> Optio
 /// Open a team app on this computer, resuming your open pull request for it
 /// or starting a new working branch from the published version.
 #[tauri::command]
-pub async fn team_open_project(workspace_id: String, folder: String) -> TeamActionResult {
+pub async fn team_open_project(app: AppHandle, workspace_id: String, folder: String) -> TeamActionResult {
   let account = super::workspace_account(&workspace_id);
-  gh::as_account(account, open_project(workspace_id, folder)).await
+  gh::as_account(account, open_project(app, workspace_id, folder)).await
 }
 
-async fn open_project(workspace_id: String, folder: String) -> TeamActionResult {
+async fn open_project(app: AppHandle, workspace_id: String, folder: String) -> TeamActionResult {
   if let Err(e) = team::require_enabled() {
     return fail(e);
   }
   let Some(ws) = store::find_team_workspace(&workspace_id) else {
-    return fail("That team workspace is no longer on this computer.");
+    return fail(t!("team.workspaceMissing"));
   };
   if naming::project_folder(&folder).as_deref() != Some(folder.as_str()) && !naming::is_app_folder(&folder) {
-    return fail("That isn't an app folder in this workspace.");
+    return fail(t!("team.projects.notAppFolder"));
   }
   if let Some(existing) = local_project(&ws.id, &folder) {
     if Path::new(&existing.path).exists() {
@@ -76,6 +75,7 @@ async fn open_project(workspace_id: String, folder: String) -> TeamActionResult 
       return with_project(store::find_project(&existing.id));
     }
     // The folder was deleted outside Fabricator: forget it and check out again.
+    crate::services::local_backend::state(&app).forget(&existing.id).await;
     store::remove_project(&existing.id);
   }
   let me = match viewer().await {
@@ -108,7 +108,7 @@ async fn open_project(workspace_id: String, folder: String) -> TeamActionResult 
   };
   if !is_rayfin_project(&repo::project_dir(&ws, &folder).to_string_lossy()) {
     let _ = repo::remove_worktree(&ws, &folder).await;
-    return fail("That folder isn't a Rayfin app.");
+    return fail(t!("team.projects.notRayfin"));
   }
   let project = register(&ws, &folder, &branch, pr.as_ref(), None);
   if let Some(p) = &project {
@@ -117,12 +117,12 @@ async fn open_project(workspace_id: String, folder: String) -> TeamActionResult 
   with_project(project.and_then(|p| store::find_project(&p.id)))
 }
 
-/// Make sure a project's `.gitignore` keeps secrets and generated files out of
-/// the team repository.
+/// Make sure a project's `.gitignore` keeps secrets, generated files and the
+/// local backend's state out of the team repository.
 fn ensure_gitignore(dir: &Path) {
   let file = dir.join(".gitignore");
   let current = std::fs::read_to_string(&file).unwrap_or_default();
-  let needed = ["node_modules", "dist", "*.local", "rayfin/.env*", "rayfin/.deployments.json", "rayfin/.temp/"];
+  let needed = ["node_modules", "dist", "*.local", "rayfin/.env*", "rayfin/.deployments.json", "rayfin/.temp/", ".rayfin-local/"];
   let missing: Vec<&str> = needed.iter().copied().filter(|line| !current.lines().any(|l| l.trim() == *line)).collect();
   if missing.is_empty() {
     return;
@@ -149,10 +149,10 @@ fn ensure_gitignore(dir: &Path) {
 /// Reads the local clone; the Fabric lookup is best-effort.
 pub(crate) async fn new_app_name_problem(ws: &TeamWorkspace, name: &str) -> Option<String> {
   let Some(folder) = naming::project_folder(name) else {
-    return Some("Choose a name with letters or numbers (and not a reserved word).".into());
+    return Some(t!("team.projects.badName"));
   };
   let item = naming::production_item(&folder);
-  let taken = |existing: &str| Some(format!("{} already has an app named “{existing}”. Choose another name.", ws.name));
+  let taken = |existing: &str| Some(t!("team.projects.nameTaken", workspace = ws.name, app = existing));
   if let Ok(apps) = repo::list_projects(ws).await {
     if let Some((_, existing)) = apps.iter().find(|(f, _)| naming::production_item(f) == item) {
       return taken(existing);
@@ -166,9 +166,7 @@ pub(crate) async fn new_app_name_problem(ws: &TeamWorkspace, name: &str) -> Opti
   }
   let production = ws.manifest.as_ref().map(|m| m.fabric.production.id.clone()).filter(|id| !id.is_empty())?;
   match fabric::app_item_names(&production).await {
-    Ok(names) if names.iter().any(|n| n.eq_ignore_ascii_case(&item)) => Some(format!(
-      "The team’s Fabric workspace already has an app named “{item}”. Choose another name so publishing doesn’t replace it."
-    )),
+    Ok(names) if names.iter().any(|n| n.eq_ignore_ascii_case(&item)) => Some(t!("team.projects.fabricNameTaken", item = item)),
     Ok(_) => None,
     Err(e) => {
       log::warn!("couldn't list the apps in {}'s Fabric workspace: {}", ws.name, e.message);
@@ -181,7 +179,7 @@ pub(crate) async fn new_app_name_problem(ws: &TeamWorkspace, name: &str) -> Opti
 /// also compared as Fabric item names: `Lead_Tracker` and `lead-tracker` would
 /// deploy to the same item.
 async fn free_folder(ws: &TeamWorkspace, name: &str) -> Result<String, String> {
-  let base = naming::project_folder(name).ok_or("Choose a name with letters or numbers (and not a reserved word).")?;
+  let base = naming::project_folder(name).ok_or_else(|| t!("team.projects.badName"))?;
   let mut taken: Vec<String> = repo::list_projects(ws).await?.into_iter().map(|(f, _)| naming::production_item(&f)).collect();
   // Apps created here that aren't published yet.
   taken.extend(
@@ -200,7 +198,7 @@ async fn free_folder(ws: &TeamWorkspace, name: &str) -> Result<String, String> {
 }
 
 /// Create a new app in a team workspace on a working branch, save it to GitHub
-/// and open its pull request (which deploys your preview).
+/// and open its draft pull request. It runs on this computer from the start.
 #[tauri::command]
 pub async fn team_create_project(app: AppHandle, workspace_id: String, input: CreateProjectInput) -> TeamActionResult {
   let account = super::workspace_account(&workspace_id);
@@ -212,7 +210,7 @@ async fn create_project(app: AppHandle, workspace_id: String, input: CreateProje
     return fail(e);
   }
   let Some(ws) = store::find_team_workspace(&workspace_id) else {
-    return fail("That team workspace is no longer on this computer.");
+    return fail(t!("team.workspaceMissing"));
   };
   let request = match projects_impl::scaffold_request(&input) {
     Ok(r) => r,
@@ -241,7 +239,7 @@ async fn create_project(app: AppHandle, workspace_id: String, input: CreateProje
   }
   ensure_gitignore(&repo::project_dir(&ws, &folder));
   let Some(project) = register(&ws, &folder, &branch, None, Some(&request.name)) else {
-    return fail("Couldn't register the new app.");
+    return fail(t!("team.projects.cantRegister"));
   };
   // Also moves the create screen to its last phase (it watches for "git repository").
   on(Stream::Stdout, "\nSaving the app to the team's git repository…\n");
@@ -261,13 +259,13 @@ async fn move_project(app: AppHandle, workspace_id: String, project_id: String) 
     return fail(e);
   }
   let Some(ws) = store::find_team_workspace(&workspace_id) else {
-    return fail("That team workspace is no longer on this computer.");
+    return fail(t!("team.workspaceMissing"));
   };
   let Some(source) = store::find_project(&project_id) else {
-    return fail("Project not found.");
+    return fail(t!("team.services.projectNotFound"));
   };
   if source.team.is_some() {
-    return fail("That project is already in a team workspace.");
+    return fail(t!("team.projects.alreadyInTeam"));
   }
   if let Some(why) = team::rayfin_update_needed(Path::new(&source.path), &source.name) {
     return fail(why);
@@ -302,7 +300,7 @@ async fn move_project(app: AppHandle, workspace_id: String, project_id: String) 
   }
   ensure_gitignore(&dst);
   let Some(project) = register(&ws, &folder, &branch, None, Some(&source.name)) else {
-    return fail("Couldn't register the moved app.");
+    return fail(t!("team.projects.cantRegisterMoved"));
   };
   history::copy_history(&source.id, &project.id);
   store::mutate_project(&project.id, |p| {
@@ -330,7 +328,7 @@ async fn first_save(app: &AppHandle, project_id: &str, message: &str) -> TeamAct
       // The app exists locally even if GitHub didn't take it yet; the next
       // successful save shares it.
       let mut res = with_project(store::find_project(project_id));
-      res.error = Some(format!("The app was created, but it isn't on GitHub yet: {e}"));
+      res.error = Some(t!("team.projects.notOnGitHub", error = e));
       res
     }
   }
@@ -339,22 +337,22 @@ async fn first_save(app: &AppHandle, project_id: &str, message: &str) -> TeamAct
 /// Remove an app from the workspace (owners): deletes its folder through a
 /// merged pull request and, optionally, its published and preview apps in Fabric.
 #[tauri::command]
-pub async fn team_remove_project(workspace_id: String, folder: String, delete_apps: bool) -> TeamActionResult {
+pub async fn team_remove_project(app: AppHandle, workspace_id: String, folder: String, delete_apps: bool) -> TeamActionResult {
   let account = super::workspace_account(&workspace_id);
-  gh::as_account(account, remove_project(workspace_id, folder, delete_apps)).await
+  gh::as_account(account, remove_project(app, workspace_id, folder, delete_apps)).await
 }
 
-async fn remove_project(workspace_id: String, folder: String, delete_apps: bool) -> TeamActionResult {
+async fn remove_project(app: AppHandle, workspace_id: String, folder: String, delete_apps: bool) -> TeamActionResult {
   if let Err(e) = team::require_enabled() {
     return fail(e);
   }
   let Some(ws) = store::find_team_workspace(&workspace_id) else {
-    return fail("That team workspace is no longer on this computer.");
+    return fail(t!("team.workspaceMissing"));
   };
   match gh::repo(&ws.repo).await {
     Ok(info) if info.manages() => {}
-    Ok(_) => return fail("Only the workspace's owners can remove apps."),
-    Err(e) => return fail(e.describe("Check your access to the workspace")),
+    Ok(_) => return fail(t!("team.projects.ownersOnlyRemove")),
+    Err(e) => return fail(e.describe(&t!("team.actions.checkAccess"))),
   }
   let me = match viewer().await {
     Ok(v) => v,
@@ -371,16 +369,18 @@ async fn remove_project(workspace_id: String, folder: String, delete_apps: bool)
   }
   let pr = match gh::create_pr(&ws.repo, &branch, &format!("Remove {folder}"), "Removed in Fabricator.").await {
     Ok(pr) => pr,
-    Err(e) => return fail(e.describe("Open the removal pull request")),
+    Err(e) => return fail(e.describe(&t!("team.actions.openRemovalPr"))),
   };
   if pr.draft {
     let _ = gh::mark_ready(&ws.repo, pr.number).await;
   }
   if let Err(e) = gh::merge_pr(&ws.repo, pr.number, &format!("Remove {folder}")).await {
-    return fail(e.describe("Merge the removal"));
+    return fail(e.describe(&t!("team.actions.mergeRemoval")));
   }
   let _ = gh::delete_branch(&ws.repo, &branch).await;
   if let Some(local) = local_project(&ws.id, &folder) {
+    // Its local backend holds files in the worktree (the database, the logs).
+    crate::services::local_backend::state(&app).forget(&local.id).await;
     history::clear_history(&local.id);
     store::remove_project(&local.id);
   }
@@ -399,7 +399,7 @@ async fn remove_project(workspace_id: String, folder: String, delete_apps: bool)
       };
       if let Some(item) = production_item {
         if let Err(e) = fabric::delete_item(&manifest.fabric.production.id, &item).await {
-          problems.push(e.describe("Delete the published app"));
+          problems.push(e.describe(&t!("team.actions.deletePublished")));
         }
       }
       let prefix = naming::preview_item_prefix(&folder);
@@ -407,11 +407,11 @@ async fn remove_project(workspace_id: String, folder: String, delete_apps: bool)
         Ok(items) => {
           for (id, display) in items.into_iter().filter(|(_, d)| d.starts_with(&prefix)) {
             if let Err(e) = fabric::delete_item(&manifest.fabric.previews.id, &id).await {
-              problems.push(e.describe(&format!("Delete the preview {display}")));
+              problems.push(e.describe(&t!("team.actions.deletePreview", name = display)));
             }
           }
         }
-        Err(e) => problems.push(e.describe("List the previews")),
+        Err(e) => problems.push(e.describe(&t!("team.actions.listPreviews"))),
       }
     }
   }

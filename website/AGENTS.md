@@ -157,8 +157,8 @@ in `.md`.
 | `model-picker` | The chat composer's model picker with **Auto** off and the model list open, including **Your API keys** (sample data) | `/docs/build/chat`, `/docs/build/your-own-api-keys` |
 | `model-providers` | **Accounts → Model providers** with an Anthropic key saved and an OpenAI key being added (sample data) | `/docs/build/your-own-api-keys` |
 | `add-menu` | The chat composer's **+** menu with **Fabric data** open beside it, listing the kinds of data (sample data) | `/docs/build/chat` |
-| `plugins` | The chat composer's **Plugins & tools** panel, 1 enabled: **Fabric IQ** on and **Work IQ**, marked **Experiment**, off, under **Plugins**, marked **Read-only**; the **Plugins** button names Fabric IQ (sample data) | `/docs/build/fabric-iq-and-work-iq` |
-| `mcp-plugins` | The chat composer's **Plugins & tools** panel, 2 enabled: **Fabric IQ** on, and an **MCP servers** section, marked **Experiment**: **Charts** on, **Microsoft Learn** (**Read-only**) and **Issue tracker** off, and **Manage MCP servers…** (sample data) | `/docs/build/mcp-servers` |
+| `plugins` | The chat composer's **Plugins & tools** panel, 1 enabled: **Fabric IQ** on and **Work IQ**, marked **Experiment**, off, under **Plugins**, marked **Read-only**, then **MCP servers** with **Add an MCP server…**; the **Plugins** button names Fabric IQ (sample data) | `/docs/build/fabric-iq-and-work-iq` |
+| `mcp-plugins` | The chat composer's **Plugins & tools** panel, 2 enabled: **Fabric IQ** on, and an **MCP servers** section: **Charts** on, **Microsoft Learn** (**Read-only**) and **Issue tracker** off, and **Manage MCP servers…** (sample data) | `/docs/build/mcp-servers` |
 | `mcp-servers` | **MCP servers** with Microsoft Learn (read-only) and Charts checked, each listing its tools, and an issue tracker that signs in when used (sample data) | `/docs/build/mcp-servers` |
 | `connect-data` | **Add Fabric data** on the Finance analytics workspace: recent workspaces first, three items already connected and two picked (sample data) | `/docs/build/data-model` |
 | `data-chips` | The chat composer with the two items picked in `connect-data` waiting as chips for the next message (sample data) | `/docs/build/data-model` |
@@ -166,8 +166,10 @@ in `.md`.
 | `preview-toolbar` | The default preview toolbar above the published sample app (sample data) | `/docs/build/preview` |
 | `preview-local` | The sample app's preview on this computer: **Local** and **Published**, **Preview as**, and **Output** open below the app (sample data) | `/docs/build/local-development`, `/docs/build/preview` |
 | `preview-as` | The **Preview as** menu open over the sample app on this computer: **You**, two test users, **Signed out** and **Add test user…** (sample data) | `/docs/build/preview` |
-| `design` | Design mode with an element selected and its change card open | `/docs/build/design` |
-| `design-theme` | Design mode's Theme panel | `/docs/build/design` |
+| `design` | Design mode with an element selected and its change card open. No longer in the app (Point & Edit, then called Touch Up, replaced it): kept for the intro video | none (intro video only) |
+| `touch-up` | The sample app's preview with **Point & Edit** on: two elements picked and numbered, the pointer resting on a bar, and the hint at the top (sample data) | `/docs/build/touch-up` |
+| `touch-up-chips` | The chat composer with the two picks as chips, a clip, and a request that refers to them by number (sample data) | `/docs/build/touch-up` |
+| `touch-up-draw` | Drawing on a screenshot of the sample app: an arrow at the month's total, a box round a bar and an underline, with the drawing tools (sample data) | `/docs/build/touch-up`, `/docs/build/chat` |
 | `code` | Code view with the file tree and the editor | `/docs/build/code-and-history` |
 | `history` | The History tab with a version per request, one selected and a file's diff open | `/docs/build/code-and-history` |
 | `blueprint` | Blueprint's Architecture view of the sample app (sample data) | `/docs/build/data-model` |
@@ -182,11 +184,11 @@ in `.md`.
 | `share` | The share dialog | `/docs/ship/share` |
 | `advisor` | The Advisor: grade, check strip, summary and issues | `/docs/ship/advisor` |
 | `advisor-finding` | An open Advisor issue with its fix actions | `/docs/ship/advisor` |
-| `goals` | The sample app's **Goals** tab after a run: 3 passed, 1 failed and 1 not proven, with Copilot's summary, what the app is for, and the failed check open on what Copilot found and the calls it made (sample data) | `/docs/ship/goals` |
 | `rayfin-version` | The Rayfin version control with an update available | `/docs/ship/rayfin-versions` |
-| `settings` | The Settings dialog: General (with **API keys** and **Chat defaults**), Appearance and the start of Diagnostics (sample data) | `/docs/reference/settings` |
+| `settings` | The Settings dialog: General (with **API keys**, **MCP servers**, **Chat defaults** and **Custom instructions**), with Appearance below (sample data) | `/docs/reference/settings` |
 | `chat-defaults` | **Chat defaults**: Claude Opus 5.5 at High, with Fabric IQ and the Charts MCP server on, and Work IQ, Microsoft Learn and Issue tracker off (sample data) | `/docs/reference/settings` |
-| `settings-experiments` | Settings' Experiments section with **Team workspaces**, **Migrate Power BI reports**, **Work IQ**, **MCP servers**, **Export as an app** and **Goals**, all off (sample data) | `/docs/team`, `/docs/build/migrate-power-bi`, `/docs/build/fabric-iq-and-work-iq`, `/docs/build/mcp-servers`, `/docs/ship/app-files`, `/docs/ship/goals` |
+| `custom-instructions` | **Custom instructions** with four instructions about the theme, wording, dates and page layout, and the character count (sample data) | `/docs/reference/settings` |
+| `settings-experiments` | Settings' Experiments section with **Team workspaces**, **Migrate Power BI reports** and **Work IQ**, all off (sample data) | `/docs/team`, `/docs/build/migrate-power-bi`, `/docs/build/fabric-iq-and-work-iq` |
 | `migrate-report` | **Migrate a Power BI report** with a report picked: its workspace, semantic model, pages and the three checks, all passing (sample data) | `/docs/build/migrate-power-bi` |
 | `migration-card` | The Migration card above the chat composer after the first page, with **Migrate next page** and **Migrate the rest** (sample data) | `/docs/build/migrate-power-bi` |
 | `app-gallery` | The **App gallery** with the sample user's apps, and the sample app's details open beside them (sample data) | `/docs/build/app-gallery` |

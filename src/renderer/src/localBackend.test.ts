@@ -1,12 +1,14 @@
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 import { invoke } from '@tauri-apps/api/core'
-import type { LocalLogEvent, LocalProblem, LocalReady, LocalStatus } from '@shared/ipc'
+import type { LocalProblem, LocalReady, LocalStatus, StudioProject } from '@shared/ipc'
 import { api } from './api'
+import { setLanguage } from './i18n'
 import {
   LocalBackendError,
   alreadyServing,
   changesLocalSupport,
+  hasFabricBackend,
   localBackendStore,
   localFallbackCode,
   localFallbackReason,
@@ -15,8 +17,7 @@ import {
   refusedSchemaLosses,
   retriesAfterTurn,
   runningProblems,
-  useLocalBackend,
-  useLocalBackendLogs
+  useLocalBackend
 } from './localBackend'
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
@@ -71,19 +72,7 @@ function problem(code: string, details: LocalProblem['details'] = null): LocalPr
   return { code, message: `${code} happened.`, hint: null, fatal: true, details, time: null }
 }
 
-function line(seq: number, projectId = 'p1'): LocalLogEvent {
-  return {
-    projectId,
-    seq,
-    source: 'vite',
-    level: 'info',
-    line: `line ${seq}`,
-    time: '2026-10-30T03:12:09.512Z'
-  }
-}
-
 let emitState: (status: LocalStatus) => void
-let emitLog: (line: LocalLogEvent) => void
 let local: Record<string, Mock>
 let preview: { resetSiteData: Mock }
 
@@ -102,10 +91,6 @@ beforeEach(() => {
     logs: vi.fn(async () => []),
     onState: vi.fn((cb: (status: LocalStatus) => void) => {
       emitState = cb
-      return () => {}
-    }),
-    onLog: vi.fn((cb: (line: LocalLogEvent) => void) => {
-      emitLog = cb
       return () => {}
     })
   }
@@ -256,23 +241,6 @@ describe('useLocalBackend', () => {
   })
 })
 
-describe('useLocalBackendLogs', () => {
-  it('merges the fetched tail with live lines, without repeats', async () => {
-    let resolveTail: (lines: LocalLogEvent[]) => void = () => {}
-    local.logs.mockReturnValueOnce(new Promise((resolve) => (resolveTail = resolve)))
-    const { result } = renderHook(() => useLocalBackendLogs('p1', 3))
-    act(() => emitLog(line(3)))
-    act(() => emitLog(line(9, 'p2')))
-    await act(async () => resolveTail([line(1), line(2), line(3)]))
-    expect(local.logs).toHaveBeenCalledWith('p1', 3)
-    expect(result.current.map((l) => l.seq)).toEqual([1, 2, 3])
-
-    act(() => emitLog(line(4)))
-    act(() => emitLog(line(4)))
-    expect(result.current.map((l) => l.seq)).toEqual([2, 3, 4])
-  })
-})
-
 describe('local backend helpers', () => {
   it('labels states for a status pill', () => {
     expect(localStateLabel(null)).toBe('Stopped')
@@ -418,6 +386,41 @@ describe('local backend helpers', () => {
     )
     expect(localFallbackReason(status({ state: 'running', ready }))).toBeNull()
     expect(localFallbackCode(status({ state: 'running', ready }))).toBeNull()
+    // A team app's preview uses the team's deployment instead.
+    expect(localFallbackReason(connectors, { team: true })).toBe(
+      'The logs connector runs only on Fabric, so the preview uses the team’s deployment of it in Fabric.'
+    )
+  })
+
+  it('falls back only to a backend the app has in Fabric: its published app, or a team deployment it can connect to', () => {
+    const app = (over: Partial<StudioProject>): StudioProject =>
+      ({ id: 'p1', name: 'App', path: 'C:\\apps\\app', addedAt: '', ...over }) as StudioProject
+    const team = { workspaceId: 'w1', folder: 'app', worktree: 'C:\\team\\app' }
+    expect(hasFabricBackend(app({ lastDeploy: { url: 'https://app.example' } }))).toBe(true)
+    expect(hasFabricBackend(app({}))).toBe(false)
+    // A team app's published address alone doesn't say how to connect to its backend.
+    const record = { environment: 'production/app', state: 'success', url: 'https://app.example' }
+    expect(
+      hasFabricBackend(
+        app({ lastDeploy: { url: 'https://app.example' }, team: { ...team, production: record } })
+      )
+    ).toBe(false)
+    expect(
+      hasFabricBackend(
+        app({ team: { ...team, production: { ...record, itemId: 'i', workspaceId: 'w' } } })
+      )
+    ).toBe(true)
+    expect(
+      hasFabricBackend(
+        app({
+          team: {
+            ...team,
+            preview: { ...record, publicEnv: { RAYFIN_PUBLIC_API_URL: 'https://api' } }
+          }
+        })
+      )
+    ).toBe(true)
+    expect(hasFabricBackend(null)).toBe(false)
   })
 
   it('runs a newer Rayfin version here, warning that some things might not work', () => {
@@ -486,6 +489,38 @@ describe('local backend helpers', () => {
       expect(retriesAfterTurn(failed(code)), code).toBe(false)
     }
     expect(retriesAfterTurn(status({ state: 'running', ready }))).toBe(false)
+  })
+})
+
+describe('local backend labels in the app’s language', () => {
+  afterEach(async () => {
+    await setLanguage('en')
+    localStorage.clear()
+  })
+
+  it('counts a running app’s problems in German', async () => {
+    await setLanguage('de')
+    const at = '2026-10-30T17:18:08.000Z'
+    const vite: LocalStatus['vite'] = {
+      state: 'failed',
+      url: null,
+      version: null,
+      message: 'Vite kept exiting.',
+      time: at
+    }
+    const analysis: LocalStatus['analysis'] = {
+      ok: false,
+      sdk: null,
+      entities: [],
+      storageFolders: [],
+      message: null,
+      time: at
+    }
+    expect(localStateLabel(status({ state: 'starting' }))).toBe('Wird gestartet…')
+    expect(localStateLabel(status({ state: 'running', ready, vite }))).toBe('Läuft · 1 Problem')
+    expect(localStateLabel(status({ state: 'running', ready, vite, analysis }))).toBe(
+      'Läuft · 2 Probleme'
+    )
   })
 })
 

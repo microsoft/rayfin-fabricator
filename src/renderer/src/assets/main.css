@@ -143,6 +143,22 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* Japanese: Latin text keeps the app's font; kana and kanji use a Japanese
+   UI font rather than whatever the system falls back to. */
+html:lang(ja) body {
+  font-family:
+    'Segoe UI Variable Display',
+    'Segoe UI',
+    'Yu Gothic UI',
+    'Meiryo UI',
+    'Hiragino Sans',
+    'Hiragino Kaku Gothic ProN',
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    sans-serif;
+}
+
 code {
   font-family: 'Cascadia Code', 'Consolas', ui-monospace, monospace;
   background: var(--code-inline-bg);
@@ -934,6 +950,26 @@ code {
   background: var(--bg-elev-2);
 }
 
+/* The terminal's button stays lit while the open project's terminal shows. */
+.statusbar-terminal--open {
+  color: var(--text);
+  background: var(--bg-elev-2);
+}
+
+/* How many of the open project's shells are running. */
+.statusbar-count {
+  min-width: 16px;
+  padding: 0 4px;
+  font-size: 10.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 14px;
+  text-align: center;
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+
 /* The bar's menus (interface zoom): a native select with its arrow swapped for
    the bar's chevron, sized to the chosen option so the chevron sits right after it. */
 .statusbar-menu {
@@ -1123,6 +1159,41 @@ code {
 }
 .ver-update {
   width: 100%;
+}
+/* A release newer than the recommended one, such as a preview: offered with why it needs care. */
+.ver-newer {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+.ver-newer--below {
+  padding-top: 11px;
+  border-top: 1px solid var(--border);
+}
+.ver-warnings {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ver-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text);
+}
+.ver-warning::before {
+  content: '';
+  flex: none;
+  width: 6px;
+  height: 6px;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: var(--pending);
 }
 .ver-note {
   margin: 0;
@@ -2237,10 +2308,6 @@ code {
   animation-delay: 0.12s;
 }
 
-.setup-finish.is-ready {
-  border-left: 2px solid var(--ok);
-}
-
 .setup-finish-copy {
   min-width: 0;
 }
@@ -2428,18 +2495,87 @@ code {
   color: var(--text-dim);
 }
 
+/* The page's one call to action: a step larger than other buttons. */
 .setup-enter {
   flex: none;
-  height: 36px;
-  padding: 0 16px;
-  font-size: 13px;
+  height: 40px;
+  padding: 0 16px 0 20px;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.005em;
 }
 
+/* Once setup is done, its arrow passes through every few seconds, so the way on is
+   clear: one arrow slides out to the right as the next slides in from the left. */
 .setup-enter-arrow {
-  transition: transform 0.16s ease;
+  position: relative;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  overflow: hidden;
+  transition: transform 0.18s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
-.setup-enter:not(:disabled):hover .setup-enter-arrow {
+
+.setup-enter-arrow-ico {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  stroke-width: 2.2;
+}
+
+.setup-enter-arrow-next {
+  transform: translateX(-125%);
+}
+
+.setup-enter:not(:disabled) .setup-enter-arrow-ico {
+  animation: setup-enter-arrow-out 3s cubic-bezier(0.65, 0, 0.35, 1) infinite;
+}
+
+.setup-enter:not(:disabled) .setup-enter-arrow-next {
+  animation-name: setup-enter-arrow-in;
+}
+
+.setup-enter:not(:disabled):hover .setup-enter-arrow,
+.setup-enter:not(:disabled):focus-visible .setup-enter-arrow {
   transform: translateX(3px);
+}
+
+@keyframes setup-enter-arrow-out {
+  0%,
+  72% {
+    transform: translateX(0);
+  }
+  88%,
+  100% {
+    transform: translateX(125%);
+  }
+}
+
+@keyframes setup-enter-arrow-in {
+  0%,
+  72% {
+    transform: translateX(-125%);
+  }
+  88%,
+  100% {
+    transform: translateX(0);
+  }
+}
+
+.setup-enter:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .setup-enter-arrow {
+    transition: none;
+  }
+  .setup-enter:not(:disabled) .setup-enter-arrow-ico {
+    animation: none;
+  }
 }
 
 /* Process-log drawer */
@@ -5535,7 +5671,9 @@ code {
 }
 
 .preview-url {
-  flex: 0 1 auto;
+  /* The address gives way first, so a short name in Preview as, such as You,
+     isn't cut short while there's still address to shorten. */
+  flex: 0 100000 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -5592,52 +5730,6 @@ code {
   background: var(--bg);
 }
 
-/* Design mode ("visual chat") bar under the preview toolbar: status, preview
-   width, Theme / Polish, and Send / Done. */
-.design-bar {
-  container-type: inline-size;
-  container-name: designbar;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 6px 12px;
-  padding: 5px 12px;
-  border-bottom: 1px solid var(--border);
-  background: color-mix(in srgb, var(--accent) 7%, var(--bg-elev));
-}
-.design-bar-status {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  font-size: 12px;
-  color: var(--text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.design-bar-dot {
-  flex: none;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
-}
-.design-bar-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-left: auto;
-}
-@container designbar (max-width: 520px) {
-  .design-bar .seg-btn-label {
-    display: none;
-  }
-}
 /* A device-width preview (Tablet / Phone) sits centered in the stage. */
 .preview-webview-host.preview-webview-host--device {
   flex: 0 0 auto;
@@ -6786,6 +6878,11 @@ button.deploy-trouble-ray:focus-visible {
   font-family: var(--font-mono);
   font-size: 11.5px;
   color: var(--accent);
+}
+.dep-id {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-dim);
 }
 .dep-dim {
   color: var(--text-dim);
@@ -10008,6 +10105,15 @@ button.deploy-trouble-ray:focus-visible {
   background: var(--set-raised);
   box-shadow: var(--shadow-sm);
 }
+/* The Language picker, the height of the segmented pickers around it. */
+.set-card .set-select {
+  height: 28px;
+  padding: 0 30px 0 10px;
+  font-size: 12.5px;
+  background-color: var(--set-raised);
+  background-position: right 9px center;
+  background-size: 12px 12px;
+}
 /* The workspace folder, on its own line under its row. */
 .set-path {
   flex: 1 0 100%;
@@ -10022,6 +10128,23 @@ button.deploy-trouble-ray:focus-visible {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* Custom instructions: room for a few lines of guidance, with its count. */
+.custom-instructions-text {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 160px;
+  line-height: 1.5;
+  resize: vertical;
+}
+.custom-instructions-hint {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+.custom-instructions-count {
+  flex: none;
+  font-variant-numeric: tabular-nums;
 }
 .switch {
   position: relative;
@@ -12255,7 +12378,7 @@ select.ws-input:disabled {
 .create-shell {
   width: 100%;
   max-width: 760px;
-  padding: 36px 28px 52px;
+  padding: 36px 28px;
   display: flex;
   flex-direction: column;
   gap: 22px;
@@ -12391,13 +12514,31 @@ select.ws-input:disabled {
   border-color: var(--accent);
 }
 
+/* The actions stay in view however long the form gets, such as with a long
+   list of examples: pinned to the bottom of the screen while it scrolls, with
+   what's under them fading out above. */
 .create-foot {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
   display: flex;
   justify-content: flex-end;
   gap: 10px;
   margin-top: 4px;
-  padding-top: 18px;
+  padding: 18px 0 16px;
   border-top: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.create-foot::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 1px);
+  height: 18px;
+  background: linear-gradient(to bottom, transparent, var(--bg));
+  pointer-events: none;
 }
 
 /* Create progress — a phased, always-in-motion status for the slow scaffold +
@@ -13076,6 +13217,7 @@ select.ws-input:disabled {
   flex: none;
   margin-top: 2px;
   padding-top: 14px;
+  padding-bottom: 0;
 }
 
 @media (max-width: 680px) {
