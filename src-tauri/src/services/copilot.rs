@@ -2339,6 +2339,7 @@ pub(crate) mod tests {
       ("auth.getStatus", json!({ "result": { "isAuthenticated": true } })),
       ("session.detach", json!({ "result": {} })),
       ("session.resume", json!({ "result": { "sessionId": "thread" } })),
+      ("session.eventLog.registerInterest", json!({ "result": {} })),
       ("session.skills.reload", json!({ "result": {} })),
       ("session.model.switchTo", json!({ "result": {} })),
     ]);
@@ -2349,10 +2350,11 @@ pub(crate) mod tests {
       guidance: Some(Guidance::Local),
       iq: IqConfig::default(),
       mcp: String::new(),
+      custom_instructions: None,
     });
     let choice = ModelChoice::of(m("claude-sonnet-5.5"), m("medium"));
     manager.turn_session(
-      "project", ".", "thread", choice, None, None, Vec::new(), Some(Guidance::FabricBacked), None, IqConfig::default(), McpServers::default(),
+      "project", ".", "thread", choice, None, None, Vec::new(), Some(Guidance::FabricBacked), None, IqConfig::default(), McpServers::default(), None,
     ).await.unwrap();
     let requests = server.await.unwrap();
     let resume = &requests[3]["params"];
