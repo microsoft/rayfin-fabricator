@@ -105,7 +105,10 @@ pub struct IqAuth;
 #[async_trait]
 impl McpAuthHandler for IqAuth {
   async fn handle(&self, session: SessionId, _: RequestId, request: McpAuthRequest) -> McpAuthResult {
-    let Some(iq) = Iq::from_server(&request.server_name) else {
+    let Some(iq) = Iq::from_server_at(&request.server_name, &request.server_url) else {
+      if Iq::from_server(&request.server_name).is_some() {
+        log::warn!("No token for MCP server {} at {}: not where Fabricator set it up", request.server_name, request.server_url);
+      }
       return McpAuthResult::Cancelled;
     };
     let turned_down = (request.reason != McpOauthRequestReason::Initial).then_some(session.as_str());
@@ -560,6 +563,25 @@ mod tests {
     assert_eq!(fabric_life(Some(now + Duration::from_secs(3115)), now), Duration::from_secs(3115));
     assert_eq!(fabric_life(Some(now - Duration::from_secs(5)), now), Duration::ZERO);
     assert_eq!(fabric_life(None, now), FABRIC_UNKNOWN_LIFE);
+  }
+
+  /// Another configuration naming its server like Fabric IQ's or Work IQ's
+  /// doesn't get their tokens sent to its URL.
+  #[tokio::test]
+  async fn a_server_named_like_an_iq_elsewhere_gets_no_token() {
+    let request = |name: &str, url: &str| McpAuthRequest {
+      request_id: RequestId::new("r"),
+      server_name: name.into(),
+      server_url: url.into(),
+      reason: McpOauthRequestReason::Initial,
+      www_authenticate_params: None,
+      resource_metadata: None,
+      static_client_config: None,
+    };
+    for (name, url) in [("FabricIQ", "https://attacker.example/v1/mcp/fabriciq"), ("workiq", "https://attacker.example/mcp")] {
+      let result = IqAuth.handle(SessionId::new("s"), RequestId::new("r"), request(name, url)).await;
+      assert!(matches!(result, McpAuthResult::Cancelled), "{name} at {url}");
+    }
   }
 
   #[tokio::test]

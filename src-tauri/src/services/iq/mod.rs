@@ -68,6 +68,21 @@ impl Iq {
     Iq::ALL.into_iter().find(|iq| iq.server() == name)
   }
 
+  /// Its MCP endpoint.
+  fn url(self) -> &'static str {
+    match self {
+      Iq::Fabric => "https://fabriciq.svc.cloud.microsoft/v1/mcp/fabriciq",
+      Iq::Work => "https://workiq.svc.cloud.microsoft/mcp",
+    }
+  }
+
+  /// The one whose server is named `name` and is at `url`. Another
+  /// configuration could name its own server like one of these, so the name
+  /// alone mustn't get it their tokens.
+  pub(crate) fn from_server_at(name: &str, url: &str) -> Option<Iq> {
+    Iq::from_server(name).filter(|iq| url.trim_end_matches('/') == iq.url())
+  }
+
   /// Its id among a project's chat plugins.
   pub fn plugin(self) -> &'static str {
     match self {
@@ -92,13 +107,13 @@ impl Iq {
     let mut server = McpHttpServerConfig::default();
     match self {
       Iq::Fabric => {
-        server.url = "https://fabriciq.svc.cloud.microsoft/v1/mcp/fabriciq".into();
+        server.url = self.url().into();
         // Pins the version of its tools Fabricator was built against.
         server.headers.insert("X-Variants".into(), "Fabric.Routing.FabricIQ.V1".into());
         server.timeout = Some(180_000);
       }
       Iq::Work => {
-        server.url = "https://workiq.svc.cloud.microsoft/mcp".into();
+        server.url = self.url().into();
         server.tools = Some(WORK_IQ_READ_TOOLS.iter().map(|t| t.to_string()).collect());
         // `ask` reasons over Microsoft 365 and can take minutes.
         server.timeout = Some(300_000);
@@ -616,6 +631,18 @@ mod tests {
     assert_eq!(WORK.permits("FabricIQ", "ExecuteQuery"), Some(false));
     assert_eq!(FABRIC.permits("workiq", "fetch"), Some(false));
     assert_eq!(BOTH.permits("rayfin", "search_docs"), None);
+  }
+
+  #[test]
+  fn a_server_is_fabric_or_work_iq_by_its_name_and_url() {
+    let fabric = "https://fabriciq.svc.cloud.microsoft/v1/mcp/fabriciq";
+    assert_eq!(Iq::from_server_at("FabricIQ", fabric), Some(Iq::Fabric));
+    assert_eq!(Iq::from_server_at("FabricIQ", &format!("{fabric}/")), Some(Iq::Fabric));
+    assert_eq!(Iq::from_server_at("workiq", "https://workiq.svc.cloud.microsoft/mcp"), Some(Iq::Work));
+    assert_eq!(Iq::from_server_at("FabricIQ", "https://attacker.example/v1/mcp/fabriciq"), None);
+    assert_eq!(Iq::from_server_at("FabricIQ", "https://fabriciq.svc.cloud.microsoft.attacker.example/v1/mcp/fabriciq"), None);
+    assert_eq!(Iq::from_server_at("FabricIQ", "https://workiq.svc.cloud.microsoft/mcp"), None);
+    assert_eq!(Iq::from_server_at("other", fabric), None);
   }
 
   #[test]
