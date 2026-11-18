@@ -399,8 +399,8 @@
     "config/stale-feature-flags": {
       "title": "Una marca de característica activa una funcionalidad que ya no la necesita",
       "summary": "`RAYFIN_FEATURE_FLAGS` solo incluye funcionalidades que aún necesitan una marca",
-      "why": "Functions y los conectores están disponibles con carácter general desde Rayfin 1.36, así que `functions` y `connectors` en `RAYFIN_FEATURE_FLAGS` no hacen nada. Solo `storage` sigue usando la marca.",
-      "fix": "Quita `functions` y `connectors` de `RAYFIN_FEATURE_FLAGS`, y también la propia variable si no queda nada."
+      "why": "Functions y los conectores están disponibles con carácter general desde Rayfin 1.36, y Storage desde Rayfin 2.0, así que `functions` y `connectors` en `RAYFIN_FEATURE_FLAGS` no hacen nada, y tampoco `storage` en una aplicación con Rayfin 2.0 o posterior.",
+      "fix": "Quítalas de `RAYFIN_FEATURE_FLAGS`, y también la propia variable si no queda nada."
     },
     "platform/cli-outdated": {
       "title": "La CLI de Rayfin no está actualizada",
@@ -423,7 +423,7 @@
     "platform/sdk-local-range": {
       "title": "Los paquetes de Rayfin no están fijados en una versión que Fabricator ejecute localmente",
       "summary": "Los paquetes de Rayfin se mantienen en una línea de versiones que Fabricator ejecuta en este dispositivo",
-      "why": "El back-end local de Fabricator ejecuta algunas líneas de versiones de Rayfin, como 1.36.x y 2.0.x, y los proyectos nuevos fijan todos los paquetes `@microsoft/rayfin-*` en una de ellas con un intervalo `~` (`~1.36.0`). Con una versión anterior, partes de la aplicación pueden no funcionar bien en este dispositivo, y la vista previa de una aplicación publicada usa en su lugar su back-end publicado. Un intervalo `^`, o una etiqueta como `latest`, permite que la siguiente instalación lleve la aplicación a otra versión que nadie ha elegido. Una versión más reciente que elijas tú sigue ejecutándose en este dispositivo, y la vista previa avisa de que algunas cosas podrían no funcionar como se espera.",
+      "why": "El back-end local de Fabricator ejecuta algunas líneas de versiones de Rayfin, como 1.36.x y 2.0.x, y los proyectos nuevos fijan todos los paquetes `@microsoft/rayfin-*` en una de ellas con un intervalo `~` (`~2.0.0`). Con una versión anterior, partes de la aplicación pueden no funcionar bien en este dispositivo, y la vista previa de una aplicación publicada usa en su lugar su back-end publicado. Un intervalo `^`, o una etiqueta como `latest`, permite que la siguiente instalación lleve la aplicación a otra versión que nadie ha elegido. Una versión más reciente que elijas tú sigue ejecutándose en este dispositivo, y la vista previa avisa de que algunas cosas podrían no funcionar como se espera.",
       "fix": "Establece todos los paquetes `@microsoft/rayfin-*` de package.json en el intervalo `~` de una línea que Fabricator ejecute, como `~1.36.0` o `~2.0.0`, y ejecuta `npm install` para que todos se resuelvan en ella."
     },
     "platform/connector-version": {
@@ -483,8 +483,8 @@
     "platform/experimental-services": {
       "title": "La aplicación usa Rayfin Storage, que es experimental",
       "summary": "Se señala la disponibilidad de Storage, que es experimental",
-      "why": "Storage es experimental: no está disponible en todas las regiones ni inquilinos de Fabric, y `@microsoft/rayfin-storage` puede cambiar mucho entre versiones.",
-      "fix": "Antes de depender del almacenamiento, confirma que la publicación con almacenamiento se completa correctamente en tu área de trabajo de destino (también funciona en la vista previa local) y mantén todos los paquetes de Rayfin en la misma versión."
+      "why": "Antes de Rayfin 2.0, Storage es experimental: no está disponible en todas las regiones ni inquilinos de Fabric, y `@microsoft/rayfin-storage` puede cambiar mucho entre versiones. Desde Rayfin 2.0, está disponible con carácter general.",
+      "fix": "Actualiza la aplicación a Rayfin 2.0, donde Storage está disponible con carácter general. Mientras tanto, antes de depender del almacenamiento, confirma que la publicación con almacenamiento se completa correctamente en tu área de trabajo de destino (también funciona en la vista previa local) y mantén todos los paquetes de Rayfin en la misma versión."
     },
     "platform/deprecated-fabric-callback": {
       "title": "La aplicación usa el puente de devolución de llamada de Fabric, que está en desuso",
