@@ -105,7 +105,7 @@ flowchart TD
 
 ## The local backend
 
-rayfin-local is a local Rayfin backend: it answers the same requests as an app's backend in Fabric, so the app and its Rayfin SDK run unchanged. It runs some lines of Rayfin releases, such as 1.36.x and 2.0.x; on another release, it runs the app anyway and warns that some things may not work as expected. Fabricator bundles it next to its own executable, signed like Fabricator, and pins the version each Fabricator release uses. Setup's **Local backend** item checks that it runs. Its source and its full list of [differences from Fabric](https://github.com/spatney/rayfin-local/blob/main/docs/differences.md) are in the [rayfin-local repository](https://github.com/spatney/rayfin-local).
+rayfin-local is a local Rayfin backend: it answers the same requests as an app's backend in Fabric, so the app and its Rayfin SDK run unchanged. It runs some lines of Rayfin releases, such as 1.36.x and 2.0.x; on another release, it runs the app anyway and warns that some things may not work as expected. Fabricator bundles it next to its own executable, signed like Fabricator, and pins the version each Fabricator release uses. Setup's **Local backend** item checks that it runs. Its source and its full list of [differences from Fabric](https://github.com/microsoft/rayfin-local/blob/main/docs/differences.md) are in the [rayfin-local repository](https://github.com/microsoft/rayfin-local).
 
 - **One per project.** For each project, team apps included, Fabricator runs `rayfin-local serve --json` in the project folder, with no console window. It reads the backend's events to show its state, keeps its output for **Help** and diagnostics, and restarts it after a crash, up to three times in two minutes. At most two projects run at once: the one you have open and the one before it. When Fabricator exits or installs an update, it stops them all.
 - **On this computer only.** The backend listens on `localhost`, by default on port 7171 and the app's Vite dev server on port 5173, and moves to the next free port when one is busy. Fabricator controls it through a control API that answers only on this computer, and only to a secret that changes every time the backend starts.
@@ -115,7 +115,7 @@ rayfin-local is a local Rayfin backend: it answers the same requests as an app's
 
 ### Seed data
 
-A project's seed data is in its `rayfin/seed` folder, in the format rayfin-local reads. Its [seed data docs](https://github.com/spatney/rayfin-local/blob/main/docs/seed-data.md) have the details.
+A project's seed data is in its `rayfin/seed` folder, in the format rayfin-local reads. Its [seed data docs](https://github.com/microsoft/rayfin-local/blob/main/docs/seed-data.md) have the details.
 
 | Path | What it holds |
 | --- | --- |

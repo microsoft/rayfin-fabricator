@@ -51,7 +51,7 @@ Rayfin is Microsoft's **Backend-as-a-Service for the agentic era**. You define y
 5. **[Build with your team](https://spatney.github.io/rayfin-fabricator/docs/team)** *(experimental)*. Team workspaces keep your team's apps in a private GitHub repository, give everyone a personal preview, and publish to Fabric through a pipeline.
 6. **[Use your own API keys](https://spatney.github.io/rayfin-fabricator/docs/build/your-own-api-keys)**. Add Claude, GPT, Grok and Gemini models on your own Anthropic, OpenAI, xAI or Google key to the model pickers, next to your Copilot models, in chat and the Advisor.
 7. **[Migrate a Power BI report](https://spatney.github.io/rayfin-fabricator/docs/build/migrate-power-bi)** *(experimental)*. Turn a report into an app that reads its semantic model live, while Copilot rebuilds its pages, visuals and filters one page at a time with [Graphein](https://github.com/spatney/graphein) charts.
-8. **[Develop on this computer](https://spatney.github.io/rayfin-fabricator/docs/build/local-development)**. Your apps and their backend run on this computer while you build, on the bundled [rayfin-local](https://github.com/spatney/rayfin-local), and you publish to Microsoft Fabric when you choose.
+8. **[Develop on this computer](https://spatney.github.io/rayfin-fabricator/docs/build/local-development)**. Your apps and their backend run on this computer while you build, on the bundled [rayfin-local](https://github.com/microsoft/rayfin-local), and you publish to Microsoft Fabric when you choose.
 
 ## Download
 
