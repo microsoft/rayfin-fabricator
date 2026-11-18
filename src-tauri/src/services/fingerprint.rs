@@ -95,6 +95,7 @@ pub fn fingerprint(project_path: &str) -> String {
 /// [`fingerprint`] of the given project-relative files and folders, those
 /// that exist, for what depends on more of the app than `rayfin/` and `src/`
 /// (a workspace app keeps its code in packages). A part inside another counts once.
+#[cfg(test)]
 pub fn fingerprint_parts(project_path: &str, parts: &[String]) -> String {
   let root = Path::new(project_path);
   let mut parts: Vec<String> =

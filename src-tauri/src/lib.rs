@@ -631,7 +631,7 @@ pub fn run() {
         services::local_backend::kill_all(app);
         services::apps::kill_all(app);
         if let Some(terminals) = app.try_state::<services::terminal::Terminals>() {
-          terminals.kill_all(None);
+          terminals.shutdown();
         }
       }
     });

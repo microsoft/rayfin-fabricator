@@ -10,7 +10,10 @@
 //! The renderer pauses the output while xterm.js is behind (a command printing
 //! a flood): the reader stops reading, the PTY's buffer fills and the command
 //! waits, as in any terminal. Closing a terminal ends the shell and what it
-//! started; so does quitting Fabricator.
+//! started; so does quitting Fabricator (see [`Terminals::shutdown`]).
+//!
+//! Locks here recover from poisoning: a panicking thread must not take every
+//! later terminal call, and the cleanup when Fabricator quits, down with it.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -18,8 +21,8 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use tauri::ipc::Channel;
@@ -40,7 +43,8 @@ const MAX_BATCH: usize = 256 * 1024;
 /// How long a shell that ended has to hand over the rest of its output. Its
 /// background jobs may hold the PTY open for much longer.
 const DRAIN_GRACE: Duration = Duration::from_secs(2);
-/// How long a closed terminal's shell has to end on its hangup before it's killed.
+/// How long a closed terminal's shell, and what it started, has to end on its
+/// hangup before it's killed.
 #[cfg(unix)]
 const HANGUP_GRACE: Duration = Duration::from_secs(1);
 
@@ -66,7 +70,7 @@ pub struct Terminals {
 impl Terminals {
   /// Start `launch.shell`, streaming what it prints, then how it ended, to `events`.
   pub fn spawn(&self, launch: Launch, events: Channel<TerminalEvent>) -> Result<TerminalInfo, String> {
-    if self.sessions.lock().unwrap().contains_key(&launch.id) {
+    if self.sessions.lock().unwrap_or_else(PoisonError::into_inner).contains_key(&launch.id) {
       return Err(t!("services.terminal.alreadyOpen"));
     }
     let size = pty_size(launch.cols, launch.rows);
@@ -114,7 +118,7 @@ impl Terminals {
     });
     let id = launch.id;
     // Listed before the waiter can end it, which takes it off the list.
-    self.sessions.lock().unwrap().insert(id.clone(), session.clone());
+    self.sessions.lock().unwrap_or_else(PoisonError::into_inner).insert(id.clone(), session.clone());
 
     let (chunks, received) = mpsc::channel::<Vec<u8>>();
     let (drained, all_sent) = mpsc::channel::<()>();
@@ -131,7 +135,7 @@ impl Terminals {
         "wait",
         Box::new(move || {
           wait_for_exit(&waiting, child, all_sent);
-          let mut open = sessions.lock().unwrap();
+          let mut open = sessions.lock().unwrap_or_else(PoisonError::into_inner);
           if open.get(&waiting_id).is_some_and(|s| Arc::ptr_eq(s, &waiting)) {
             open.remove(&waiting_id);
           }
@@ -141,7 +145,7 @@ impl Terminals {
     for (name, run) in threads {
       if let Err(e) = std::thread::Builder::new().name(format!("terminal-{name}")).spawn(run) {
         session.kill();
-        self.sessions.lock().unwrap().remove(&id);
+        self.sessions.lock().unwrap_or_else(PoisonError::into_inner).remove(&id);
         return Err(t!("services.terminal.startFailed", error = e));
       }
     }
@@ -158,7 +162,7 @@ impl Terminals {
   /// Type into the terminal: keystrokes, a paste, or the terminal's replies to the shell.
   pub fn write(&self, id: &str, data: &str) -> Result<(), String> {
     let session = self.get(id)?;
-    let input = session.input.lock().unwrap();
+    let input = session.input.lock().unwrap_or_else(PoisonError::into_inner);
     match input.as_ref() {
       Some(input) if input.send(data.as_bytes().to_vec()).is_ok() => Ok(()),
       _ => Err(ended()),
@@ -168,7 +172,7 @@ impl Terminals {
   /// The terminal's size changed: the shell hears of it and redraws.
   pub fn resize(&self, id: &str, cols: u16, rows: u16) -> Result<(), String> {
     let session = self.get(id)?;
-    let master = session.master.lock().unwrap();
+    let master = session.master.lock().unwrap_or_else(PoisonError::into_inner);
     match master.as_ref() {
       Some(master) => master.resize(pty_size(cols, rows)).map_err(|e| t!("services.terminal.resizeFailed", error = e)),
       None => Ok(()),
@@ -190,7 +194,7 @@ impl Terminals {
 
   /// End every terminal of `project_id`, or every terminal.
   pub fn kill_all(&self, project_id: Option<&str>) {
-    let open: Vec<Arc<Session>> = self.sessions.lock().unwrap().values().cloned().collect();
+    let open: Vec<Arc<Session>> = self.sessions.lock().unwrap_or_else(PoisonError::into_inner).values().cloned().collect();
     for session in open {
       if project_id.is_none_or(|id| id == session.project_id) {
         session.kill();
@@ -198,8 +202,37 @@ impl Terminals {
     }
   }
 
+  /// End every terminal before Fabricator exits, and return once they're ended.
+  /// [`Terminals::kill_all`] escalates from a thread the exiting app doesn't
+  /// wait for; this hangs every terminal up, waits at most [`HANGUP_GRACE`] in
+  /// all, then kills what's left, including jobs that ignore the hangup.
+  pub fn shutdown(&self) {
+    let open: Vec<Arc<Session>> = self.sessions.lock().unwrap_or_else(PoisonError::into_inner).values().cloned().collect();
+    #[cfg(windows)]
+    for session in open {
+      session.kill();
+    }
+    #[cfg(unix)]
+    {
+      let hung: Vec<(Arc<Session>, Vec<i32>)> = open
+        .into_iter()
+        .map(|session| {
+          let groups = session.hang_up();
+          (session, groups)
+        })
+        .collect();
+      let deadline = Instant::now() + HANGUP_GRACE;
+      while Instant::now() < deadline && hung.iter().any(|(session, _)| !session.exited.load(Ordering::Acquire)) {
+        std::thread::sleep(Duration::from_millis(20));
+      }
+      for (session, groups) in &hung {
+        session.finish_off(groups);
+      }
+    }
+  }
+
   fn get(&self, id: &str) -> Result<Arc<Session>, String> {
-    self.sessions.lock().unwrap().get(id).cloned().ok_or_else(ended)
+    self.sessions.lock().unwrap_or_else(PoisonError::into_inner).get(id).cloned().ok_or_else(ended)
   }
 }
 
@@ -264,14 +297,14 @@ struct Outlet {
 
 impl Session {
   fn emit(&self, event: TerminalEvent) {
-    let outlet = self.outlet.lock().unwrap();
+    let outlet = self.outlet.lock().unwrap_or_else(PoisonError::into_inner);
     if !outlet.ended {
       let _ = outlet.events.send(event);
     }
   }
 
   fn end(&self, code: Option<u32>) {
-    let mut outlet = self.outlet.lock().unwrap();
+    let mut outlet = self.outlet.lock().unwrap_or_else(PoisonError::into_inner);
     if !outlet.ended {
       outlet.ended = true;
       let _ = outlet.events.send(TerminalEvent::Exit { code });
@@ -281,7 +314,7 @@ impl Session {
   /// Close the PTY: Windows ends what's still attached to it, Unix hangs it up.
   fn close_pty(&self) {
     // Closing a pseudoconsole can wait on its host, so not under the lock.
-    let master = self.master.lock().unwrap().take();
+    let master = self.master.lock().unwrap_or_else(PoisonError::into_inner).take();
     drop(master);
   }
 
@@ -296,36 +329,85 @@ impl Session {
       if let Some(pid) = self.pid {
         process::kill_tree(pid);
       }
-      let _ = self.killer.lock().unwrap().kill();
+      let _ = self.killer.lock().unwrap_or_else(PoisonError::into_inner).kill();
       self.close_pty();
     }
     #[cfg(unix)]
     {
-      // A hangup, as when a terminal window closes: the shell passes it on to its
-      // jobs, and the command in the foreground hears it directly. What ignores
-      // it is killed after a moment, unless the shell has ended by then.
-      let foreground = self.master.lock().unwrap().as_ref().and_then(|master| master.process_group_leader());
-      let _ = self.killer.lock().unwrap().kill();
-      if let Some(group) = foreground {
-        process::signal("-HUP", &format!("-{group}"));
-      }
-      self.close_pty();
+      // What ignores the hangup is killed after a moment.
+      let groups = self.hang_up();
       let session = self.clone();
       std::thread::spawn(move || {
         std::thread::sleep(HANGUP_GRACE);
-        if session.exited.load(Ordering::Acquire) {
-          return;
-        }
-        if let Some(group) = foreground {
-          process::signal("-KILL", &format!("-{group}"));
-        }
-        if let Some(pid) = session.pid {
-          process::kill_tree(pid);
-        }
+        session.finish_off(&groups);
       });
     }
   }
+
+  /// A hangup, as when a terminal window closes: the shell passes it on to its
+  /// jobs, and the command in the foreground hears it directly. Returns the
+  /// process groups on the terminal, found first: once the shell ends they're
+  /// no longer tied to it.
+  #[cfg(unix)]
+  fn hang_up(&self) -> Vec<i32> {
+    let (foreground, tty) = {
+      let master = self.master.lock().unwrap_or_else(PoisonError::into_inner);
+      let master = master.as_ref();
+      (master.and_then(|m| m.process_group_leader()), master.and_then(|m| m.tty_name()))
+    };
+    let mut groups: Vec<i32> = tty.map(|tty| groups_on(&tty)).unwrap_or_default();
+    groups.extend(foreground);
+    groups.extend(self.pid.and_then(|pid| i32::try_from(pid).ok()));
+    groups.retain(|group| *group > 1);
+    groups.sort_unstable();
+    groups.dedup();
+    if !self.exited.load(Ordering::Acquire) {
+      let _ = self.killer.lock().unwrap_or_else(PoisonError::into_inner).kill();
+    }
+    if let Some(group) = foreground {
+      process::signal("-HUP", &format!("-{group}"));
+    }
+    self.close_pty();
+    groups
+  }
+
+  /// Kill `groups` (from [`Session::hang_up`]), jobs that ignored the hangup
+  /// among them, and the shell if it's still running.
+  #[cfg(unix)]
+  fn finish_off(&self, groups: &[i32]) {
+    let own = i32::try_from(std::process::id()).unwrap_or(0);
+    for group in groups.iter().filter(|group| **group != own) {
+      process::signal("-KILL", &format!("-{group}"));
+    }
+    if !self.exited.load(Ordering::Acquire) {
+      if let Some(pid) = self.pid {
+        process::kill_tree(pid);
+      }
+    }
+  }
 }
+
+/// The process groups of the processes whose controlling terminal is `tty`.
+#[cfg(unix)]
+fn groups_on(tty: &std::path::Path) -> Vec<i32> {
+  let name = tty.strip_prefix("/dev").unwrap_or(tty);
+  let Ok(listed) = std::process::Command::new(PS)
+    .arg("-t")
+    .arg(name)
+    .args(["-o", "pgid="])
+    .stdin(std::process::Stdio::null())
+    .stderr(std::process::Stdio::null())
+    .output()
+  else {
+    return Vec::new();
+  };
+  String::from_utf8_lossy(&listed.stdout).split_whitespace().filter_map(|group| group.parse().ok()).collect()
+}
+
+#[cfg(target_os = "macos")]
+const PS: &str = "/bin/ps";
+#[cfg(all(unix, not(target_os = "macos")))]
+const PS: &str = "ps";
 
 /// Output held while the renderer catches up.
 #[derive(Default)]
@@ -336,12 +418,12 @@ struct Flow {
 
 impl Flow {
   fn set(&self, paused: bool) {
-    *self.paused.lock().unwrap() = paused;
+    *self.paused.lock().unwrap_or_else(PoisonError::into_inner) = paused;
     self.changed.notify_all();
   }
 
   fn wait_while_paused(&self) {
-    let mut paused = self.paused.lock().unwrap();
+    let mut paused = self.paused.lock().unwrap_or_else(PoisonError::into_inner);
     while *paused {
       paused = self.changed.wait(paused).unwrap();
     }
@@ -398,7 +480,7 @@ fn send_output(session: &Session, received: mpsc::Receiver<Vec<u8>>, drained: mp
 fn wait_for_exit(session: &Session, mut child: Box<dyn Child + Send + Sync>, all_sent: mpsc::Receiver<()>) {
   let code = child.wait().ok().map(|status| status.exit_code());
   session.exited.store(true, Ordering::Release);
-  session.input.lock().unwrap().take();
+  session.input.lock().unwrap_or_else(PoisonError::into_inner).take();
   session.flow.set(false);
   // ConPTY keeps the output open until the pseudoconsole closes.
   session.close_pty();
