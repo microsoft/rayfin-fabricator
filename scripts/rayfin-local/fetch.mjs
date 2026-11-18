@@ -9,6 +9,8 @@
 // Downloads the release that rayfin-local.json pins, checks the archive against the pinned
 // SHA-256 and unpacks it with the system tar. A stamp file next to the binary skips the
 // download while the binary matches the pin, so a binary signed after the fetch stays signed.
+// A target can set its own "repository" and "version", for a platform the pinned repository
+// doesn't publish yet; otherwise it gets the top-level ones.
 //   --target <triple>  Rust target triple. Defaults to TAURI_ENV_TARGET_TRIPLE, else rustc's host.
 //   --optional         Warn instead of failing, and skip targets rayfin-local.json doesn't pin
 //                      (such as Linux). npm's postinstall runs it this way.
@@ -295,29 +297,36 @@ async function installRelease(pin, entry, { triple, binary, stampFile, force }) 
       `targets.${triple} in ${rel(PIN_FILE)} needs an "archive" file name and its 64-character hex "sha256".`
     )
   }
+  const repository = entry.repository ?? pin.repository
+  const version = entry.version ?? pin.version
+  if (!SAFE_NAME.test(version) || !/^[\w.-]+\/[\w.-]+$/.test(repository)) {
+    throw new Error(
+      `targets.${triple} in ${rel(PIN_FILE)} has a "version" or "repository" (owner/name) that isn't valid.`
+    )
+  }
   const expected = {
     source: 'release',
-    repository: pin.repository,
-    version: pin.version,
+    repository,
+    version,
     target: triple,
     archive: entry.archive,
     sha256: entry.sha256.toLowerCase()
   }
   if (!force && fs.existsSync(binary) && stampMatches(readStamp(stampFile), expected)) {
-    log(`rayfin-local ${pin.version} for ${triple} is up to date (${rel(binary)}).`)
+    log(`rayfin-local ${version} for ${triple} is up to date (${rel(binary)}).`)
     return
   }
 
-  const releaseUrl = `https://github.com/${pin.repository}/releases/download/v${pin.version}`
+  const releaseUrl = `https://github.com/${repository}/releases/download/v${version}`
   const url = `${releaseUrl}/${entry.archive}`
-  log(`Downloading rayfin-local ${pin.version} for ${triple}...`)
+  log(`Downloading rayfin-local ${version} (${repository}) for ${triple}...`)
   let archive
   try {
     archive = await download(url)
   } catch (error) {
     const hint =
       error.status === 404
-        ? `Check "version" and targets.${triple}.archive in ${rel(PIN_FILE)} against the release: https://github.com/${pin.repository}/releases/tag/v${pin.version}`
+        ? `Check "version" and targets.${triple}.archive in ${rel(PIN_FILE)} against the release: https://github.com/${repository}/releases/tag/v${version}`
         : `Check your internet connection. Behind a proxy, set HTTPS_PROXY and NODE_USE_ENV_PROXY=1 (Node 24 and later). To build without downloading, set ${OVERRIDE_VAR} to a rayfin-local binary.`
     throw new Error(`${error.message}\n${hint}`, { cause: error })
   }
@@ -350,7 +359,7 @@ async function installRelease(pin, entry, { triple, binary, stampFile, force }) 
     fs.rmSync(staging, { recursive: true, force: true })
   }
   writeStamp(stampFile, expected)
-  log(`Installed rayfin-local ${pin.version} for ${triple} at ${rel(binary)}.`)
+  log(`Installed rayfin-local ${version} (${repository}) for ${triple} at ${rel(binary)}.`)
 }
 
 async function main({ target, optional, force }) {

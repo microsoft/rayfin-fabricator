@@ -483,7 +483,7 @@
       "why": "Fabricator runs the app on this computer with a local backend that keeps its state in `.rayfin-local/`: the app's local database with its users and sessions (`db.sqlite`), signing keys (`keys/`), and the local values of your secrets (`secrets.json`). The folder's own `.gitignore`, a single `*` line, keeps all of it out of git. If that file is missing or changed, or git already tracks files in the folder, commits — including the ones Fabricator makes — carry them into git history.",
       "fix": "Restore `.rayfin-local/.gitignore` to a single `*` line (the local backend writes it again the next time it starts if it's missing), or add `.rayfin-local/` to the project's `.gitignore`. If git already tracks files there, untrack them with `git rm -r --cached .rayfin-local`, and rotate any real secrets that were committed.",
       "docs": [
-        { "title": "Local state and reset (rayfin-local)", "url": "https://github.com/spatney/rayfin-local#local-state-and-reset" },
+        { "title": "Local state and reset (rayfin-local)", "url": "https://github.com/microsoft/rayfin-local#local-state-and-reset" },
         { "title": "Generated and local files", "url": "https://rayfin.ai/docs/start/project-structure#generated-and-local-files" }
       ]
     },
@@ -702,7 +702,7 @@
       "check": "If the project has seed scripts (for example scripts/seed*.ts that use RayfinServerClient), flag writes to entities whose relevant action is only granted to signed-in users. Seed data in rayfin/seed (JSON and CSV files) isn't a seed script: Fabricator loads it on this computer whatever the permissions, so don't flag it.",
       "docs": [
         { "title": "No supported path for authenticated entities", "url": "https://rayfin.ai/docs/data/seeding#no-supported-path-for-authenticated-entities" },
-        { "title": "Seed data (rayfin-local)", "url": "https://github.com/spatney/rayfin-local/blob/main/docs/seed-data.md" }
+        { "title": "Seed data (rayfin-local)", "url": "https://github.com/microsoft/rayfin-local/blob/main/docs/seed-data.md" }
       ]
     },
     {
@@ -1099,7 +1099,7 @@
       "why": "Fabricator's local backend runs some lines of Rayfin releases, such as 1.36.x and 2.0.x, and new projects pin every `@microsoft/rayfin-*` package to one of them with a `~` range (`~2.0.0`). On an older release, parts of the app can misbehave on this computer, and a published app previews on its published backend instead. A `^` range, or a tag such as `latest`, lets the next install move the app to another release that nobody chose. A newer release that you choose still runs on this computer, and the preview says that some things might not work as expected.",
       "fix": "Set every `@microsoft/rayfin-*` package in package.json to the `~` range of a line Fabricator runs, such as `~1.36.0` or `~2.0.0`, and run `npm install` so they all resolve to it.",
       "docs": [
-        { "title": "SDK versions (rayfin-local)", "url": "https://github.com/spatney/rayfin-local/blob/main/docs/differences.md#platform" },
+        { "title": "SDK versions (rayfin-local)", "url": "https://github.com/microsoft/rayfin-local/blob/main/docs/differences.md#platform" },
         { "title": "SDK version notes", "url": "https://rayfin.ai/docs/reference/sdk#version-notes" }
       ]
     },
@@ -1158,7 +1158,7 @@
       "why": "Fabricator runs the app on this computer, where semantic model and SQL connectors (`fabric-semanticmodel`, `fabric-sqldatabase`, `fabric-warehouse`, `fabric-sqlanalytics`) run as you. Other types, such as `kusto`, run only on Fabric. Until the app is published, its calls to them fail in the preview. Once it's published, the preview uses the published app's backend instead of this computer's, so changes to the data model, functions and connectors show there only after you publish.",
       "fix": "Keep the connector if the app needs this data, and publish to try changes that use it. If the same data is also in a semantic model, warehouse or SQL database, a connector of that type runs in the local preview.",
       "docs": [
-        { "title": "Differences from Fabric (rayfin-local)", "url": "https://github.com/spatney/rayfin-local/blob/main/docs/differences.md" },
+        { "title": "Differences from Fabric (rayfin-local)", "url": "https://github.com/microsoft/rayfin-local/blob/main/docs/differences.md" },
         { "title": "KQL databases", "url": "https://rayfin.ai/docs/connectors/kusto" }
       ]
     },
